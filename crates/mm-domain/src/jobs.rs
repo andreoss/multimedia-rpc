@@ -168,6 +168,11 @@ pub trait JobNotifications: Send + Sync {
 }
 
 #[async_trait]
+pub trait CancelNotifications: Send + Sync {
+    async fn cancelled(&self) -> Result<JobId, JobStoreError>;
+}
+
+#[async_trait]
 pub trait JobRepository: Send + Sync {
     async fn create(&self, job: NewJob) -> Result<JobRecord, JobStoreError>;
     async fn get(&self, id: JobId) -> Result<Option<JobRecord>, JobStoreError>;

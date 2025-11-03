@@ -90,6 +90,10 @@ impl WorkerHandle {
     pub fn abort(self) {
         self.main.abort();
     }
+
+    pub async fn wait(self) {
+        let _ = self.main.await;
+    }
 }
 
 pub fn start(config: WorkerConfig) -> WorkerHandle {

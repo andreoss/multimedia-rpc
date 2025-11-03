@@ -1890,10 +1890,13 @@ dependencies = [
 name = "mmrpcd"
 version = "0.1.0"
 dependencies = [
+ "mm-domain",
  "mm-ffmpeg",
  "mm-jobstore",
+ "mm-proto",
  "mm-server",
  "mm-storage",
+ "mm-worker",
  "sqlx",
  "tokio",
  "tonic",

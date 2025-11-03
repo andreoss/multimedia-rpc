@@ -125,12 +125,20 @@ fn concat_spec() -> OpSpec {
 }
 
 fn new_job(owner_id: &str, request_id: &str) -> NewJob {
+    new_job_due(
+        owner_id,
+        request_id,
+        Some(SystemTime::now() + Duration::from_secs(3600)),
+    )
+}
+
+fn new_job_due(owner_id: &str, request_id: &str, deadline: Option<SystemTime>) -> NewJob {
     NewJob::new(
         JobId::generate(),
         owner(owner_id),
         request(request_id),
         concat_spec(),
-        Some(SystemTime::now() + Duration::from_secs(3600)),
+        deadline,
     )
 }
 
@@ -844,6 +852,79 @@ async fn retry_requeues_with_failure_and_schedule_keeping_attempts() {
         .await
         .expect("mark succeeded succeeds");
     assert!(done.failure.is_none(), "stale failure kept after success");
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn overdue_jobs_fail_with_timeout_whatever_their_phase() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let past = Some(SystemTime::now() - Duration::from_secs(5));
+    let overdue_pending = repo
+        .create(new_job_due("owner-1", "req-overdue-pending", past))
+        .await
+        .expect("create succeeds");
+    let overdue_running = repo
+        .create(new_job_due("owner-1", "req-overdue-running", past))
+        .await
+        .expect("create succeeds");
+    let fresh = repo
+        .create(new_job("owner-1", "req-fresh"))
+        .await
+        .expect("create succeeds");
+    let finished = repo
+        .create(new_job_due("owner-1", "req-finished", past))
+        .await
+        .expect("create succeeds");
+    let claimant = worker("w-reaper");
+    sqlx::query(
+        "UPDATE jobs SET state = 'RUNNING', claimed_by = $1, \
+         lease_expires_at = now() + interval '30 seconds', \
+         started_at = now(), attempts = 1 WHERE id = $2",
+    )
+    .bind(claimant.as_str())
+    .bind(overdue_running.id.as_uuid())
+    .execute(&db.pool)
+    .await
+    .expect("stage running job");
+    sqlx::query("UPDATE jobs SET state = 'SUCCEEDED', finished_at = now() WHERE id = $1")
+        .bind(finished.id.as_uuid())
+        .execute(&db.pool)
+        .await
+        .expect("stage finished job");
+
+    let mut reaped = repo.fail_overdue().await.expect("reap succeeds");
+    reaped.sort();
+    let mut expected = vec![overdue_pending.id, overdue_running.id];
+    expected.sort();
+    assert_eq!(reaped, expected);
+
+    for id in [overdue_pending.id, overdue_running.id] {
+        let record = repo
+            .get(id)
+            .await
+            .expect("get succeeds")
+            .expect("job exists");
+        assert_eq!(record.state, JobState::Failed);
+        let failure = record.failure.expect("failure recorded");
+        assert_eq!(failure.code(), "timeout");
+        assert!(record.finished_at.is_some());
+        assert!(record.claimed_by.is_none());
+        assert!(record.lease_expires_at.is_none());
+    }
+    let untouched = repo
+        .get(fresh.id)
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(untouched.state, JobState::Pending);
+    let kept = repo
+        .get(finished.id)
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(kept.state, JobState::Succeeded);
+    assert!(repo.fail_overdue().await.expect("reap succeeds").is_empty());
     db.dispose().await;
 }
 

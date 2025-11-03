@@ -8,7 +8,7 @@ use mm_domain::{
     ConcatSpec, JobFailure, JobId, JobNotifications, JobRepository, JobState, JobStoreError,
     MediaRef, NewJob, OpResult, OpSpec, ProgressPercent, RequestId, TimedOutput, UserId, WorkerId,
 };
-use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
+use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository, reconnect_backoff};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -991,4 +991,109 @@ async fn job_insert_and_requeue_notify_listeners() {
         .expect("requeue notifies within a second")
         .expect("notification received");
     db.dispose().await;
+}
+
+#[test]
+fn reconnect_backoff_grows_exponentially_to_a_cap() {
+    assert_eq!(reconnect_backoff(0), Duration::ZERO);
+    assert_eq!(reconnect_backoff(1), Duration::from_millis(100));
+    assert_eq!(reconnect_backoff(2), Duration::from_millis(200));
+    assert_eq!(reconnect_backoff(4), Duration::from_millis(800));
+    assert_eq!(reconnect_backoff(10), Duration::from_secs(5));
+    assert_eq!(reconnect_backoff(u32::MAX), Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn a_severed_listener_connection_recovers_and_wakes() {
+    let db = fresh_db().await;
+    let listener = PgJobListener::connect(&db.url)
+        .await
+        .expect("listener connects");
+    let repo = db.repository();
+    repo.create(new_job("owner-1", "req-before-cut"))
+        .await
+        .expect("create succeeds");
+    tokio::time::timeout(Duration::from_secs(1), listener.notified())
+        .await
+        .expect("insert notifies within a second")
+        .expect("notification received");
+
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = $1 AND query ILIKE 'LISTEN%'",
+    )
+    .bind(&db.name)
+    .fetch_all(&db.admin)
+    .await
+    .expect("terminate listener backend");
+
+    let woken = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if listener.notified().await.is_ok() {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(woken.is_ok(), "listener never recovered from the cut");
+
+    repo.create(new_job("owner-1", "req-after-cut"))
+        .await
+        .expect("create succeeds");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if listener.notified().await.is_ok() {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("reconnected listener never delivered a notification");
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_listener_errors_with_growing_backoff() {
+    let db = fresh_db().await;
+    let listener = PgJobListener::connect(&db.url)
+        .await
+        .expect("listener connects");
+    db.dispose().await;
+
+    let first = std::time::Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if listener.notified().await.is_err() {
+                return first.elapsed();
+            }
+        }
+    })
+    .await;
+    assert!(outcome.is_ok(), "listener hung instead of erroring");
+
+    let second = std::time::Instant::now();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), listener.notified())
+            .await
+            .expect("backoff stays bounded")
+            .is_err()
+    );
+    assert!(
+        second.elapsed() >= Duration::from_millis(100),
+        "no backoff before the second attempt: {:?}",
+        second.elapsed()
+    );
+
+    let third = std::time::Instant::now();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), listener.notified())
+            .await
+            .expect("backoff stays bounded")
+            .is_err()
+    );
+    assert!(
+        third.elapsed() >= Duration::from_millis(200),
+        "backoff never grew: {:?}",
+        third.elapsed()
+    );
 }

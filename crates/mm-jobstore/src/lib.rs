@@ -19,16 +19,63 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 pub const JOB_READY_CHANNEL: &str = "mm_job_ready";
 
+const RECONNECT_BACKOFF_BASE: Duration = Duration::from_millis(100);
+const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(5);
+
+pub fn reconnect_backoff(failures: u32) -> Duration {
+    match failures {
+        0 => Duration::ZERO,
+        _ => RECONNECT_BACKOFF_BASE
+            .saturating_mul(2u32.saturating_pow((failures - 1).min(31)))
+            .min(RECONNECT_BACKOFF_CAP),
+    }
+}
+
+struct ListenerState {
+    listener: PgListener,
+    failures: u32,
+}
+
+struct ChannelListener {
+    state: tokio::sync::Mutex<ListenerState>,
+}
+
+impl ChannelListener {
+    async fn connect(url: &str, channel: &str) -> Result<Self, sqlx::Error> {
+        let mut listener = PgListener::connect(url).await?;
+        listener.listen(channel).await?;
+        Ok(Self {
+            state: tokio::sync::Mutex::new(ListenerState {
+                listener,
+                failures: 0,
+            }),
+        })
+    }
+
+    async fn next(&self) -> Result<Option<String>, JobStoreError> {
+        let mut state = self.state.lock().await;
+        tokio::time::sleep(reconnect_backoff(state.failures)).await;
+        match state.listener.try_recv().await {
+            Ok(notification) => {
+                state.failures = 0;
+                Ok(notification.map(|notification| notification.payload().to_string()))
+            }
+            Err(error) => {
+                state.failures = state.failures.saturating_add(1);
+                Err(backend(error))
+            }
+        }
+    }
+}
+
 pub struct PgJobListener {
-    inner: tokio::sync::Mutex<PgListener>,
+    inner: ChannelListener,
 }
 
 impl PgJobListener {
     pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
-        let mut listener = PgListener::connect(url).await?;
-        listener.listen(JOB_READY_CHANNEL).await?;
         Ok(Self {
-            inner: tokio::sync::Mutex::new(listener),
+            inner: ChannelListener::connect(url, JOB_READY_CHANNEL).await?,
         })
     }
 }
@@ -36,13 +83,7 @@ impl PgJobListener {
 #[async_trait]
 impl JobNotifications for PgJobListener {
     async fn notified(&self) -> Result<(), JobStoreError> {
-        self.inner
-            .lock()
-            .await
-            .recv()
-            .await
-            .map(|_| ())
-            .map_err(backend)
+        self.inner.next().await.map(|_| ())
     }
 }
 

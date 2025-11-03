@@ -1,11 +1,17 @@
 mod concat;
 mod parse;
 mod probe;
+mod profile;
 mod progress;
 mod runner;
+mod transcode;
 
-pub use concat::{ConcatError, TargetProfile, build_concat_args};
+pub use concat::{ConcatError, build_concat_args};
 pub use parse::{AudioStream, MediaInfo, ParseError, VideoStream, parse_media_info};
 pub use probe::{ProbeError, ProbeLimits, Prober};
+pub use profile::TargetProfile;
 pub use progress::{ProgressParser, ProgressUpdate};
 pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner};
+pub use transcode::{
+    AudioCodec, ScaleMode, TranscodeError, TranscodeTarget, VideoCodec, build_transcode_args,
+};

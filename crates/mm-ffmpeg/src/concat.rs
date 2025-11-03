@@ -1,27 +1,6 @@
-#[derive(Debug, Clone, PartialEq)]
-pub struct TargetProfile {
-    pub resolution: Option<(u32, u32)>,
-    pub fps: u32,
-    pub video_crf: u32,
-    pub video_max_bitrate_kbps: u32,
-    pub audio_bitrate_kbps: u32,
-    pub audio_sample_rate_hz: u32,
-    pub audio_channels: u32,
-}
-
-impl Default for TargetProfile {
-    fn default() -> Self {
-        Self {
-            resolution: None,
-            fps: 24,
-            video_crf: 23,
-            video_max_bitrate_kbps: 5000,
-            audio_bitrate_kbps: 128,
-            audio_sample_rate_hz: 48_000,
-            audio_channels: 2,
-        }
-    }
-}
+use crate::profile::{
+    Scaling, TargetProfile, audio_filter, channel_layout, encode_args, video_filter,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConcatError {
@@ -29,14 +8,6 @@ pub enum ConcatError {
     TooFewInputs { count: usize },
     #[error("unsupported audio channel count {channels}")]
     UnsupportedChannelCount { channels: u32 },
-}
-
-fn channel_layout(channels: u32) -> Result<&'static str, ConcatError> {
-    match channels {
-        1 => Ok("mono"),
-        2 => Ok("stereo"),
-        other => Err(ConcatError::UnsupportedChannelCount { channels: other }),
-    }
 }
 
 pub fn build_concat_args(
@@ -54,18 +25,15 @@ pub fn build_concat_args(
         .resolution
         .or(first_input_resolution)
         .unwrap_or((1920, 1080));
-    let layout = channel_layout(profile.audio_channels)?;
+    let layout = channel_layout(profile.audio_channels)
+        .map_err(|channels| ConcatError::UnsupportedChannelCount { channels })?;
+    let normalize = video_filter(&Scaling::PadToFit(width, height), profile.fps);
+    let voice = audio_filter(profile.audio_sample_rate_hz, layout);
 
     let mut filter = String::new();
     for index in 0..inputs.len() {
         filter.push_str(&format!(
-            "[{index}:v]scale=w={width}:h={height}:force_original_aspect_ratio=decrease,\
-             pad=w={width}:h={height}:x=(ow-iw)/2:y=(oh-ih)/2,setsar=1,fps={fps},\
-             format=yuv420p[v{index}];\
-             [{index}:a]aformat=sample_fmts=fltp:sample_rates={rate}:\
-             channel_layouts={layout}[a{index}];",
-            fps = profile.fps,
-            rate = profile.audio_sample_rate_hz,
+            "[{index}:v]{normalize}[v{index}];[{index}:a]{voice}[a{index}];"
         ));
     }
     for index in 0..inputs.len() {
@@ -92,30 +60,11 @@ pub fn build_concat_args(
             "[vout]",
             "-map",
             "[aout]",
-            "-c:v",
-            "libx264",
-            "-crf",
-            &profile.video_crf.to_string(),
-            "-maxrate",
-            &format!("{}k", profile.video_max_bitrate_kbps),
-            "-bufsize",
-            &format!("{}k", profile.video_max_bitrate_kbps * 2),
-            "-c:a",
-            "aac",
-            "-b:a",
-            &format!("{}k", profile.audio_bitrate_kbps),
-            "-ar",
-            &profile.audio_sample_rate_hz.to_string(),
-            "-ac",
-            &profile.audio_channels.to_string(),
-            "-movflags",
-            "+faststart",
-            "-f",
-            "mp4",
-            output,
         ]
         .into_iter()
         .map(str::to_string),
     );
+    args.extend(encode_args(profile, "libx264", "aac"));
+    args.push(output.to_string());
     Ok(args)
 }

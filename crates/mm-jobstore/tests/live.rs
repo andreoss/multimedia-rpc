@@ -146,6 +146,14 @@ fn new_job_due(owner_id: &str, request_id: &str, deadline: Option<SystemTime>) -
     )
 }
 
+async fn db_now(pool: &PgPool) -> SystemTime {
+    let now: time::OffsetDateTime = sqlx::query_scalar("SELECT now()")
+        .fetch_one(pool)
+        .await
+        .expect("database clock readable");
+    SystemTime::from(now)
+}
+
 fn concat_result() -> OpResult {
     OpResult::Concat(
         TimedOutput::new(
@@ -640,7 +648,7 @@ async fn expired_lease_requeues_and_allows_reclaim() {
     let a = worker("worker-a");
     let b = worker("worker-b");
     let claimed = repo
-        .claim(&a, limit(1), Duration::from_millis(200))
+        .claim(&a, limit(1), Duration::from_secs(600))
         .await
         .expect("claim succeeds");
     assert_eq!(claimed.len(), 1);
@@ -650,7 +658,11 @@ async fn expired_lease_requeues_and_allows_reclaim() {
             .expect("requeue succeeds")
             .is_empty()
     );
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    sqlx::query("UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(record.id.as_uuid())
+        .execute(&db.pool)
+        .await
+        .expect("lease shrinks");
     assert_eq!(
         repo.requeue_expired().await.expect("requeue succeeds"),
         vec![record.id]
@@ -813,10 +825,11 @@ async fn retry_requeues_with_failure_and_schedule_keeping_attempts() {
         .expect("claim succeeds");
     assert_eq!(claimed.len(), 1);
     let failure = JobFailure::new("output_upload_failed", "store unreachable").expect("valid");
-    let retried_at = SystemTime::now();
+    let before_retry = db_now(&db.pool).await;
     repo.retry(job.id, &claimant, failure.clone(), Duration::from_secs(2))
         .await
         .expect("retry succeeds");
+    let after_retry = db_now(&db.pool).await;
 
     let record = repo
         .get(job.id)
@@ -830,8 +843,8 @@ async fn retry_requeues_with_failure_and_schedule_keeping_attempts() {
     assert_eq!(record.progress, ProgressPercent::ZERO);
     assert_eq!(record.failure, Some(failure));
     let due = record.next_attempt_at.expect("retry scheduled");
-    assert!(due > retried_at);
-    assert!(due < retried_at + Duration::from_secs(7));
+    assert!(due >= before_retry + Duration::from_secs(2), "{due:?}");
+    assert!(due <= after_retry + Duration::from_secs(2), "{due:?}");
 
     let early = repo
         .claim(&claimant, limit(1), Duration::from_secs(30))
@@ -980,9 +993,9 @@ async fn job_insert_and_requeue_notify_listeners() {
     repo.create(new_job("owner-1", "req-notify"))
         .await
         .expect("create succeeds");
-    tokio::time::timeout(Duration::from_secs(1), listener.notified())
+    tokio::time::timeout(mm_testkit::budget::NOTIFY, listener.notified())
         .await
-        .expect("insert notifies within a second")
+        .expect("insert notifies within the budget")
         .expect("notification received");
 
     let claimed = repo
@@ -993,9 +1006,9 @@ async fn job_insert_and_requeue_notify_listeners() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let requeued = repo.requeue_expired().await.expect("requeue succeeds");
     assert_eq!(requeued.len(), 1);
-    tokio::time::timeout(Duration::from_secs(1), listener.notified())
+    tokio::time::timeout(mm_testkit::budget::NOTIFY, listener.notified())
         .await
-        .expect("requeue notifies within a second")
+        .expect("requeue notifies within the budget")
         .expect("notification received");
     db.dispose().await;
 }
@@ -1025,9 +1038,9 @@ async fn a_cancel_request_notifies_listeners_with_the_job_id() {
         .await
         .expect("claim succeeds");
     repo.request_cancel(job.id).await.expect("cancel succeeds");
-    let cancelled = tokio::time::timeout(Duration::from_secs(1), listener.cancelled())
+    let cancelled = tokio::time::timeout(mm_testkit::budget::NOTIFY, listener.cancelled())
         .await
-        .expect("cancel notifies within a second")
+        .expect("cancel notifies within the budget")
         .expect("notification received");
     assert_eq!(cancelled, job.id);
     db.dispose().await;
@@ -1043,9 +1056,9 @@ async fn a_severed_listener_connection_recovers_and_wakes() {
     repo.create(new_job("owner-1", "req-before-cut"))
         .await
         .expect("create succeeds");
-    tokio::time::timeout(Duration::from_secs(1), listener.notified())
+    tokio::time::timeout(mm_testkit::budget::NOTIFY, listener.notified())
         .await
-        .expect("insert notifies within a second")
+        .expect("insert notifies within the budget")
         .expect("notification received");
 
     sqlx::query(
@@ -1057,7 +1070,7 @@ async fn a_severed_listener_connection_recovers_and_wakes() {
     .await
     .expect("terminate listener backend");
 
-    let woken = tokio::time::timeout(Duration::from_secs(5), async {
+    let woken = tokio::time::timeout(mm_testkit::budget::LISTENER_RECOVERY, async {
         loop {
             if listener.notified().await.is_ok() {
                 return;
@@ -1070,7 +1083,7 @@ async fn a_severed_listener_connection_recovers_and_wakes() {
     repo.create(new_job("owner-1", "req-after-cut"))
         .await
         .expect("create succeeds");
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(mm_testkit::budget::LISTENER_RECOVERY, async {
         loop {
             if listener.notified().await.is_ok() {
                 return;
@@ -1091,7 +1104,7 @@ async fn an_unreachable_listener_errors_with_growing_backoff() {
     db.dispose().await;
 
     let first = std::time::Instant::now();
-    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+    let outcome = tokio::time::timeout(mm_testkit::budget::LISTENER_RECOVERY, async {
         loop {
             if listener.notified().await.is_err() {
                 return first.elapsed();
@@ -1103,7 +1116,7 @@ async fn an_unreachable_listener_errors_with_growing_backoff() {
 
     let second = std::time::Instant::now();
     assert!(
-        tokio::time::timeout(Duration::from_secs(5), listener.notified())
+        tokio::time::timeout(mm_testkit::budget::LISTENER_RECOVERY, listener.notified())
             .await
             .expect("backoff stays bounded")
             .is_err()
@@ -1116,7 +1129,7 @@ async fn an_unreachable_listener_errors_with_growing_backoff() {
 
     let third = std::time::Instant::now();
     assert!(
-        tokio::time::timeout(Duration::from_secs(5), listener.notified())
+        tokio::time::timeout(mm_testkit::budget::LISTENER_RECOVERY, listener.notified())
             .await
             .expect("backoff stays bounded")
             .is_err()

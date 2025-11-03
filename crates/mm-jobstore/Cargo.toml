@@ -15,4 +15,5 @@ tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 
 [dev-dependencies]
+mm-testkit = { path = "../mm-testkit" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

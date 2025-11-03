@@ -1930,6 +1930,9 @@ dependencies = [
 name = "mmrpcd"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
  "mm-domain",
  "mm-ffmpeg",
  "mm-jobstore",
@@ -1937,6 +1940,7 @@ dependencies = [
  "mm-server",
  "mm-storage",
  "mm-worker",
+ "prost",
  "sqlx",
  "tokio",
  "tonic",

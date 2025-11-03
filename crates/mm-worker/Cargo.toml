@@ -7,7 +7,10 @@ rust-version.workspace = true
 [dependencies]
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
+mm-proto = { path = "../mm-proto" }
+base64.workspace = true
 bytes.workspace = true
+prost.workspace = true
 futures-util.workspace = true
 libc.workspace = true
 thiserror.workspace = true

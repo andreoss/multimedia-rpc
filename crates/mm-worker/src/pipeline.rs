@@ -8,7 +8,10 @@ use mm_domain::{
     ObjectStoreError, OpResult, OpSpec, OutputKey, ProgressPercent, TimedOutput, WorkerId,
     resolve_media_ref, validate_concat_inputs,
 };
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use mm_ffmpeg::{MediaInfo, RunLimits, RunOutcome, build_concat_args};
+use prost::Message;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -208,19 +211,52 @@ fn timeout_failure() -> JobFailure {
     JobFailure::new(codes::TIMEOUT, "job deadline passed").expect("worker failure codes are valid")
 }
 
+async fn publish_outcome(ctx: &WorkerConfig, record: &JobRecord) {
+    let Some(publisher) = &ctx.callbacks else {
+        return;
+    };
+    let Some(queue) = &record.callback else {
+        return;
+    };
+    let body = BASE64_STANDARD.encode(mm_proto::v1::JobOutcome::from(record).encode_to_vec());
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match publisher.publish(queue, &body).await {
+            Ok(()) => return,
+            Err(error) if attempt < ctx.retry.max_attempts => {
+                println!("job {} callback attempt {attempt} failed: {error}", record.id);
+                tokio::time::sleep(ctx.retry.delay(attempt)).await;
+            }
+            Err(error) => {
+                println!(
+                    "job {} callback abandoned after {attempt} attempts: {error}",
+                    record.id
+                );
+                return;
+            }
+        }
+    }
+}
+
 pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelRegistry) {
     if job.cancel_requested {
-        let _ = ctx.repository.mark_cancelled(job.id).await;
+        if let Ok(record) = ctx.repository.mark_cancelled(job.id).await {
+            publish_outcome(ctx, &record).await;
+        }
         return;
     }
     let deadline_at = job
         .deadline_at
         .unwrap_or_else(|| SystemTime::now() + ctx.default_deadline);
     if SystemTime::now() >= deadline_at {
-        let _ = ctx
+        if let Ok(record) = ctx
             .repository
             .mark_failed(job.id, &ctx.worker_id, timeout_failure())
-            .await;
+            .await
+        {
+            publish_outcome(ctx, &record).await;
+        }
         return;
     }
     let (sender, mut signal) = watch::channel(Signal::Run);
@@ -243,20 +279,28 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
     drop(registered);
     match outcome {
         Ok(result) => {
-            let _ = ctx
+            if let Ok(record) = ctx
                 .repository
                 .mark_succeeded(job.id, &ctx.worker_id, result)
-                .await;
+                .await
+            {
+                publish_outcome(ctx, &record).await;
+            }
         }
         Err(Finish::Cancelled) => {
-            let _ = ctx.repository.mark_cancelled(job.id).await;
+            if let Ok(record) = ctx.repository.mark_cancelled(job.id).await {
+                publish_outcome(ctx, &record).await;
+            }
         }
         Err(Finish::LeaseLost) | Err(Finish::Released) => {}
         Err(Finish::TimedOut) => {
-            let _ = ctx
+            if let Ok(record) = ctx
                 .repository
                 .mark_failed(job.id, &ctx.worker_id, timeout_failure())
-                .await;
+                .await
+            {
+                publish_outcome(ctx, &record).await;
+            }
         }
         Err(Finish::Failed(failure)) => {
             if crate::retry::is_transient(failure.code()) && job.attempts < ctx.retry.max_attempts {
@@ -265,11 +309,12 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
                     .repository
                     .retry(job.id, &ctx.worker_id, failure, delay)
                     .await;
-            } else {
-                let _ = ctx
-                    .repository
-                    .mark_failed(job.id, &ctx.worker_id, failure)
-                    .await;
+            } else if let Ok(record) = ctx
+                .repository
+                .mark_failed(job.id, &ctx.worker_id, failure)
+                .await
+            {
+                publish_outcome(ctx, &record).await;
             }
         }
     }

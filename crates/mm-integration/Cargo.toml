@@ -14,8 +14,10 @@ mm-proto = { path = "../mm-proto" }
 mm-server = { path = "../mm-server" }
 mm-storage = { path = "../mm-storage" }
 mm-worker = { path = "../mm-worker" }
+base64.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+prost.workspace = true
 sqlx.workspace = true
 tonic.workspace = true
 uuid.workspace = true

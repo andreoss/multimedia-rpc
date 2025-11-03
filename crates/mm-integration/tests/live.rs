@@ -559,6 +559,155 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let queue_endpoint = env_or("MM_QUEUE_ENDPOINT", "http://127.0.0.1:9324");
+    let address = resolve(&authority(&queue_endpoint));
+    assert!(
+        TcpStream::connect_timeout(&address, Duration::from_secs(2)).is_ok(),
+        "queue at {queue_endpoint} is unreachable; \
+         start the compose stack with `docker compose up -d`"
+    );
+    let publisher = Arc::new(
+        mm_storage::SqsCallbackPublisher::connect(mm_storage::SqsSettings {
+            endpoint: Some(queue_endpoint),
+            region: Some("local".to_string()),
+            credentials: CredentialSource::Static {
+                access_key_id: "queue-access".to_string(),
+                secret_access_key: "queue-secret".to_string(),
+            },
+        })
+        .await,
+    );
+    let queue = publisher
+        .ensure_queue(&format!("mm-it-cb-{}", uuid::Uuid::now_v7().simple()))
+        .await
+        .expect("queue exists");
+
+    let first = fixture("e2e-a-6s.mp4", 6, 30, "mp4");
+    let second = fixture("e2e-b-4s.mp4", 4, 30, "mp4");
+    let inputs = vec![
+        upload_object(&store, &first, "inputs/cb-a-6s.mp4").await,
+        upload_object(&store, &second, "inputs/cb-b-4s.mp4").await,
+    ];
+
+    let server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-cb").unwrap(),
+        staging,
+    );
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    worker_config.callbacks = Some(publisher.clone());
+    let worker = mm_worker::start(worker_config);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Concat(
+        mm_domain::ConcatSpec::new(inputs, None).expect("valid concat spec"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-cb".to_string(),
+            idempotency_key: "req-cb".to_string(),
+            spec: Some(spec),
+            callback: Some(mm_proto::v1::Callback {
+                queue_url: queue.as_str().to_string(),
+            }),
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let job_id = created.job_id;
+
+    let settle = std::time::Instant::now() + Duration::from_secs(120);
+    let bodies = loop {
+        let received = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.receive(&queue, Duration::from_secs(2)),
+        )
+        .await
+        .expect("receive answers in time")
+        .expect("receive succeeds");
+        if !received.is_empty() {
+            break received;
+        }
+        assert!(
+            std::time::Instant::now() < settle,
+            "no callback message arrived"
+        );
+    };
+    assert_eq!(bodies.len(), 1, "exactly one callback message");
+    let leftover = tokio::time::timeout(
+        Duration::from_secs(10),
+        publisher.receive(&queue, Duration::from_secs(1)),
+    )
+    .await
+    .expect("receive answers in time")
+    .expect("receive succeeds");
+    assert!(leftover.is_empty(), "a second callback message arrived");
+
+    let decoded = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(&bodies[0])
+            .expect("message is base64")
+    };
+    let outcome = <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
+        .expect("message is a job outcome");
+    assert_eq!(outcome.job_id, job_id);
+    assert_eq!(outcome.request_id, "req-cb");
+    assert_eq!(outcome.state, mm_proto::v1::JobState::Succeeded as i32);
+    assert_eq!(outcome.error_code, "");
+    assert!(outcome.file_errors.is_empty());
+    let result =
+        mm_domain::OpResult::try_from(outcome.result.expect("result present")).expect("decodes");
+    let mm_domain::OpResult::Concat(timed) = result else {
+        panic!("expected a concat result");
+    };
+    let MediaRef::Object(object) = timed.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{job_id}/output.mp4"));
+    assert!(store.head(&object).await.expect("output exists") > 0);
+
+    publisher.delete_queue(&queue).await.expect("queue removed");
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_watch_stream_observes_a_live_merge_to_completion() {
     let (admin, pool, url, name) = fresh_pool().await;
     let store = Arc::new(test_store().await);

@@ -1,6 +1,7 @@
 mod id;
 mod op;
 mod state;
+mod store;
 
 pub use id::{JobId, JobIdError, RequestId, RequestIdError, TextIdError, UserId, UserIdError};
 pub use op::{
@@ -8,6 +9,11 @@ pub use op::{
     OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ThumbnailResult,
     ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
 };
+pub use store::{
+    ObjectBody, ObjectStore, ObjectStoreError, OutputKey, OutputKeyError, body_from_bytes,
+    collect_body,
+};
+
 pub use state::{
     Cancelled, Failed, Job, JobState, Pending, Running, Stage, StateParseError, Succeeded,
     TransitionError,

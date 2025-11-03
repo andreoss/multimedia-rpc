@@ -7,3 +7,10 @@ rust-version.workspace = true
 [dependencies]
 uuid.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

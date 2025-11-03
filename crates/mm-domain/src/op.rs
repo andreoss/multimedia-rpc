@@ -7,6 +7,18 @@ pub struct ObjectRef {
 }
 
 impl ObjectRef {
+    pub fn new(bucket: &str, key: &str) -> Result<Self, MediaRefError> {
+        if bucket.is_empty() || key.is_empty() {
+            return Err(MediaRefError::MalformedObjectUri {
+                uri: format!("s3://{bucket}/{key}"),
+            });
+        }
+        Ok(Self {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+        })
+    }
+
     pub fn bucket(&self) -> &str {
         &self.bucket
     }

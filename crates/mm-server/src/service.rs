@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -9,6 +10,11 @@ use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
+
+use crate::cursor;
+
+const DEFAULT_PAGE_SIZE: u32 = 20;
+const MAX_PAGE_SIZE: u32 = 100;
 
 pub(crate) struct MediaJobs {
     repository: Arc<dyn JobRepository>,
@@ -55,6 +61,39 @@ fn store_failure(error: JobStoreError) -> Status {
 
 fn not_found() -> Status {
     Status::not_found("job does not exist")
+}
+
+fn parse_states(raw: &[i32]) -> Result<Vec<JobState>, Status> {
+    raw.iter()
+        .map(|value| match v1::JobState::try_from(*value) {
+            Ok(v1::JobState::Pending) => Ok(JobState::Pending),
+            Ok(v1::JobState::Running) => Ok(JobState::Running),
+            Ok(v1::JobState::Succeeded) => Ok(JobState::Succeeded),
+            Ok(v1::JobState::Failed) => Ok(JobState::Failed),
+            Ok(v1::JobState::Cancelled) => Ok(JobState::Cancelled),
+            Ok(v1::JobState::Unspecified) | Err(_) => Err(Status::invalid_argument(format!(
+                "statuses contains an unknown job state: {value}"
+            ))),
+        })
+        .collect()
+}
+
+fn page_limit(requested: u32) -> NonZeroU32 {
+    let size = if requested == 0 {
+        DEFAULT_PAGE_SIZE
+    } else {
+        requested.min(MAX_PAGE_SIZE)
+    };
+    NonZeroU32::new(size).expect("page size is nonzero")
+}
+
+fn parse_page_token(token: &str) -> Result<Option<mm_domain::PageCursor>, Status> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    cursor::decode(token)
+        .map(Some)
+        .map_err(|error| Status::invalid_argument(error.to_string()))
 }
 
 fn state_to_proto(state: JobState) -> v1::JobState {
@@ -172,9 +211,22 @@ impl MediaJobService for MediaJobs {
 
     async fn list_jobs(
         &self,
-        _request: Request<v1::ListJobsRequest>,
+        request: Request<v1::ListJobsRequest>,
     ) -> Result<Response<v1::ListJobsResponse>, Status> {
-        Err(Status::unimplemented("ListJobs is not implemented yet"))
+        let message = request.into_inner();
+        let owner = parse_user(&message.user_id)?;
+        let states = parse_states(&message.statuses)?;
+        let limit = page_limit(message.page_size);
+        let cursor = parse_page_token(&message.page_token)?;
+        let page = self
+            .repository
+            .list(&owner, &states, limit, cursor)
+            .await
+            .map_err(store_failure)?;
+        Ok(Response::new(v1::ListJobsResponse {
+            jobs: page.jobs.iter().map(job_to_proto).collect(),
+            next_page_token: page.next.as_ref().map(cursor::encode).unwrap_or_default(),
+        }))
     }
 
     type WatchJobStream =

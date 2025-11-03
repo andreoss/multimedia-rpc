@@ -1837,6 +1837,7 @@ dependencies = [
 name = "mm-server"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "mm-domain",
  "mm-ffmpeg",
  "mm-jobstore",

@@ -174,6 +174,7 @@ pub trait JobRepository: Send + Sync {
     async fn list(
         &self,
         owner: &UserId,
+        states: &[JobState],
         limit: NonZeroU32,
         cursor: Option<PageCursor>,
     ) -> Result<JobPage, JobStoreError>;

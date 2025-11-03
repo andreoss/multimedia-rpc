@@ -255,7 +255,7 @@ async fn list_pages_newest_first_with_keyset_cursor() {
     let mut cursor = None;
     loop {
         let page = repo
-            .list(&owner("owner-1"), limit(2), cursor)
+            .list(&owner("owner-1"), &[], limit(2), cursor)
             .await
             .expect("list succeeds");
         seen.extend(page.jobs.iter().map(|job| job.id));
@@ -265,6 +265,53 @@ async fn list_pages_newest_first_with_keyset_cursor() {
         }
     }
     assert_eq!(seen, created);
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn list_filters_by_requested_states() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let mut pending = Vec::new();
+    for index in 0..3 {
+        pending.push(
+            repo.create(new_job("owner-1", &format!("req-{index}")))
+                .await
+                .expect("create succeeds")
+                .id,
+        );
+    }
+    let cancelled = pending.remove(0);
+    repo.mark_cancelled(cancelled)
+        .await
+        .expect("cancel succeeds");
+    let only_cancelled = repo
+        .list(&owner("owner-1"), &[JobState::Cancelled], limit(10), None)
+        .await
+        .expect("list succeeds");
+    assert_eq!(
+        only_cancelled
+            .jobs
+            .iter()
+            .map(|job| job.id)
+            .collect::<Vec<_>>(),
+        vec![cancelled]
+    );
+    let only_pending = repo
+        .list(&owner("owner-1"), &[JobState::Pending], limit(10), None)
+        .await
+        .expect("list succeeds");
+    assert_eq!(only_pending.jobs.len(), 2);
+    let both = repo
+        .list(
+            &owner("owner-1"),
+            &[JobState::Pending, JobState::Cancelled],
+            limit(10),
+            None,
+        )
+        .await
+        .expect("list succeeds");
+    assert_eq!(both.jobs.len(), 3);
     db.dispose().await;
 }
 

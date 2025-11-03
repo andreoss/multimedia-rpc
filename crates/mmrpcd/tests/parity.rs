@@ -980,14 +980,36 @@ async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
     let store = test_store().await;
     let first = fixture("watch-a-30s.mp4", 30, 30, "mp4");
     let second = fixture("watch-b-30s.mp4", 30, 30, "mp4");
+    let blocker_media = fixture("cancel-a-60s.mp4", 60, 30, "mp4");
     let inputs = vec![
         upload_input(&store, &first, "inputs/p07-a.mp4").await,
         upload_input(&store, &second, "inputs/p07-b.mp4").await,
     ];
-    let mut daemon = spawn_daemon(&db.url, "parity-p07", &[]);
+    let blocker_inputs = vec![
+        upload_input(&store, &blocker_media, "inputs/p07-blocker-a.mp4").await,
+        upload_input(&store, &blocker_media, "inputs/p07-blocker-b.mp4").await,
+    ];
+    let mut daemon = spawn_daemon(&db.url, "parity-p07", &[("MM_WORKER_MAX_CONCURRENT", "1")]);
     let address = announced_address(&mut daemon).await;
     let mut client = unary_client(address).await;
     let mut watcher = stream_client(address).await;
+
+    let blocker = create_job(
+        &mut client,
+        "owner-p07",
+        "req-blocker",
+        concat_spec(&blocker_inputs),
+        None,
+    )
+    .await;
+    await_job_state(
+        &mut client,
+        "owner-p07",
+        &blocker.job_id,
+        v1::JobState::Running,
+        Duration::from_secs(60),
+    )
+    .await;
 
     let created = create_job(
         &mut client,
@@ -997,6 +1019,13 @@ async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
         None,
     )
     .await;
+    assert_eq!(
+        get_job(&mut client, "owner-p07", &created.job_id)
+            .await
+            .state(),
+        v1::JobState::Pending,
+        "the single-slot worker leaves the watched job pending"
+    );
     let mut stream = watcher
         .watch_job(v1::WatchJobRequest {
             user_id: "owner-p07".to_string(),
@@ -1005,6 +1034,7 @@ async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
         .await
         .expect("watch starts")
         .into_inner();
+    settle_blocker(&mut client, "owner-p07", &blocker.job_id).await;
 
     let mut kinds = Vec::new();
     loop {

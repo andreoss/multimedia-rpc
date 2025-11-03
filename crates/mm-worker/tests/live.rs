@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use mm_domain::{
     CallbackError, CallbackPublisher, ConcatSpec, JobId, JobRecord, JobRepository, JobState,
     MediaRef, NewJob, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec,
-    ProbeSpec, QueueUrl, RequestId, UserId, WorkerId,
+    OutputProfile, ProbeSpec, QueueUrl, RequestId, TranscodeSpec, TrimSpec, UserId, WorkerId,
+    collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -334,6 +335,138 @@ async fn a_concat_job_runs_to_succeeded_with_an_uploaded_output() {
     assert!(size > 0);
     let staged = scratch_dir("staging").join(format!("{}.mp4", job.id));
     assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    db.dispose().await;
+}
+
+fn single_input_job(spec: OpSpec) -> NewJob {
+    let id = JobId::generate();
+    NewJob::new(
+        id,
+        owner(),
+        RequestId::from_str(&format!("req-{id}")).unwrap(),
+        spec,
+        None,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_probe_job_succeeds_with_stream_metadata() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("probe-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/probe-4s.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Probe(ProbeSpec::new(input))))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-probe"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(60)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Probe(probe) = record.result.expect("result recorded") else {
+        panic!("expected a probe result");
+    };
+    assert!(
+        (probe.duration_seconds() - 4.0).abs() < 0.5,
+        "duration {}",
+        probe.duration_seconds()
+    );
+    assert_eq!(probe.video_streams(), 1);
+    assert_eq!(probe.audio_streams(), 1);
+    assert!(
+        probe.container().split(',').any(|token| token == "mp4"),
+        "container {}",
+        probe.container()
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transcode_job_succeeds_with_a_verified_output() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("transcode-30fps-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/transcode-30fps-4s.mp4").await;
+    let profile = OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).unwrap();
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Transcode(
+            TranscodeSpec::new(input, profile).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-transcode"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    assert_eq!(record.progress.value(), 100);
+    let OpResult::Transcode(result) = record.result.expect("result recorded") else {
+        panic!("expected a transcode result");
+    };
+    let MediaRef::Object(object) = result.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/output.mp4", job.id));
+
+    let body = store.get(&object).await.expect("output fetches");
+    let bytes = collect_body(body).await.expect("output body collects");
+    let local = scratch_dir("verify").join(format!("{}.mp4", job.id));
+    tokio::fs::write(&local, &bytes).await.unwrap();
+    let info = mm_ffmpeg::Prober::default()
+        .probe(&local.to_string_lossy(), &mm_ffmpeg::ProbeLimits::default())
+        .await
+        .expect("output probes");
+    assert!(info.container.split(',').any(|token| token == "mp4"));
+    assert!((info.duration.as_secs_f64() - 4.0).abs() < 0.5);
+    assert_eq!(info.video.len(), 1);
+    assert_eq!(info.video[0].codec, "h264");
+    assert_eq!(info.video[0].width, 640);
+    assert_eq!(info.video[0].height, 360);
+    assert!((info.video[0].avg_fps.unwrap() - 24.0).abs() < 0.1);
+    assert_eq!(info.audio[0].codec, "aac");
+    assert_eq!(info.audio[0].sample_rate, Some(48_000));
+    let staged = scratch_dir("staging").join(format!("{}.mp4", job.id));
+    assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_transcode_fails_with_the_input_code() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let foreign = fixture("blocked.mkv", 2, 30, "matroska");
+    let input = upload_input(&store, &foreign, "inputs/blocked.mkv").await;
+    let profile = OutputProfile::from_raw(24.0, 0, 0, 0, 0, 0, 0).unwrap();
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Transcode(
+            TranscodeSpec::new(input, profile).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-transcode-block"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(60)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::VALIDATION_BLOCKED);
+    assert!(
+        failure.message().contains("input 0: UnsupportedContainer"),
+        "{}",
+        failure.message()
+    );
+    assert!(
+        !failure.message().contains("TooFewInputs"),
+        "single input tripped the concat input-count rule: {}",
+        failure.message()
+    );
     db.dispose().await;
 }
 
@@ -763,9 +896,14 @@ async fn an_unsupported_operation_fails_with_a_typed_code() {
             id,
             owner(),
             RequestId::from_str(&format!("req-{id}")).unwrap(),
-            OpSpec::Probe(ProbeSpec::new(
-                MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
-            )),
+            OpSpec::Trim(
+                TrimSpec::new(
+                    MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
+                    0.0,
+                    2.0,
+                )
+                .unwrap(),
+            ),
             None,
         ))
         .await
@@ -778,6 +916,7 @@ async fn an_unsupported_operation_fails_with_a_typed_code() {
     assert_eq!(record.state, JobState::Failed);
     let failure = record.failure.expect("failure recorded");
     assert_eq!(failure.code(), codes::UNSUPPORTED_OPERATION);
+    assert!(failure.message().contains("trim"), "{}", failure.message());
     db.dispose().await;
 }
 

@@ -813,14 +813,10 @@ async fn retry_requeues_with_failure_and_schedule_keeping_attempts() {
         .expect("claim succeeds");
     assert_eq!(claimed.len(), 1);
     let failure = JobFailure::new("output_upload_failed", "store unreachable").expect("valid");
-    repo.retry(
-        job.id,
-        &claimant,
-        failure.clone(),
-        Duration::from_millis(400),
-    )
-    .await
-    .expect("retry succeeds");
+    let retried_at = SystemTime::now();
+    repo.retry(job.id, &claimant, failure.clone(), Duration::from_secs(2))
+        .await
+        .expect("retry succeeds");
 
     let record = repo
         .get(job.id)
@@ -834,21 +830,28 @@ async fn retry_requeues_with_failure_and_schedule_keeping_attempts() {
     assert_eq!(record.progress, ProgressPercent::ZERO);
     assert_eq!(record.failure, Some(failure));
     let due = record.next_attempt_at.expect("retry scheduled");
-    assert!(due > SystemTime::now());
-    assert!(due < SystemTime::now() + Duration::from_secs(5));
+    assert!(due > retried_at);
+    assert!(due < retried_at + Duration::from_secs(7));
 
-    assert!(
-        repo.claim(&claimant, limit(1), Duration::from_secs(30))
-            .await
-            .expect("claim succeeds")
-            .is_empty(),
-        "retry was claimable before its schedule"
-    );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let reclaimed = repo
+    let early = repo
         .claim(&claimant, limit(1), Duration::from_secs(30))
         .await
         .expect("claim succeeds");
+    let reclaimed = if early.is_empty() {
+        let remaining = due
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        tokio::time::sleep(remaining + Duration::from_millis(100)).await;
+        repo.claim(&claimant, limit(1), Duration::from_secs(30))
+            .await
+            .expect("claim succeeds")
+    } else {
+        assert!(
+            SystemTime::now() >= due,
+            "retry was claimable before its schedule"
+        );
+        early
+    };
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].attempts, 2);
     let done = repo

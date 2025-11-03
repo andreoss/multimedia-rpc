@@ -46,18 +46,23 @@ impl TryFrom<v1::OutputProfile> for OutputProfile {
             value.video_quality,
             value.audio_bitrate,
             value.audio_sample_rate,
+            value.width,
+            value.height,
         )
     }
 }
 
 impl From<&OutputProfile> for v1::OutputProfile {
     fn from(value: &OutputProfile) -> Self {
+        let (width, height) = value.resolution().unwrap_or((0, 0));
         v1::OutputProfile {
             frame_rate: value.frame_rate().unwrap_or(0.0),
             video_max_bitrate: value.video_max_bitrate().unwrap_or(0),
             video_quality: value.video_quality().unwrap_or(0),
             audio_bitrate: value.audio_bitrate().unwrap_or(0),
             audio_sample_rate: value.audio_sample_rate().unwrap_or(0),
+            width,
+            height,
         }
     }
 }

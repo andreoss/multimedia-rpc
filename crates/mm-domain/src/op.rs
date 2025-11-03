@@ -115,12 +115,15 @@ pub struct OutputProfile {
     video_quality: Option<u32>,
     audio_bitrate: Option<u32>,
     audio_sample_rate: Option<u32>,
+    resolution: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum OutputProfileError {
     #[error("frame rate {value} is not positive and finite")]
     InvalidFrameRate { value: f64 },
+    #[error("resolution {width}x{height} sets only one dimension")]
+    PartialResolution { width: u32, height: u32 },
 }
 
 fn nonzero(value: u32) -> Option<u32> {
@@ -134,6 +137,8 @@ impl OutputProfile {
         video_quality: u32,
         audio_bitrate: u32,
         audio_sample_rate: u32,
+        width: u32,
+        height: u32,
     ) -> Result<Self, OutputProfileError> {
         let frame_rate = if frame_rate == 0.0 {
             None
@@ -142,12 +147,20 @@ impl OutputProfile {
         } else {
             return Err(OutputProfileError::InvalidFrameRate { value: frame_rate });
         };
+        let resolution = match (width, height) {
+            (0, 0) => None,
+            (width, height) if width > 0 && height > 0 => Some((width, height)),
+            (width, height) => {
+                return Err(OutputProfileError::PartialResolution { width, height });
+            }
+        };
         Ok(Self {
             frame_rate,
             video_max_bitrate: nonzero(video_max_bitrate),
             video_quality: nonzero(video_quality),
             audio_bitrate: nonzero(audio_bitrate),
             audio_sample_rate: nonzero(audio_sample_rate),
+            resolution,
         })
     }
 
@@ -157,6 +170,7 @@ impl OutputProfile {
             && self.video_quality.is_none()
             && self.audio_bitrate.is_none()
             && self.audio_sample_rate.is_none()
+            && self.resolution.is_none()
     }
 
     pub fn frame_rate(&self) -> Option<f64> {
@@ -177,6 +191,10 @@ impl OutputProfile {
 
     pub fn audio_sample_rate(&self) -> Option<u32> {
         self.audio_sample_rate
+    }
+
+    pub fn resolution(&self) -> Option<(u32, u32)> {
+        self.resolution
     }
 }
 

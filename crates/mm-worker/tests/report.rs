@@ -61,22 +61,24 @@ fn an_absent_output_profile_yields_the_default_target() {
 
 #[test]
 fn output_profile_fields_override_the_target_defaults() {
-    let profile = OutputProfile::from_raw(30.0, 4000, 20, 192, 44_100).expect("valid profile");
+    let profile =
+        OutputProfile::from_raw(30.0, 4000, 20, 192, 44_100, 640, 360).expect("valid profile");
     let target = target_profile(Some(&profile));
     assert_eq!(target.fps, 30);
     assert_eq!(target.video_max_bitrate_kbps, 4000);
     assert_eq!(target.video_crf, 20);
     assert_eq!(target.audio_bitrate_kbps, 192);
     assert_eq!(target.audio_sample_rate_hz, 44_100);
-    assert_eq!(target.resolution, None);
+    assert_eq!(target.resolution, Some((640, 360)));
 }
 
 #[test]
 fn unset_profile_fields_keep_the_target_defaults() {
-    let profile = OutputProfile::from_raw(60.0, 0, 0, 0, 0).expect("valid profile");
+    let profile = OutputProfile::from_raw(60.0, 0, 0, 0, 0, 0, 0).expect("valid profile");
     let target = target_profile(Some(&profile));
     let default = mm_ffmpeg::TargetProfile::default();
     assert_eq!(target.fps, 60);
+    assert_eq!(target.resolution, default.resolution);
     assert_eq!(
         target.video_max_bitrate_kbps,
         default.video_max_bitrate_kbps

@@ -1,4 +1,5 @@
 mod health;
+mod service;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -6,16 +7,19 @@ use std::time::Duration;
 
 use mm_domain::{JobRepository, MediaRefError, ObjectRef, ObjectStore};
 use mm_ffmpeg::Prober;
+use mm_proto::v1::media_job_service_server::MediaJobServiceServer;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::server::NamedService;
 use tonic::transport::Server;
 
 use health::Dependencies;
+use service::MediaJobs;
 
-pub const SERVICE_NAME: &str = "mmrpc.v1.MediaJobService";
+pub const SERVICE_NAME: &str = <MediaJobServiceServer<MediaJobs> as NamedService>::NAME;
 
 const DEFAULT_BIND: ([u8; 4], u16) = ([127, 0, 0, 1], 0);
 
@@ -91,7 +95,7 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
     let local_addr = listener.local_addr()?;
     let (reporter, health_service) = tonic_health::server::health_reporter();
     let dependencies = Dependencies::new(
-        config.repository,
+        config.repository.clone(),
         config.store,
         config.store_probe,
         config.prober,
@@ -103,7 +107,12 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
         config.health_interval,
     ));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
-    let router = Server::builder().add_service(health_service);
+    let router =
+        Server::builder()
+            .add_service(health_service)
+            .add_service(MediaJobServiceServer::new(MediaJobs::new(
+                config.repository,
+            )));
     let server = tokio::spawn(router.serve_with_incoming_shutdown(
         TcpListenerStream::new(listener),
         async move {

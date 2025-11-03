@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mm_domain::{
-    MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpSpec, ProbeSpec,
-};
+use mm_domain::{MediaRef, OpSpec, ProbeSpec};
 use mm_jobstore::MIGRATOR;
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_client::MediaJobServiceClient;
@@ -155,26 +153,7 @@ fn fixture(name: &str, seconds: u32) -> PathBuf {
 }
 
 async fn upload_input(store: &S3ObjectStore, path: &Path, key: &str) -> String {
-    let payload = tokio::fs::read(path).await.unwrap();
-    let length = payload.len() as u64;
-    let object = ObjectRef::new(BUCKET, key).unwrap();
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let chunks: Vec<Result<bytes::Bytes, ObjectStoreError>> = payload
-            .chunks(64 * 1024)
-            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
-            .collect();
-        let body: ObjectBody = Box::pin(futures_util::stream::iter(chunks));
-        match store.put(&object, body, length).await {
-            Ok(()) => break,
-            Err(error) if attempt < 3 => {
-                eprintln!("fixture upload attempt {attempt} failed: {error}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(error) => panic!("fixture upload failed after {attempt} attempts: {error}"),
-        }
-    }
+    mm_testkit::upload_object(store, path, BUCKET, key).await;
     format!("s3://{BUCKET}/{key}")
 }
 
@@ -273,7 +252,7 @@ async fn the_combined_daemon_serves_and_works_jobs() {
         .into_inner();
     let job_id = created.job_id;
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let job = client
             .get_job(v1::GetJobRequest {

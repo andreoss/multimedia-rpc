@@ -420,3 +420,49 @@ fn mp3_audio_is_supported() {
     let verdicts = validate_concat_inputs(&[with_mp3.clone(), with_mp3]);
     assert!(blocks(&verdicts).is_empty());
 }
+
+#[test]
+fn rendered_verdicts_round_trip_through_parse() {
+    use mm_domain::{parse_rendered_verdicts, render_verdicts};
+    let verdicts = vec![
+        Verdict {
+            input: Some(0),
+            code: VerdictCode::Block(BlockCode::UnsupportedContainer),
+        },
+        Verdict {
+            input: None,
+            code: VerdictCode::Block(BlockCode::TooFewInputs),
+        },
+        Verdict {
+            input: Some(2),
+            code: VerdictCode::Warn(WarnCode::FpsDrift),
+        },
+    ];
+    let text = render_verdicts(&verdicts);
+    assert_eq!(
+        text,
+        "input 0: UnsupportedContainer; inputs: TooFewInputs; input 2: FpsDrift"
+    );
+    assert_eq!(
+        parse_rendered_verdicts(&text),
+        vec![
+            (Some(0), "UnsupportedContainer".to_string()),
+            (None, "TooFewInputs".to_string()),
+            (Some(2), "FpsDrift".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn free_form_messages_parse_to_no_verdicts() {
+    use mm_domain::parse_rendered_verdicts;
+    for text in [
+        "",
+        "connection reset by peer",
+        "input x: Broken",
+        "input 0: two words",
+        "inputs TooFewInputs",
+    ] {
+        assert_eq!(parse_rendered_verdicts(text), Vec::new(), "{text:?}");
+    }
+}

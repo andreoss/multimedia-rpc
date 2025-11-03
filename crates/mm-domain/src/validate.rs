@@ -223,3 +223,44 @@ pub fn validate_concat_inputs(inputs: &[InputReport]) -> Vec<Verdict> {
     check_drift(inputs, &mut verdicts);
     verdicts
 }
+
+pub fn render_verdicts(verdicts: &[Verdict]) -> String {
+    verdicts
+        .iter()
+        .map(|verdict| {
+            let code = match verdict.code {
+                VerdictCode::Block(code) => format!("{code:?}"),
+                VerdictCode::Warn(code) => format!("{code:?}"),
+            };
+            match verdict.input {
+                Some(index) => format!("input {index}: {code}"),
+                None => format!("inputs: {code}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+pub fn parse_rendered_verdicts(text: &str) -> Vec<(Option<usize>, String)> {
+    let mut parsed = Vec::new();
+    for segment in text.split("; ") {
+        let Some((subject, code)) = segment.split_once(": ") else {
+            return Vec::new();
+        };
+        if code.is_empty() || !code.chars().all(|letter| letter.is_ascii_alphanumeric()) {
+            return Vec::new();
+        }
+        let input = if subject == "inputs" {
+            None
+        } else if let Some(raw) = subject.strip_prefix("input ") {
+            match raw.parse::<usize>() {
+                Ok(index) => Some(index),
+                Err(_) => return Vec::new(),
+            }
+        } else {
+            return Vec::new();
+        };
+        parsed.push((input, code.to_string()));
+    }
+    parsed
+}

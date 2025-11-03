@@ -84,7 +84,7 @@ impl MediaJobs {
 fn state_event(state: JobState) -> v1::WatchJobResponse {
     v1::WatchJobResponse {
         event: Some(v1::JobEvent {
-            kind: Some(v1::job_event::Kind::State(state_to_proto(state) as i32)),
+            kind: Some(v1::job_event::Kind::State(v1::JobState::from(state) as i32)),
         }),
     }
 }
@@ -247,30 +247,8 @@ fn parse_page_token(token: &str) -> Result<Option<mm_domain::PageCursor>, Status
         .map_err(|error| Status::invalid_argument(error.to_string()))
 }
 
-fn state_to_proto(state: JobState) -> v1::JobState {
-    match state {
-        JobState::Pending => v1::JobState::Pending,
-        JobState::Running => v1::JobState::Running,
-        JobState::Succeeded => v1::JobState::Succeeded,
-        JobState::Failed => v1::JobState::Failed,
-        JobState::Cancelled => v1::JobState::Cancelled,
-    }
-}
-
 fn job_to_proto(record: &JobRecord) -> v1::Job {
-    v1::Job {
-        job_id: record.id.to_string(),
-        user_id: record.owner.to_string(),
-        request_id: record.request.to_string(),
-        state: state_to_proto(record.state) as i32,
-        spec: Some(v1::OpSpec::from(&record.spec)),
-        result: record.result.as_ref().map(v1::OpResult::from),
-        file_errors: Vec::new(),
-        progress_percent: u32::from(record.progress.value()),
-        callback: record.callback.as_ref().map(|queue| v1::Callback {
-            queue_url: queue.as_str().to_string(),
-        }),
-    }
+    v1::Job::from(record)
 }
 
 #[tonic::async_trait]

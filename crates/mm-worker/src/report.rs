@@ -72,19 +72,4 @@ pub fn warnings(verdicts: &[Verdict]) -> Vec<Verdict> {
         .collect()
 }
 
-pub fn render_verdicts(verdicts: &[Verdict]) -> String {
-    verdicts
-        .iter()
-        .map(|verdict| {
-            let code = match verdict.code {
-                VerdictCode::Block(code) => format!("{code:?}"),
-                VerdictCode::Warn(code) => format!("{code:?}"),
-            };
-            match verdict.input {
-                Some(index) => format!("input {index}: {code}"),
-                None => format!("inputs: {code}"),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
+pub use mm_domain::render_verdicts;

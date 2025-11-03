@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use mm_domain::WorkerId;
 use mm_ffmpeg::Prober;
-use mm_jobstore::{PgJobListener, PgJobRepository};
+use mm_jobstore::{PgCancelListener, PgJobListener, PgJobRepository};
 use mm_server::ServerConfig;
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, WorkerHandle};
@@ -255,6 +255,10 @@ async fn start_worker(env: &WorkerEnv) -> Result<WorkerHandle, String> {
             .await
             .map_err(|error| format!("notification listener failed: {error}"))?;
         config.notifications = Some(Arc::new(listener));
+        let cancels = PgCancelListener::connect(&env.stack.database_url)
+            .await
+            .map_err(|error| format!("cancel listener failed: {error}"))?;
+        config.cancellations = Some(Arc::new(cancels));
     }
     let handle = mm_worker::start(config);
     println!("worker {} ready", env.worker_id);

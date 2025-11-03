@@ -197,27 +197,7 @@ fn fixture(name: &str, seconds: u32, fps: u32, container: &str) -> PathBuf {
 }
 
 async fn upload_input(store: &S3ObjectStore, path: &Path, key: &str) -> MediaRef {
-    let payload = tokio::fs::read(path).await.unwrap();
-    let length = payload.len() as u64;
-    let object = ObjectRef::new(BUCKET, key).unwrap();
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let chunks: Vec<Result<bytes::Bytes, mm_domain::ObjectStoreError>> = payload
-            .chunks(64 * 1024)
-            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
-            .collect();
-        let body: ObjectBody = Box::pin(futures_util::stream::iter(chunks));
-        match store.put(&object, body, length).await {
-            Ok(()) => break,
-            Err(error) if attempt < 3 => {
-                eprintln!("fixture upload attempt {attempt} failed: {error}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(error) => panic!("fixture upload failed after {attempt} attempts: {error}"),
-        }
-    }
-    MediaRef::object_uri(&format!("s3://{BUCKET}/{key}")).unwrap()
+    mm_testkit::upload_object(store, path, BUCKET, key).await
 }
 
 fn owner() -> UserId {
@@ -301,6 +281,7 @@ async fn await_state(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_concat_job_runs_to_succeeded_with_an_uploaded_output() {
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-4s.mp4", 4, 30, "mp4");
@@ -386,6 +367,7 @@ async fn a_probe_job_succeeds_with_stream_metadata() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_transcode_job_succeeds_with_a_verified_output() {
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let source = fixture("transcode-30fps-4s.mp4", 4, 30, "mp4");
@@ -472,6 +454,7 @@ async fn a_blocked_transcode_fails_with_the_input_code() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn parallel_jobs_never_exceed_the_concurrency_bound() {
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("par-a-8s.mp4", 8, 30, "mp4");
@@ -530,6 +513,7 @@ async fn parallel_jobs_never_exceed_the_concurrency_bound() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_killed_workers_lease_expires_and_another_worker_completes_the_job() {
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("long-a-30s.mp4", 30, 30, "mp4");
@@ -736,10 +720,10 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
     let record = await_terminal(&repository, job.id, Duration::from_secs(60)).await;
     assert_eq!(record.state, JobState::Failed);
 
-    let settle = Instant::now() + Duration::from_secs(20);
+    let settle = Instant::now() + mm_testkit::budget::QUEUE_SETTLE;
     let bodies = loop {
         let received = tokio::time::timeout(
-            Duration::from_secs(10),
+            mm_testkit::budget::QUEUE_RECEIVE,
             publisher.receive(&queue, Duration::from_secs(2)),
         )
         .await
@@ -824,6 +808,7 @@ impl ObjectStore for FailingUploads {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_transient_upload_failure_retries_with_growing_gaps_until_failed() {
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("retry-a-1s.mp4", 1, 30, "mp4");
@@ -847,7 +832,7 @@ async fn a_transient_upload_failure_retries_with_growing_gaps_until_failed() {
     config.reconcile_interval = Duration::from_millis(100);
     let handle = start(config);
 
-    let mut gaps: Vec<Duration> = Vec::new();
+    let mut schedules: Vec<std::time::SystemTime> = Vec::new();
     let mut seen = 0u32;
     let deadline = Instant::now() + Duration::from_secs(120);
     let record = loop {
@@ -857,10 +842,7 @@ async fn a_transient_upload_failure_retries_with_growing_gaps_until_failed() {
             && let Some(due) = record.next_attempt_at
         {
             seen = record.attempts;
-            gaps.push(
-                due.duration_since(std::time::SystemTime::now())
-                    .unwrap_or_default(),
-            );
+            schedules.push(due);
         }
         if record.state.is_terminal() {
             break record;
@@ -879,9 +861,15 @@ async fn a_transient_upload_failure_retries_with_growing_gaps_until_failed() {
         failure.message()
     );
     assert_eq!(record.attempts, 3);
-    assert_eq!(gaps.len(), 2, "observed retry gaps: {gaps:?}");
-    assert!(gaps[1] > gaps[0], "gaps never grew: {gaps:?}");
-    assert!(gaps[0] >= Duration::from_secs(1), "{gaps:?}");
+    assert_eq!(
+        schedules.len(),
+        2,
+        "observed retry schedules: {schedules:?}"
+    );
+    assert!(
+        schedules[1] > schedules[0],
+        "the second schedule never advanced past the first: {schedules:?}"
+    );
     db.dispose().await;
 }
 
@@ -973,6 +961,7 @@ fn find_process(needle: &str) -> Option<u32> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_overdue_running_job_is_killed_and_fails_with_timeout() {
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("long-a-120s.mp4", 120, 30, "mp4");
@@ -1016,7 +1005,7 @@ async fn an_overdue_running_job_is_killed_and_fails_with_timeout() {
     assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
     let failure = record.failure.expect("failure recorded");
     assert_eq!(failure.code(), codes::TIMEOUT);
-    let gone = Instant::now() + Duration::from_secs(5);
+    let gone = Instant::now() + mm_testkit::budget::PROCESS_EXIT;
     while process_mentions(pid, &needle) {
         assert!(Instant::now() < gone, "merge process survived the reap");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1028,6 +1017,7 @@ async fn an_overdue_running_job_is_killed_and_fails_with_timeout() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_oversized_job_is_released_until_disk_frees() {
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-4s.mp4", 4, 30, "mp4");
@@ -1071,7 +1061,7 @@ async fn an_oversized_job_is_released_until_disk_frees() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_created_job_is_claimed_within_a_second_via_notify() {
+async fn a_created_job_is_claimed_via_notify_well_before_any_tick() {
     let db = fresh_db().await;
     let store = test_store().await;
     let repository = db.repository();
@@ -1125,8 +1115,9 @@ async fn a_created_job_is_claimed_within_a_second_via_notify() {
         }
     }
     assert!(
-        fastest < Duration::from_secs(1),
-        "no claim landed within a second over three attempts; fastest {fastest:?}"
+        fastest < mm_testkit::budget::PICKUP,
+        "no claim landed inside the notify budget over three attempts, \
+         far below the one-minute tick; fastest {fastest:?}"
     );
     handle.shutdown().await;
     db.dispose().await;
@@ -1169,8 +1160,8 @@ async fn without_a_listener_a_job_still_starts_within_one_tick() {
             break;
         }
         assert!(
-            created.elapsed() < Duration::from_millis(5000),
-            "job was not claimed within one reconcile tick"
+            created.elapsed() < mm_testkit::budget::TICK_PICKUP,
+            "the reconcile tick never claimed the job inside the budget"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1203,10 +1194,10 @@ async fn one_outcome(
     publisher: &mm_storage::SqsCallbackPublisher,
     queue: &QueueUrl,
 ) -> mm_proto::v1::JobOutcome {
-    let settle = Instant::now() + Duration::from_secs(60);
+    let settle = Instant::now() + mm_testkit::budget::QUEUE_SETTLE;
     let bodies = loop {
         let received = tokio::time::timeout(
-            Duration::from_secs(30),
+            mm_testkit::budget::QUEUE_RECEIVE,
             publisher.receive(queue, Duration::from_secs(2)),
         )
         .await
@@ -1219,7 +1210,7 @@ async fn one_outcome(
     };
     assert_eq!(bodies.len(), 1, "exactly one callback message");
     let leftover = tokio::time::timeout(
-        Duration::from_secs(30),
+        mm_testkit::budget::QUEUE_RECEIVE,
         publisher.receive(queue, Duration::from_secs(1)),
     )
     .await

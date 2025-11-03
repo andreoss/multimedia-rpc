@@ -14,7 +14,13 @@ fn an_https_queue_url_parses() {
 
 #[test]
 fn a_non_http_queue_url_is_rejected() {
-    for value in ["", "queue/results", "ftp://host/queue", "http://", "https://"] {
+    for value in [
+        "",
+        "queue/results",
+        "ftp://host/queue",
+        "http://",
+        "https://",
+    ] {
         assert_eq!(
             QueueUrl::new(value),
             Err(QueueUrlError::Scheme {

@@ -626,9 +626,8 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
             .decode(&bodies[0])
             .expect("message is base64")
     };
-    let outcome =
-        <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
-            .expect("message is a job outcome");
+    let outcome = <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
+        .expect("message is a job outcome");
     assert_eq!(outcome.job_id, job.id.to_string());
     assert_eq!(outcome.request_id, job.request.to_string());
     assert_eq!(outcome.state, mm_proto::v1::JobState::Failed as i32);

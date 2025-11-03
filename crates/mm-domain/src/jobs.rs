@@ -163,6 +163,11 @@ pub enum JobStoreError {
 }
 
 #[async_trait]
+pub trait JobNotifications: Send + Sync {
+    async fn notified(&self) -> Result<(), JobStoreError>;
+}
+
+#[async_trait]
 pub trait JobRepository: Send + Sync {
     async fn create(&self, job: NewJob) -> Result<JobRecord, JobStoreError>;
     async fn get(&self, id: JobId) -> Result<Option<JobRecord>, JobStoreError>;

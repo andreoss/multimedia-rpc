@@ -5,10 +5,10 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use mm_domain::{
-    ConcatSpec, JobFailure, JobId, JobRepository, JobState, JobStoreError, MediaRef, NewJob,
-    OpResult, OpSpec, ProgressPercent, RequestId, TimedOutput, UserId, WorkerId,
+    ConcatSpec, JobFailure, JobId, JobNotifications, JobRepository, JobState, JobStoreError,
+    MediaRef, NewJob, OpResult, OpSpec, ProgressPercent, RequestId, TimedOutput, UserId, WorkerId,
 };
-use mm_jobstore::{MIGRATOR, PgJobRepository};
+use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -783,5 +783,35 @@ async fn release_returns_a_claimed_job_to_pending_with_a_retry_delay() {
         repeated,
         Err(JobStoreError::InvalidTransition { .. })
     ));
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn job_insert_and_requeue_notify_listeners() {
+    let db = fresh_db().await;
+    let listener = PgJobListener::connect(&db.url)
+        .await
+        .expect("listener connects");
+    let repo = db.repository();
+    repo.create(new_job("owner-1", "req-notify"))
+        .await
+        .expect("create succeeds");
+    tokio::time::timeout(Duration::from_secs(1), listener.notified())
+        .await
+        .expect("insert notifies within a second")
+        .expect("notification received");
+
+    let claimed = repo
+        .claim(&worker("w-notify"), limit(1), Duration::from_millis(100))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed.len(), 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let requeued = repo.requeue_expired().await.expect("requeue succeeds");
+    assert_eq!(requeued.len(), 1);
+    tokio::time::timeout(Duration::from_secs(1), listener.notified())
+        .await
+        .expect("requeue notifies within a second")
+        .expect("notification received");
     db.dispose().await;
 }

@@ -1,14 +1,17 @@
 use std::env;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mm_domain::{MediaRef, OpSpec, ProbeSpec};
+use mm_domain::{
+    MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpSpec, ProbeSpec,
+};
 use mm_jobstore::MIGRATOR;
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_client::MediaJobServiceClient;
+use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Endpoint;
@@ -94,6 +97,87 @@ impl TestDb {
     }
 }
 
+async fn test_store() -> S3ObjectStore {
+    let store = S3ObjectStore::connect(S3Settings {
+        endpoint: Some(env_or("MM_OBJECTSTORE_ENDPOINT", DEFAULT_ENDPOINT)),
+        region: Some("us-east-1".to_string()),
+        force_path_style: true,
+        credentials: CredentialSource::Static {
+            access_key_id: env_or("MM_OBJECTSTORE_ACCESS_KEY", DEFAULT_ACCESS_KEY),
+            secret_access_key: env_or("MM_OBJECTSTORE_SECRET_KEY", DEFAULT_SECRET_KEY),
+        },
+    })
+    .await;
+    store.ensure_bucket(BUCKET).await.expect("bucket exists");
+    store
+}
+
+fn fixture(name: &str, seconds: u32) -> PathBuf {
+    static GENERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = GENERATION.lock().unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/s12/fixtures");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    if path.is_file() && path.metadata().unwrap().len() > 0 {
+        return path;
+    }
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(format!("testsrc2=duration={seconds}:size=640x360:rate=24"))
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(format!(
+            "sine=frequency=440:sample_rate=44100:duration={seconds}"
+        ))
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("128k")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg("-f")
+        .arg("mp4")
+        .arg(&path)
+        .output()
+        .expect("ffmpeg must be runnable to generate fixtures");
+    assert!(output.status.success(), "fixture generation failed: {name}");
+    path
+}
+
+async fn upload_input(store: &S3ObjectStore, path: &Path, key: &str) -> String {
+    let payload = tokio::fs::read(path).await.unwrap();
+    let length = payload.len() as u64;
+    let object = ObjectRef::new(BUCKET, key).unwrap();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let chunks: Vec<Result<bytes::Bytes, ObjectStoreError>> = payload
+            .chunks(64 * 1024)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect();
+        let body: ObjectBody = Box::pin(futures_util::stream::iter(chunks));
+        match store.put(&object, body, length).await {
+            Ok(()) => break,
+            Err(error) if attempt < 3 => {
+                eprintln!("fixture upload attempt {attempt} failed: {error}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(error) => panic!("fixture upload failed after {attempt} attempts: {error}"),
+        }
+    }
+    format!("s3://{BUCKET}/{key}")
+}
+
 struct Daemon {
     child: Child,
 }
@@ -116,6 +200,10 @@ fn spawn_combined(database_url: &str) -> Daemon {
             env_or("MM_OBJECTSTORE_ENDPOINT", DEFAULT_ENDPOINT),
         )
         .env("MM_OBJECTSTORE_BUCKET", BUCKET)
+        .env(
+            "MM_OBJECTSTORE_REGION",
+            env_or("MM_OBJECTSTORE_REGION", "us-east-1"),
+        )
         .env(
             "MM_OBJECTSTORE_ACCESS_KEY",
             env_or("MM_OBJECTSTORE_ACCESS_KEY", DEFAULT_ACCESS_KEY),
@@ -155,6 +243,9 @@ async fn announced_address(daemon: &mut Daemon) -> SocketAddr {
 #[tokio::test]
 async fn the_combined_daemon_serves_and_works_jobs() {
     let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("combined-probe-3s.mp4", 3);
+    let uri = upload_input(&store, &source, "inputs/combined-probe-3s.mp4").await;
     let mut daemon = spawn_combined(&db.url);
     let address = announced_address(&mut daemon).await;
 
@@ -168,7 +259,7 @@ async fn the_combined_daemon_serves_and_works_jobs() {
     let mut client = MediaJobServiceClient::new(channel);
 
     let spec = v1::OpSpec::from(&OpSpec::Probe(ProbeSpec::new(
-        MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).expect("valid ref"),
+        MediaRef::object_uri(&uri).expect("valid ref"),
     )));
     let created = client
         .create_job(v1::CreateJobRequest {
@@ -194,7 +285,7 @@ async fn the_combined_daemon_serves_and_works_jobs() {
             .into_inner()
             .job
             .expect("job present");
-        if job.state() == v1::JobState::Failed {
+        if job.state() == v1::JobState::Succeeded {
             break;
         }
         assert!(

@@ -11,7 +11,7 @@ use mm_ffmpeg::Prober;
 use mm_jobstore::{PgJobListener, PgJobRepository};
 use mm_server::ServerConfig;
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
-use mm_worker::{DiskBudget, WorkerConfig, WorkerHandle};
+use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, WorkerHandle};
 use sqlx::postgres::PgPoolOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,9 @@ struct WorkerEnv {
     progress_interval: Duration,
     default_deadline: Duration,
     disk_budget_bytes: Option<u64>,
+    retry_attempts: u32,
+    backoff_base: Duration,
+    backoff_cap: Duration,
     notify: bool,
 }
 
@@ -127,6 +130,20 @@ fn seconds_var(
     }
 }
 
+fn millis_var(
+    get: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: u64,
+) -> Result<Duration, String> {
+    match get(name) {
+        None => Ok(Duration::from_millis(default)),
+        Some(raw) => raw
+            .parse::<u64>()
+            .map(Duration::from_millis)
+            .map_err(|_| format!("{name} is not a number of milliseconds: {raw}")),
+    }
+}
+
 fn worker_env(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String> {
     let stack = stack_env(get)?;
     let worker_id = get("MM_WORKER_ID").unwrap_or_else(|| format!("worker-{}", std::process::id()));
@@ -157,6 +174,9 @@ fn worker_env(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String>
         progress_interval: seconds_var(get, "MM_WORKER_PROGRESS_SECS", 2)?,
         default_deadline: seconds_var(get, "MM_WORKER_DEADLINE_SECS", 3600)?,
         disk_budget_bytes,
+        retry_attempts: positive_var(get, "MM_WORKER_RETRY_ATTEMPTS", 3)?,
+        backoff_base: millis_var(get, "MM_WORKER_BACKOFF_BASE_MS", 1000)?,
+        backoff_cap: millis_var(get, "MM_WORKER_BACKOFF_CAP_MS", 60000)?,
         notify,
     })
 }
@@ -225,6 +245,11 @@ async fn start_worker(env: &WorkerEnv) -> Result<WorkerHandle, String> {
     if let Some(bytes) = env.disk_budget_bytes {
         config.disk_budget = DiskBudget::Fixed(bytes);
     }
+    config.retry = RetryPolicy {
+        max_attempts: env.retry_attempts,
+        base: env.backoff_base,
+        cap: env.backoff_cap,
+    };
     if env.notify {
         let listener = PgJobListener::connect(&env.stack.database_url)
             .await
@@ -429,6 +454,9 @@ mod tests {
         assert_eq!(env.progress_interval, Duration::from_secs(2));
         assert_eq!(env.default_deadline, Duration::from_secs(3600));
         assert_eq!(env.disk_budget_bytes, None);
+        assert_eq!(env.retry_attempts, 3);
+        assert_eq!(env.backoff_base, Duration::from_millis(1000));
+        assert_eq!(env.backoff_cap, Duration::from_millis(60000));
         assert!(env.notify);
     }
 
@@ -445,6 +473,9 @@ mod tests {
         map.insert("MM_WORKER_PROGRESS_SECS".into(), "1".into());
         map.insert("MM_WORKER_DEADLINE_SECS".into(), "600".into());
         map.insert("MM_WORKER_DISK_BUDGET_BYTES".into(), "1048576".into());
+        map.insert("MM_WORKER_RETRY_ATTEMPTS".into(), "5".into());
+        map.insert("MM_WORKER_BACKOFF_BASE_MS".into(), "250".into());
+        map.insert("MM_WORKER_BACKOFF_CAP_MS".into(), "10000".into());
         map.insert("MM_WORKER_NOTIFY".into(), "off".into());
         let env = worker_from(&map).expect("environment parses");
         assert_eq!(env.worker_id, "w-7");
@@ -457,6 +488,9 @@ mod tests {
         assert_eq!(env.progress_interval, Duration::from_secs(1));
         assert_eq!(env.default_deadline, Duration::from_secs(600));
         assert_eq!(env.disk_budget_bytes, Some(1_048_576));
+        assert_eq!(env.retry_attempts, 5);
+        assert_eq!(env.backoff_base, Duration::from_millis(250));
+        assert_eq!(env.backoff_cap, Duration::from_millis(10000));
         assert!(!env.notify);
     }
 
@@ -467,6 +501,9 @@ mod tests {
             "MM_WORKER_CLAIM_BATCH",
             "MM_WORKER_LEASE_SECS",
             "MM_WORKER_DISK_BUDGET_BYTES",
+            "MM_WORKER_RETRY_ATTEMPTS",
+            "MM_WORKER_BACKOFF_BASE_MS",
+            "MM_WORKER_BACKOFF_CAP_MS",
         ] {
             let mut map = complete();
             map.insert(name.into(), "many".into());

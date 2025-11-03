@@ -12,6 +12,7 @@ object storage.
 - mmrpcd — daemon: server, worker, combined
 - mm-server — gRPC service, auth interceptor, health
 - mm-storage — object store and callback queue adapters
+- mm-testkit — shared test harness
 - mm-worker — claim loop, op pipelines, callbacks
 
 == Verify

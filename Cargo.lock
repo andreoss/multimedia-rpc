@@ -1906,6 +1906,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-testkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "libc",
+ "mm-domain",
+ "tokio",
+]
+
+[[package]]
 name = "mm-worker"
 version = "0.1.0"
 dependencies = [

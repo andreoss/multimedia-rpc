@@ -4,6 +4,14 @@ Media jobs as a gRPC service: typed operations, async workers,
 object storage.
 
 == Crates
+- mm-domain — ids, job state machine, op catalog, ports
+- mm-ffmpeg — probe, progress, process supervision
+- mm-jobstore — migrations and the job repository
+- mm-proto — v1 contract and conversions
+- mmrpcd — daemon: server, worker, combined
+- mm-server — gRPC service, auth interceptor, health
+- mm-storage — object store and callback queue adapters
+- mm-worker — claim loop, op pipelines, callbacks
 
 == Verify
 - cargo test --workspace

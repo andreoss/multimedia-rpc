@@ -1,0 +1,38 @@
+stages:
+  - lint
+  - test
+
+image: rust:1.97
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+
+cache:
+  key: cargo
+  paths:
+    - .cargo
+    - target
+
+fmt:
+  stage: lint
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all --check
+
+clippy:
+  stage: lint
+  script:
+    - rustup component add clippy
+    - cargo clippy --workspace --all-targets -- -D warnings
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace
+
+coverage:
+  stage: test
+  script:
+    - rustup component add llvm-tools-preview
+    - cargo install cargo-llvm-cov --locked
+    - cargo llvm-cov --workspace --fail-under-lines 85

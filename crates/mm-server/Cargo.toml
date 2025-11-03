@@ -18,6 +18,7 @@ tonic-health.workspace = true
 [dev-dependencies]
 mm-jobstore = { path = "../mm-jobstore" }
 mm-storage = { path = "../mm-storage" }
+mm-testkit = { path = "../mm-testkit" }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid.workspace = true

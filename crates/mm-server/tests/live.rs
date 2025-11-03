@@ -522,9 +522,9 @@ async fn watch_client(handle: &ServerHandle) -> MediaJobServiceClient<tonic::tra
 async fn next_event(
     stream: &mut tonic::codec::Streaming<v1::WatchJobResponse>,
 ) -> Option<v1::job_event::Kind> {
-    tokio::time::timeout(Duration::from_secs(5), stream.message())
+    tokio::time::timeout(mm_testkit::budget::EVENT_ARRIVAL, stream.message())
         .await
-        .expect("an event arrives within five seconds")
+        .expect("an event arrives within the budget")
         .expect("stream stays healthy")
         .map(|response| {
             response

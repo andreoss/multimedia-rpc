@@ -21,6 +21,7 @@ tokio = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+async-trait.workspace = true
 mm-jobstore = { path = "../mm-jobstore" }
 mm-storage = { path = "../mm-storage" }
 sqlx.workspace = true

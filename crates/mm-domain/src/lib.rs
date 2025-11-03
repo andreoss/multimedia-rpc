@@ -3,6 +3,7 @@ mod op;
 mod resolve;
 mod state;
 mod store;
+mod validate;
 
 pub use id::{JobId, JobIdError, RequestId, RequestIdError, TextIdError, UserId, UserIdError};
 pub use op::{
@@ -15,6 +16,11 @@ pub use resolve::{ResolveError, resolve_media_ref};
 pub use store::{
     ObjectBody, ObjectStore, ObjectStoreError, OutputKey, OutputKeyError, body_from_bytes,
     collect_body,
+};
+
+pub use validate::{
+    AudioReport, BlockCode, InputReport, Verdict, VerdictCode, VideoReport, WarnCode,
+    validate_concat_inputs,
 };
 
 pub use state::{

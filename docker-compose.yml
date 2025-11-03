@@ -24,7 +24,7 @@ services:
         "-s3.config=/etc/objectstore/s3.json",
         "-dir=/data",
         "-master.volumeSizeLimitMB=256",
-        "-volume.max=16",
+        "-volume.max=64",
         "-volume.minFreeSpacePercent=0",
       ]
     ports:

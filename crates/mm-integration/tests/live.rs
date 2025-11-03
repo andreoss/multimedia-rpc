@@ -546,3 +546,209 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
     server.shutdown().await;
     drop_db(&admin, pool, &name).await;
 }
+
+fn process_mentions(pid: u32, needle: &str) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+        .unwrap_or(false)
+}
+
+fn find_process(needle: &str) -> Option<u32> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>()
+            && process_mentions(pid, needle)
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mid_merge_cancel_kills_the_tool_and_cleans_every_output() {
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let first = fixture("cancel-a-60s.mp4", 60, 30, "mp4");
+    let second = fixture("cancel-b-60s.mp4", 60, 30, "mp4");
+    let inputs = vec![
+        upload_object(&store, &first, "inputs/cancel-a-60s.mp4").await,
+        upload_object(&store, &second, "inputs/cancel-b-60s.mp4").await,
+    ];
+
+    let server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-cancel-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-cancel").unwrap(),
+        staging.clone(),
+    );
+    worker_config.heartbeat_interval = Duration::from_secs(3600);
+    worker_config.reconcile_interval = Duration::from_secs(60);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    worker_config.cancellations = Some(Arc::new(
+        mm_jobstore::PgCancelListener::connect(&url)
+            .await
+            .expect("cancel listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Concat(
+        mm_domain::ConcatSpec::new(inputs, None).expect("valid concat spec"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-cancel".to_string(),
+            idempotency_key: "req-cancel-e2e".to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let job_id = created.job_id;
+
+    let get = |mut client: mm_proto::v1::media_job_service_client::MediaJobServiceClient<
+        tonic::transport::Channel,
+    >,
+               job_id: String| async move {
+        client
+            .get_job(mm_proto::v1::GetJobRequest {
+                user_id: "owner-cancel".to_string(),
+                job_id,
+            })
+            .await
+            .expect("get succeeds")
+            .into_inner()
+            .job
+            .expect("job present")
+    };
+
+    let running_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let job = get(client.clone(), job_id.clone()).await;
+        if job.state() == mm_proto::v1::JobState::Running {
+            break;
+        }
+        assert!(
+            job.state() == mm_proto::v1::JobState::Pending,
+            "job ended early in {:?}",
+            job.state()
+        );
+        assert!(
+            std::time::Instant::now() < running_deadline,
+            "job never started"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let found = std::time::Instant::now() + Duration::from_secs(30);
+    let pid = loop {
+        if let Some(pid) = find_process(&job_id) {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < found,
+            "merge process never appeared"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    let cancel_sent = std::time::Instant::now();
+    let response = client
+        .cancel_job(mm_proto::v1::CancelJobRequest {
+            user_id: "owner-cancel".to_string(),
+            job_id: job_id.clone(),
+        })
+        .await
+        .expect("cancel succeeds")
+        .into_inner();
+    assert!(response.cancellation_accepted);
+
+    loop {
+        let job = get(client.clone(), job_id.clone()).await;
+        if job.state() == mm_proto::v1::JobState::Cancelled {
+            break;
+        }
+        assert!(
+            cancel_sent.elapsed() < Duration::from_secs(10),
+            "cancel never propagated; job is {:?}",
+            job.state()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        cancel_sent.elapsed() < Duration::from_secs(5),
+        "cancel took {:?} despite notifications",
+        cancel_sent.elapsed()
+    );
+
+    let gone = std::time::Instant::now() + Duration::from_secs(3);
+    while process_mentions(pid, &job_id) {
+        assert!(
+            std::time::Instant::now() < gone,
+            "merge process survived the cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let object = mm_domain::ObjectRef::new(BUCKET, &format!("jobs/{job_id}/output.mp4")).unwrap();
+    assert!(
+        matches!(
+            store.head(&object).await,
+            Err(ObjectStoreError::NotFound { .. })
+        ),
+        "cancelled job left an output object"
+    );
+    let uploads = store
+        .list_multipart_uploads(BUCKET)
+        .await
+        .expect("multipart listing succeeds");
+    assert!(
+        uploads.iter().all(|key| !key.contains(&job_id)),
+        "incomplete multipart upload left behind: {uploads:?}"
+    );
+    let leftovers: Vec<String> = std::fs::read_dir(&staging)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|file| file.contains(&job_id))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "staging not cleaned: {leftovers:?}");
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}

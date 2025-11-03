@@ -159,6 +159,24 @@ impl S3ObjectStore {
             .build())
     }
 
+    pub async fn list_multipart_uploads(
+        &self,
+        bucket: &str,
+    ) -> Result<Vec<String>, ObjectStoreError> {
+        let response = self
+            .client
+            .list_multipart_uploads()
+            .bucket(bucket)
+            .send()
+            .await
+            .map_err(backend)?;
+        Ok(response
+            .uploads()
+            .iter()
+            .filter_map(|upload| upload.key().map(str::to_string))
+            .collect())
+    }
+
     async fn run_multipart(
         &self,
         object: &ObjectRef,

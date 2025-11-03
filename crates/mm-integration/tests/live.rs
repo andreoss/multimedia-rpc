@@ -558,6 +558,151 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
     drop_db(&admin, pool, &name).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watch_stream_observes_a_live_merge_to_completion() {
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let first = fixture("watch-a-15s.mp4", 15, 30, "mp4");
+    let second = fixture("watch-b-15s.mp4", 15, 30, "mp4");
+    let inputs = vec![
+        upload_object(&store, &first, "inputs/watch-a-15s.mp4").await,
+        upload_object(&store, &second, "inputs/watch-b-15s.mp4").await,
+    ];
+
+    let mut server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    server_config.watch_poll_interval = Duration::from_secs(600);
+    server_config.job_events = Some(Arc::new(
+        mm_jobstore::PgJobEventListener::connect(&url)
+            .await
+            .expect("events listener connects"),
+    ));
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Concat(
+        mm_domain::ConcatSpec::new(inputs, None).expect("valid concat spec"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-watch".to_string(),
+            idempotency_key: "req-watch".to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+
+    let mut stream = client
+        .watch_job(mm_proto::v1::WatchJobRequest {
+            user_id: "owner-watch".to_string(),
+            job_id: created.job_id.clone(),
+        })
+        .await
+        .expect("watch starts")
+        .into_inner();
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-watch").unwrap(),
+        staging,
+    );
+    worker_config.reconcile_interval = Duration::from_secs(30);
+    worker_config.progress_interval = Duration::from_millis(500);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+
+    let mut kinds = Vec::new();
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(60), stream.message())
+            .await
+            .expect("an event arrives within a minute")
+            .expect("stream stays healthy");
+        match message {
+            Some(response) => kinds.push(
+                response
+                    .event
+                    .expect("event present")
+                    .kind
+                    .expect("kind present"),
+            ),
+            None => break,
+        }
+    }
+
+    use mm_proto::v1::job_event::Kind;
+    let states: Vec<i32> = kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            Kind::State(state) => Some(*state),
+            Kind::ProgressPercent(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            mm_proto::v1::JobState::Pending as i32,
+            mm_proto::v1::JobState::Running as i32,
+            mm_proto::v1::JobState::Succeeded as i32,
+        ]
+    );
+    assert_eq!(
+        kinds.first(),
+        Some(&Kind::State(mm_proto::v1::JobState::Pending as i32))
+    );
+    assert_eq!(
+        kinds.last(),
+        Some(&Kind::State(mm_proto::v1::JobState::Succeeded as i32))
+    );
+    let progress: Vec<u32> = kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            Kind::ProgressPercent(value) => Some(*value),
+            Kind::State(_) => None,
+        })
+        .collect();
+    assert!(
+        progress.windows(2).all(|pair| pair[0] <= pair[1]),
+        "progress regressed: {progress:?}"
+    );
+    let distinct: std::collections::BTreeSet<u32> = progress.iter().copied().collect();
+    assert!(
+        distinct.len() >= 3,
+        "fewer than three distinct progress values: {progress:?}"
+    );
+    assert_eq!(progress.last(), Some(&100));
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}
+
 fn process_mentions(pid: u32, needle: &str) -> bool {
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))

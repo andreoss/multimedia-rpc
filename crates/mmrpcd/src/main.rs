@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use mm_domain::WorkerId;
 use mm_ffmpeg::Prober;
-use mm_jobstore::{PgCancelListener, PgJobListener, PgJobRepository};
+use mm_jobstore::{PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository};
 use mm_server::ServerConfig;
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, WorkerHandle};
@@ -43,6 +43,7 @@ struct StackEnv {
 struct ServerEnv {
     bind: SocketAddr,
     stack: StackEnv,
+    notify: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,14 @@ fn stack_env(get: &dyn Fn(&str) -> Option<String>) -> Result<StackEnv, String> {
     })
 }
 
+fn notify_var(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<bool, String> {
+    match get(name).as_deref() {
+        None | Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        Some(other) => Err(format!("{name} must be on or off: {other}")),
+    }
+}
+
 fn server_env(get: &dyn Fn(&str) -> Option<String>) -> Result<ServerEnv, String> {
     let raw_bind = get("MM_BIND_ADDR").unwrap_or_else(|| String::from("127.0.0.1:0"));
     let bind = raw_bind
@@ -99,6 +108,7 @@ fn server_env(get: &dyn Fn(&str) -> Option<String>) -> Result<ServerEnv, String>
     Ok(ServerEnv {
         bind,
         stack: stack_env(get)?,
+        notify: notify_var(get, "MM_SERVER_NOTIFY")?,
     })
 }
 
@@ -157,11 +167,7 @@ fn worker_env(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String>
                 format!("MM_WORKER_DISK_BUDGET_BYTES is not a number of bytes: {raw}")
             })?),
         };
-    let notify = match get("MM_WORKER_NOTIFY").as_deref() {
-        None | Some("on") => true,
-        Some("off") => false,
-        Some(other) => return Err(format!("MM_WORKER_NOTIFY must be on or off: {other}")),
-    };
+    let notify = notify_var(get, "MM_WORKER_NOTIFY")?;
     Ok(WorkerEnv {
         stack,
         worker_id,
@@ -218,6 +224,12 @@ async fn start_server(env: &ServerEnv) -> Result<mm_server::ServerHandle, String
     )
     .map_err(|error| error.to_string())?;
     config.bind = env.bind;
+    if env.notify {
+        let events = PgJobEventListener::connect(&env.stack.database_url)
+            .await
+            .map_err(|error| format!("job events listener failed: {error}"))?;
+        config.job_events = Some(Arc::new(events));
+    }
     mm_server::start(config)
         .await
         .map_err(|error| error.to_string())
@@ -391,6 +403,7 @@ mod tests {
     fn a_complete_environment_parses_with_defaults() {
         let env = env_from(&complete()).expect("environment parses");
         assert_eq!(env.bind.to_string(), "127.0.0.1:0");
+        assert!(env.notify);
         assert_eq!(env.stack.database_url, "postgres://u:p@h:5/db");
         assert_eq!(env.stack.store_endpoint, "http://h:1");
         assert_eq!(env.stack.store_bucket, "media");
@@ -527,5 +540,15 @@ mod tests {
         let mut map = complete();
         map.insert("MM_WORKER_NOTIFY".into(), "maybe".into());
         assert!(worker_from(&map).unwrap_err().contains("MM_WORKER_NOTIFY"));
+    }
+
+    #[test]
+    fn the_server_notify_setting_parses_and_rejects_unknown_values() {
+        let mut map = complete();
+        map.insert("MM_SERVER_NOTIFY".into(), "off".into());
+        let env = env_from(&map).expect("environment parses");
+        assert!(!env.notify);
+        map.insert("MM_SERVER_NOTIFY".into(), "maybe".into());
+        assert!(env_from(&map).unwrap_err().contains("MM_SERVER_NOTIFY"));
     }
 }

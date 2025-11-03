@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use mm_domain::{
-    AudioReport, BlockCode, InputReport, Verdict, VerdictCode, VideoReport, WarnCode,
-    validate_concat_inputs,
+    AudioReport, BlockCode, InputReport, OpKind, Verdict, VerdictCode, VideoReport, WarnCode,
+    validate_concat_inputs, validate_inputs,
 };
 
 fn video() -> VideoReport {
@@ -419,6 +419,74 @@ fn mp3_audio_is_supported() {
     };
     let verdicts = validate_concat_inputs(&[with_mp3.clone(), with_mp3]);
     assert!(blocks(&verdicts).is_empty());
+}
+
+#[test]
+fn concat_policy_matches_the_concat_entry_point() {
+    let reports = [input()];
+    assert_eq!(
+        validate_inputs(OpKind::Concat, &reports),
+        validate_concat_inputs(&reports)
+    );
+    assert_eq!(
+        blocks(&validate_inputs(OpKind::Concat, &reports)),
+        vec![(None, BlockCode::TooFewInputs)]
+    );
+}
+
+#[test]
+fn a_single_input_satisfies_the_transcode_policy() {
+    let verdicts = validate_inputs(OpKind::Transcode, &[input()]);
+    assert!(verdicts.is_empty(), "{verdicts:?}");
+}
+
+#[test]
+fn transcode_policy_still_blocks_a_defective_input() {
+    let mut defective = input();
+    defective.container = "matroska,webm".to_string();
+    defective.drm = true;
+    let found = blocks(&validate_inputs(OpKind::Transcode, &[defective]));
+    assert!(found.contains(&(Some(0), BlockCode::UnsupportedContainer)));
+    assert!(found.contains(&(Some(0), BlockCode::DrmProtected)));
+}
+
+#[test]
+fn transcode_policy_rejects_no_inputs() {
+    assert_eq!(
+        blocks(&validate_inputs(OpKind::Transcode, &[])),
+        vec![(None, BlockCode::TooFewInputs)]
+    );
+}
+
+#[test]
+fn transcode_policy_skips_cross_input_drift() {
+    let mut other = input();
+    other.video[0].width = 640;
+    other.video[0].height = 480;
+    other.video[0].avg_fps = Some(25.0);
+    other.video[0].real_fps = Some(25.0);
+    let verdicts = validate_inputs(OpKind::Transcode, &[input(), other]);
+    assert!(warns(&verdicts).is_empty(), "{verdicts:?}");
+}
+
+#[test]
+fn probe_policy_validates_nothing() {
+    let mut defective = input();
+    defective.container = "matroska,webm".to_string();
+    defective.drm = true;
+    defective.video.clear();
+    assert!(validate_inputs(OpKind::Probe, &[defective]).is_empty());
+    assert!(validate_inputs(OpKind::Probe, &[]).is_empty());
+}
+
+#[test]
+fn transcode_policy_keeps_the_total_duration_cap() {
+    let mut long = input();
+    long.duration = Duration::from_secs(25 * 3600);
+    assert_eq!(
+        blocks(&validate_inputs(OpKind::Transcode, &[long])),
+        vec![(None, BlockCode::TotalDurationTooLong)]
+    );
 }
 
 #[test]

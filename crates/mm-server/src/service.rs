@@ -2,7 +2,9 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use mm_domain::{JobId, JobRepository, JobStoreError, NewJob, OpSpec, RequestId, UserId};
+use mm_domain::{
+    JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob, OpSpec, RequestId, UserId,
+};
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
 use tokio_stream::Stream;
@@ -34,8 +36,41 @@ fn parse_spec(value: Option<v1::OpSpec>) -> Result<OpSpec, Status> {
         .map_err(|error| Status::invalid_argument(format!("spec is invalid: {error}")))
 }
 
+fn parse_job_id(value: &str) -> Result<JobId, Status> {
+    JobId::from_str(value)
+        .map_err(|error| Status::invalid_argument(format!("job_id is invalid: {error}")))
+}
+
 fn store_failure(error: JobStoreError) -> Status {
     Status::internal(format!("job store failed: {error}"))
+}
+
+fn not_found() -> Status {
+    Status::not_found("job does not exist")
+}
+
+fn state_to_proto(state: JobState) -> v1::JobState {
+    match state {
+        JobState::Pending => v1::JobState::Pending,
+        JobState::Running => v1::JobState::Running,
+        JobState::Succeeded => v1::JobState::Succeeded,
+        JobState::Failed => v1::JobState::Failed,
+        JobState::Cancelled => v1::JobState::Cancelled,
+    }
+}
+
+fn job_to_proto(record: &JobRecord) -> v1::Job {
+    v1::Job {
+        job_id: record.id.to_string(),
+        user_id: record.owner.to_string(),
+        request_id: record.request.to_string(),
+        state: state_to_proto(record.state) as i32,
+        spec: Some(v1::OpSpec::from(&record.spec)),
+        result: record.result.as_ref().map(v1::OpResult::from),
+        file_errors: Vec::new(),
+        progress_percent: u32::from(record.progress.value()),
+        callback: None,
+    }
 }
 
 #[tonic::async_trait]
@@ -79,9 +114,20 @@ impl MediaJobService for MediaJobs {
 
     async fn get_job(
         &self,
-        _request: Request<v1::GetJobRequest>,
+        request: Request<v1::GetJobRequest>,
     ) -> Result<Response<v1::GetJobResponse>, Status> {
-        Err(Status::unimplemented("GetJob is not implemented yet"))
+        let message = request.into_inner();
+        let owner = parse_user(&message.user_id)?;
+        let id = parse_job_id(&message.job_id)?;
+        let record = self
+            .repository
+            .get_owned(&owner, id)
+            .await
+            .map_err(store_failure)?
+            .ok_or_else(not_found)?;
+        Ok(Response::new(v1::GetJobResponse {
+            job: Some(job_to_proto(&record)),
+        }))
     }
 
     async fn cancel_job(

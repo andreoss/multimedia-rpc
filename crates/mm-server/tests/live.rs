@@ -431,3 +431,80 @@ async fn watch_job_is_unimplemented() {
     handle.shutdown().await;
     db.dispose().await;
 }
+
+#[tokio::test]
+async fn get_job_returns_the_owned_job_with_its_spec() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let created = client
+        .create_job(create_request("owner-1", "req-1"))
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let fetched = client
+        .get_job(v1::GetJobRequest {
+            user_id: "owner-1".to_string(),
+            job_id: created.job_id.clone(),
+        })
+        .await
+        .expect("get succeeds")
+        .into_inner()
+        .job
+        .expect("job present");
+    assert_eq!(fetched.job_id, created.job_id);
+    assert_eq!(fetched.user_id, "owner-1");
+    assert_eq!(fetched.request_id, "req-1");
+    assert_eq!(fetched.state, v1::JobState::Pending as i32);
+    assert_eq!(fetched.spec, Some(concat_spec()));
+    assert_eq!(fetched.progress_percent, 0);
+    assert_eq!(fetched.result, None);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_foreign_owner_cannot_distinguish_a_job_from_an_absent_one() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let created = client
+        .create_job(create_request("owner-1", "req-1"))
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let foreign = client
+        .get_job(v1::GetJobRequest {
+            user_id: "owner-2".to_string(),
+            job_id: created.job_id.clone(),
+        })
+        .await
+        .expect_err("foreign owner sees nothing");
+    let absent = client
+        .get_job(v1::GetJobRequest {
+            user_id: "owner-2".to_string(),
+            job_id: mm_domain::JobId::generate().to_string(),
+        })
+        .await
+        .expect_err("absent job is not found");
+    assert_eq!(foreign.code(), tonic::Code::NotFound);
+    assert_eq!(absent.code(), tonic::Code::NotFound);
+    assert_eq!(foreign.message(), absent.message());
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_malformed_job_id_is_invalid_argument_on_get() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let status = client
+        .get_job(v1::GetJobRequest {
+            user_id: "owner-1".to_string(),
+            job_id: "not-a-job".to_string(),
+        })
+        .await
+        .expect_err("malformed id rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("job_id"));
+    handle.shutdown().await;
+    db.dispose().await;
+}

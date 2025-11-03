@@ -400,25 +400,12 @@ async fn drop_db(admin: &sqlx::PgPool, pool: sqlx::PgPool, name: &str) {
 }
 
 async fn upload_object(store: &S3ObjectStore, path: &Path, key: &str) -> MediaRef {
-    let object = mm_domain::ObjectRef::new(BUCKET, key).unwrap();
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let (body, length) = file_body(path);
-        match store.put(&object, body, length).await {
-            Ok(()) => break,
-            Err(error) if attempt < 3 => {
-                eprintln!("fixture upload attempt {attempt} failed: {error}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(error) => panic!("fixture upload failed after {attempt} attempts: {error}"),
-        }
-    }
-    MediaRef::object_uri(&format!("s3://{BUCKET}/{key}")).unwrap()
+    mm_testkit::upload_object(store, path, BUCKET, key).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_created_job_merges_end_to_end_through_server_and_worker() {
+    let _slot = mm_testkit::stack_slot();
     let (admin, pool, url, name) = fresh_pool().await;
     let store = Arc::new(test_store().await);
     let repository: Arc<dyn mm_domain::JobRepository> =
@@ -515,8 +502,9 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
 
     let picked_up = left_pending_within.expect("job left pending");
     assert!(
-        picked_up < Duration::from_secs(3),
-        "pickup took {picked_up:?}"
+        picked_up < mm_testkit::budget::PICKUP,
+        "pickup took {picked_up:?}, outside the notify budget and \
+         approaching the half-minute tick"
     );
     assert_eq!(final_job.progress_percent, 100);
 
@@ -560,6 +548,7 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
+    let _slot = mm_testkit::stack_slot();
     let (admin, pool, url, name) = fresh_pool().await;
     let store = Arc::new(test_store().await);
     let repository: Arc<dyn mm_domain::JobRepository> =
@@ -709,6 +698,7 @@ async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_watch_stream_observes_a_live_merge_to_completion() {
+    let _slot = mm_testkit::stack_slot();
     let (admin, pool, url, name) = fresh_pool().await;
     let store = Arc::new(test_store().await);
     let repository: Arc<dyn mm_domain::JobRepository> =
@@ -961,6 +951,7 @@ async fn a_probe_job_returns_stream_metadata_through_the_api() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_transcode_job_streams_progress_and_lands_a_verified_output() {
+    let _slot = mm_testkit::stack_slot();
     let (admin, pool, url, name) = fresh_pool().await;
     let store = Arc::new(test_store().await);
     let repository: Arc<dyn mm_domain::JobRepository> =
@@ -1157,6 +1148,7 @@ fn find_process(needle: &str) -> Option<u32> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mid_merge_cancel_kills_the_tool_and_cleans_every_output() {
+    let _slot = mm_testkit::stack_slot();
     let (admin, pool, url, name) = fresh_pool().await;
     let store = Arc::new(test_store().await);
     let repository: Arc<dyn mm_domain::JobRepository> =
@@ -1290,19 +1282,15 @@ async fn a_mid_merge_cancel_kills_the_tool_and_cleans_every_output() {
             break;
         }
         assert!(
-            cancel_sent.elapsed() < Duration::from_secs(10),
-            "cancel never propagated; job is {:?}",
+            cancel_sent.elapsed() < mm_testkit::budget::CANCEL,
+            "cancel never propagated inside the budget, far below the \
+             one-minute reconcile tick; job is {:?}",
             job.state()
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(
-        cancel_sent.elapsed() < Duration::from_secs(5),
-        "cancel took {:?} despite notifications",
-        cancel_sent.elapsed()
-    );
 
-    let gone = std::time::Instant::now() + Duration::from_secs(3);
+    let gone = std::time::Instant::now() + mm_testkit::budget::PROCESS_EXIT;
     while process_mentions(pid, &job_id) {
         assert!(
             std::time::Instant::now() < gone,

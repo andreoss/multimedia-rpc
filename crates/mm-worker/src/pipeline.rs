@@ -211,13 +211,16 @@ fn timeout_failure() -> JobFailure {
     JobFailure::new(codes::TIMEOUT, "job deadline passed").expect("worker failure codes are valid")
 }
 
-async fn publish_outcome(ctx: &WorkerConfig, record: &JobRecord) {
+pub(crate) async fn publish_outcome(ctx: &WorkerConfig, record: &JobRecord) {
     let Some(publisher) = &ctx.callbacks else {
         return;
     };
     let Some(queue) = &record.callback else {
         return;
     };
+    if !matches!(ctx.repository.claim_callback(record.id).await, Ok(true)) {
+        return;
+    }
     let body = BASE64_STANDARD.encode(mm_proto::v1::JobOutcome::from(record).encode_to_vec());
     let mut attempt = 0;
     loop {

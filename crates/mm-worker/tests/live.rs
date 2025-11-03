@@ -1028,3 +1028,142 @@ async fn without_a_listener_a_job_still_starts_within_one_tick() {
     handle.shutdown().await;
     db.dispose().await;
 }
+
+async fn queue_publisher() -> Arc<mm_storage::SqsCallbackPublisher> {
+    let queue_endpoint = env_or("MM_QUEUE_ENDPOINT", "http://127.0.0.1:9324");
+    let queue_authority = queue_endpoint
+        .strip_prefix("http://")
+        .or_else(|| queue_endpoint.strip_prefix("https://"))
+        .expect("endpoint must be an http(s) url")
+        .trim_end_matches('/');
+    require_reachable(queue_authority, "queue");
+    Arc::new(
+        mm_storage::SqsCallbackPublisher::connect(mm_storage::SqsSettings {
+            endpoint: Some(queue_endpoint),
+            region: Some("local".to_string()),
+            credentials: CredentialSource::Static {
+                access_key_id: "queue-access".to_string(),
+                secret_access_key: "queue-secret".to_string(),
+            },
+        })
+        .await,
+    )
+}
+
+async fn one_outcome(
+    publisher: &mm_storage::SqsCallbackPublisher,
+    queue: &QueueUrl,
+) -> mm_proto::v1::JobOutcome {
+    let settle = Instant::now() + Duration::from_secs(20);
+    let bodies = loop {
+        let received = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.receive(queue, Duration::from_secs(2)),
+        )
+        .await
+        .expect("receive answers in time")
+        .expect("receive succeeds");
+        if !received.is_empty() {
+            break received;
+        }
+        assert!(Instant::now() < settle, "no callback message arrived");
+    };
+    assert_eq!(bodies.len(), 1, "exactly one callback message");
+    let leftover = tokio::time::timeout(
+        Duration::from_secs(10),
+        publisher.receive(queue, Duration::from_secs(1)),
+    )
+    .await
+    .expect("receive answers in time")
+    .expect("receive succeeds");
+    assert!(leftover.is_empty(), "a second callback message arrived");
+    let decoded = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(&bodies[0])
+            .expect("message is base64")
+    };
+    <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
+        .expect("message is a job outcome")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_cancelled_while_pending_still_delivers_one_callback() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let publisher = queue_publisher().await;
+    let queue = publisher
+        .ensure_queue(&format!("mm-worker-pc-{}", Uuid::now_v7().simple()))
+        .await
+        .expect("queue exists");
+
+    let refs = vec![
+        MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none-a.mp4")).unwrap(),
+        MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none-b.mp4")).unwrap(),
+    ];
+    let repository = db.repository();
+    let job = repository
+        .create(concat_job(refs).with_callback(queue.clone()))
+        .await
+        .unwrap();
+    repository.mark_cancelled(job.id).await.unwrap();
+
+    let mut config = base_config(&db, store, "worker-pending-cancel");
+    config.callbacks = Some(publisher.clone());
+    let handle = start(config);
+
+    let outcome = one_outcome(&publisher, &queue).await;
+    handle.shutdown().await;
+    assert_eq!(outcome.job_id, job.id.to_string());
+    assert_eq!(outcome.request_id, job.request.to_string());
+    assert_eq!(outcome.state, mm_proto::v1::JobState::Cancelled as i32);
+    assert_eq!(outcome.error_code, "");
+    assert!(outcome.result.is_none());
+    publisher.delete_queue(&queue).await.expect("queue removed");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deadline_reaped_job_still_delivers_one_callback() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let publisher = queue_publisher().await;
+    let queue = publisher
+        .ensure_queue(&format!("mm-worker-rc-{}", Uuid::now_v7().simple()))
+        .await
+        .expect("queue exists");
+
+    let refs = vec![
+        MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none-a.mp4")).unwrap(),
+        MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none-b.mp4")).unwrap(),
+    ];
+    let repository = db.repository();
+    let id = JobId::generate();
+    let job = repository
+        .create(
+            NewJob::new(
+                id,
+                owner(),
+                RequestId::from_str(&format!("req-{id}")).unwrap(),
+                OpSpec::Concat(ConcatSpec::new(refs, None).unwrap()),
+                Some(std::time::SystemTime::now() - Duration::from_secs(1)),
+            )
+            .with_callback(queue.clone()),
+        )
+        .await
+        .unwrap();
+
+    let mut config = base_config(&db, store, "worker-reaped");
+    config.callbacks = Some(publisher.clone());
+    let handle = start(config);
+
+    let outcome = one_outcome(&publisher, &queue).await;
+    handle.shutdown().await;
+    let record = repository.get(job.id).await.unwrap().expect("job exists");
+    assert_eq!(record.state, JobState::Failed);
+    assert_eq!(outcome.job_id, job.id.to_string());
+    assert_eq!(outcome.state, mm_proto::v1::JobState::Failed as i32);
+    assert_eq!(outcome.error_code, codes::TIMEOUT);
+    publisher.delete_queue(&queue).await.expect("queue removed");
+    db.dispose().await;
+}

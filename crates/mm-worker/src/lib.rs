@@ -130,6 +130,7 @@ async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
     loop {
         let _ = ctx.repository.requeue_expired().await;
         let _ = ctx.repository.fail_overdue().await;
+        publish_unpublished(&ctx).await;
         claim_available(&ctx, &semaphore, &wake, &registry, &mut jobs).await;
         while jobs.try_join_next().is_some() {}
         tokio::select! {
@@ -146,6 +147,18 @@ async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
     while jobs.join_next().await.is_some() {}
     if let Some(watcher) = watcher {
         watcher.abort();
+    }
+}
+
+async fn publish_unpublished(ctx: &Arc<WorkerConfig>) {
+    if ctx.callbacks.is_none() {
+        return;
+    }
+    let Ok(records) = ctx.repository.unpublished_callbacks(ctx.claim_batch).await else {
+        return;
+    };
+    for record in records {
+        pipeline::publish_outcome(ctx, &record).await;
     }
 }
 

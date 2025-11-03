@@ -1836,6 +1836,20 @@ dependencies = [
 [[package]]
 name = "mm-server"
 version = "0.1.0"
+dependencies = [
+ "mm-domain",
+ "mm-ffmpeg",
+ "mm-jobstore",
+ "mm-proto",
+ "mm-storage",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "uuid",
+]
 
 [[package]]
 name = "mm-storage"
@@ -1860,6 +1874,17 @@ version = "0.1.0"
 [[package]]
 name = "mmrpcd"
 version = "0.1.0"
+dependencies = [
+ "mm-ffmpeg",
+ "mm-jobstore",
+ "mm-server",
+ "mm-storage",
+ "sqlx",
+ "tokio",
+ "tonic",
+ "tonic-health",
+ "uuid",
+]
 
 [[package]]
 name = "multimap"
@@ -3059,6 +3084,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3114,6 +3140,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tonic-health"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
+dependencies = [
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]

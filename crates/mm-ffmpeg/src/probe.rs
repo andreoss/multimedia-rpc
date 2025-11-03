@@ -60,6 +60,46 @@ impl Prober {
         }
     }
 
+    pub async fn version(&self, timeout: Duration) -> Result<String, ProbeError> {
+        let mut child = Command::new(&self.binary)
+            .arg("-version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|source| ProbeError::Launch { source })?;
+
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let bounded = async {
+            let mut buffer = Vec::new();
+            let mut reader = (&mut stdout).take(MAX_OUTPUT_BYTES);
+            reader.read_to_end(&mut buffer).await.map(|_| buffer)
+        };
+
+        let outcome =
+            tokio::time::timeout(timeout, async { tokio::join!(bounded, child.wait()) }).await;
+
+        let (drained, waited) = match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(ProbeError::TimedOut { after: timeout });
+            }
+        };
+
+        let status = waited.map_err(|source| ProbeError::Output { source })?;
+        if !status.success() {
+            return Err(ProbeError::Failed {
+                status: status.code(),
+            });
+        }
+        let output = drained.map_err(|source| ProbeError::Output { source })?;
+        let text = String::from_utf8_lossy(&output);
+        Ok(text.lines().next().unwrap_or_default().trim().to_string())
+    }
+
     pub async fn probe(&self, input: &str, limits: &ProbeLimits) -> Result<MediaInfo, ProbeError> {
         let mut child = Command::new(&self.binary)
             .arg("-v")

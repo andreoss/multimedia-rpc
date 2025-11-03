@@ -9,9 +9,16 @@ rust-version.workspace = true
 [dev-dependencies]
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
+mm-jobstore = { path = "../mm-jobstore" }
+mm-proto = { path = "../mm-proto" }
+mm-server = { path = "../mm-server" }
 mm-storage = { path = "../mm-storage" }
+mm-worker = { path = "../mm-worker" }
 bytes.workspace = true
 futures-util.workspace = true
+sqlx.workspace = true
+tonic.workspace = true
+uuid.workspace = true
 tokio = { workspace = true, features = [
     "io-util",
     "macros",

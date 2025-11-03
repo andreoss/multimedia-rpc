@@ -5,10 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "process", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "sync", "time"] }
 
 [dev-dependencies]
+libc.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }

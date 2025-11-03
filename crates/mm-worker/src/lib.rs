@@ -1,3 +1,4 @@
+mod budget;
 mod pipeline;
 mod report;
 
@@ -11,6 +12,7 @@ use mm_ffmpeg::{ProbeLimits, Prober, Runner};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+pub use budget::{DiskBudget, admits};
 pub use pipeline::codes;
 pub use report::{blocks, input_report, render_verdicts, target_profile, warnings};
 
@@ -31,6 +33,9 @@ pub struct WorkerConfig {
     pub progress_interval: Duration,
     pub default_deadline: Duration,
     pub stderr_tail_bytes: usize,
+    pub disk_budget: DiskBudget,
+    pub release_retry: Duration,
+    reserved: std::sync::Mutex<u64>,
 }
 
 impl WorkerConfig {
@@ -58,7 +63,14 @@ impl WorkerConfig {
             progress_interval: Duration::from_secs(2),
             default_deadline: Duration::from_secs(3600),
             stderr_tail_bytes: 4096,
+            disk_budget: DiskBudget::Probe,
+            release_retry: Duration::from_secs(30),
+            reserved: std::sync::Mutex::new(0),
         }
+    }
+
+    fn ledger(&self) -> &std::sync::Mutex<u64> {
+        &self.reserved
     }
 }
 

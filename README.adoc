@@ -17,3 +17,4 @@ object storage.
 - cargo test --workspace
 - cargo clippy --workspace --all-targets -- -D warnings
 - cargo fmt --all --check
+- buf lint && buf breaking --against .git#branch=master

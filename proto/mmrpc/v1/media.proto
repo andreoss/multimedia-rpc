@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package mmrpc.v1;
+
+message MediaRef {
+  oneof ref {
+    string object_uri = 1;
+    string http_url = 2;
+  }
+}
+
+message OutputProfile {
+  double frame_rate = 1;
+  uint32 video_max_bitrate = 2;
+  uint32 video_quality = 3;
+  uint32 audio_bitrate = 4;
+  uint32 audio_sample_rate = 5;
+}
+
+message FileError {
+  MediaRef media_ref = 1;
+  string code = 2;
+}
+
+message Callback {
+  string queue_url = 1;
+}

@@ -390,6 +390,89 @@ async fn an_invalid_spec_is_rejected_with_the_typed_message() {
 }
 
 #[tokio::test]
+async fn trim_and_thumbnail_specs_answer_unimplemented_at_create() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let input = MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref");
+    let cases: Vec<(v1::OpSpec, &str)> = vec![
+        (
+            v1::OpSpec::from(&OpSpec::Trim(
+                mm_domain::TrimSpec::new(input.clone(), 1.0, 2.0).expect("valid trim spec"),
+            )),
+            "trim",
+        ),
+        (
+            v1::OpSpec::from(&OpSpec::Thumbnail(
+                mm_domain::ThumbnailSpec::new(input.clone(), vec![1.0], 320, 180)
+                    .expect("valid thumbnail spec"),
+            )),
+            "thumbnail",
+        ),
+    ];
+    for (index, (spec, name)) in cases.into_iter().enumerate() {
+        let mut request = create_request("owner-1", &format!("req-unsupported-{index}"));
+        request.spec = Some(spec);
+        let status = client
+            .create_job(request)
+            .await
+            .expect_err("unsupported op rejected");
+        assert_eq!(status.code(), tonic::Code::Unimplemented);
+        assert!(status.message().contains(name), "{}", status.message());
+    }
+    let listed = client
+        .list_jobs(v1::ListJobsRequest {
+            user_id: "owner-1".to_string(),
+            statuses: vec![],
+            page_size: 10,
+            page_token: String::new(),
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert!(listed.jobs.is_empty(), "a rejected spec reached the queue");
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn probe_and_transcode_specs_are_accepted_at_create() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let input = MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref");
+    let profile =
+        mm_domain::OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).expect("valid profile");
+    let specs = vec![
+        v1::OpSpec::from(&OpSpec::Probe(mm_domain::ProbeSpec::new(input.clone()))),
+        v1::OpSpec::from(&OpSpec::Transcode(
+            mm_domain::TranscodeSpec::new(input.clone(), profile).expect("valid transcode spec"),
+        )),
+    ];
+    for (index, spec) in specs.into_iter().enumerate() {
+        let mut request = create_request("owner-1", &format!("req-supported-{index}"));
+        request.spec = Some(spec);
+        let created = client
+            .create_job(request)
+            .await
+            .expect("create succeeds")
+            .into_inner();
+        assert!(created.created);
+        let job = client
+            .get_job(v1::GetJobRequest {
+                user_id: "owner-1".to_string(),
+                job_id: created.job_id.clone(),
+            })
+            .await
+            .expect("get succeeds")
+            .into_inner()
+            .job
+            .expect("job present");
+        assert_eq!(job.state(), v1::JobState::Pending);
+    }
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
 async fn malformed_identifiers_are_invalid_argument() {
     let (db, handle) = healthy_server().await;
     let mut client = job_client(&handle).await;

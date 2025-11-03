@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use mm_domain::{
     CancelNotifications, ConcatSpec, JobEventNotifications, JobFailure, JobId, JobNotifications,
     JobRepository, JobState, JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProgressPercent,
-    RequestId, TimedOutput, UserId, WorkerId,
+    QueueUrl, RequestId, TimedOutput, UserId, WorkerId,
 };
 use mm_jobstore::{
     MIGRATOR, PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository,
@@ -1123,6 +1123,42 @@ async fn an_unreachable_listener_errors_with_growing_backoff() {
         "backoff never grew: {:?}",
         third.elapsed()
     );
+}
+
+#[tokio::test]
+async fn a_callback_queue_url_persists_from_create_to_terminal_reads() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let queue = QueueUrl::new("http://127.0.0.1:9324/queue/results").expect("valid url");
+    let created = repo
+        .create(new_job("owner-1", "req-callback").with_callback(queue.clone()))
+        .await
+        .expect("create succeeds");
+    assert_eq!(created.callback, Some(queue.clone()));
+    let fetched = repo
+        .get(created.id)
+        .await
+        .expect("get succeeds")
+        .expect("job present");
+    assert_eq!(fetched.callback, Some(queue.clone()));
+    let claimant = worker("w-cb");
+    let claimed = repo
+        .claim(&claimant, limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed[0].callback, Some(queue.clone()));
+    let done = repo
+        .mark_succeeded(created.id, &claimant, concat_result())
+        .await
+        .expect("job succeeds");
+    assert_eq!(done.callback, Some(queue));
+
+    let plain = repo
+        .create(new_job("owner-1", "req-no-callback"))
+        .await
+        .expect("create succeeds");
+    assert_eq!(plain.callback, None);
+    db.dispose().await;
 }
 
 #[tokio::test]

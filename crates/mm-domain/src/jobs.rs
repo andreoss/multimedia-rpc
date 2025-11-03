@@ -1,3 +1,4 @@
+use crate::callback::QueueUrl;
 use crate::id::{JobId, RequestId, TextIdError, UserId, WorkerId, parse_text_id};
 use crate::op::{OpResult, OpSpec};
 use crate::state::JobState;
@@ -69,6 +70,7 @@ pub struct NewJob {
     request: RequestId,
     spec: OpSpec,
     deadline_at: Option<SystemTime>,
+    callback: Option<QueueUrl>,
 }
 
 impl NewJob {
@@ -85,7 +87,17 @@ impl NewJob {
             request,
             spec,
             deadline_at,
+            callback: None,
         }
+    }
+
+    pub fn with_callback(mut self, callback: QueueUrl) -> Self {
+        self.callback = Some(callback);
+        self
+    }
+
+    pub fn callback(&self) -> Option<&QueueUrl> {
+        self.callback.as_ref()
     }
 
     pub fn id(&self) -> JobId {
@@ -128,6 +140,7 @@ pub struct JobRecord {
     pub claimed_by: Option<WorkerId>,
     pub lease_expires_at: Option<SystemTime>,
     pub cancel_requested: bool,
+    pub callback: Option<QueueUrl>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

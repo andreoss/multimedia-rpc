@@ -420,6 +420,248 @@ async fn cancel_paths_cover_pending_running_and_flag() {
 }
 
 #[tokio::test]
+async fn claim_takes_oldest_pending_sets_lease_and_counts_attempt() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let mut ids = Vec::new();
+    for index in 0..3 {
+        ids.push(
+            repo.create(new_job("owner-1", &format!("req-{index}")))
+                .await
+                .expect("create succeeds")
+                .id,
+        );
+    }
+    let a = worker("worker-a");
+    let before = SystemTime::now();
+    let lease = Duration::from_secs(30);
+    let claimed = repo
+        .claim(&a, limit(2), lease)
+        .await
+        .expect("claim succeeds");
+    assert_eq!(
+        claimed.iter().map(|job| job.id).collect::<Vec<_>>(),
+        ids[..2]
+    );
+    for job in &claimed {
+        assert_eq!(job.state, JobState::Running);
+        assert_eq!(job.claimed_by.as_ref(), Some(&a));
+        assert_eq!(job.attempts, 1);
+        assert!(job.started_at.is_some());
+        let expiry = job.lease_expires_at.expect("lease set");
+        assert!(expiry > before + lease - Duration::from_secs(5));
+        assert!(expiry < before + lease + Duration::from_secs(60));
+    }
+    let rest = repo
+        .claim(&a, limit(5), lease)
+        .await
+        .expect("claim succeeds");
+    assert_eq!(rest.len(), 1);
+    assert!(
+        repo.claim(&a, limit(5), lease)
+            .await
+            .expect("claim succeeds")
+            .is_empty()
+    );
+    let progress = ProgressPercent::new(40).expect("valid progress");
+    repo.set_progress(ids[0], &a, progress)
+        .await
+        .expect("progress persists");
+    let seen = repo
+        .get(ids[0])
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(seen.progress, progress);
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn claim_skips_jobs_scheduled_for_later() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let record = repo
+        .create(new_job("owner-1", "req-1"))
+        .await
+        .expect("create succeeds");
+    sqlx::query("UPDATE jobs SET next_attempt_at = now() + interval '1 hour' WHERE id = $1")
+        .bind(record.id.as_uuid())
+        .execute(&db.pool)
+        .await
+        .expect("schedule update succeeds");
+    assert!(
+        repo.claim(&worker("worker-a"), limit(5), Duration::from_secs(30))
+            .await
+            .expect("claim succeeds")
+            .is_empty()
+    );
+    sqlx::query("UPDATE jobs SET next_attempt_at = now() - interval '1 second' WHERE id = $1")
+        .bind(record.id.as_uuid())
+        .execute(&db.pool)
+        .await
+        .expect("schedule update succeeds");
+    assert_eq!(
+        repo.claim(&worker("worker-a"), limit(5), Duration::from_secs(30))
+            .await
+            .expect("claim succeeds")
+            .len(),
+        1
+    );
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn two_concurrent_claimers_split_hundred_jobs_without_overlap() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let mut expected = Vec::new();
+    for index in 0..100 {
+        expected.push(
+            repo.create(new_job("owner-1", &format!("req-{index}")))
+                .await
+                .expect("create succeeds")
+                .id,
+        );
+    }
+    let mut claimers = Vec::new();
+    for name in ["worker-a", "worker-b"] {
+        let url = db.url.clone();
+        claimers.push(tokio::spawn(async move {
+            let pool = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&url)
+                .await
+                .expect("claimer connection");
+            let repo = PgJobRepository::new(pool);
+            let me = worker(name);
+            let mut mine = Vec::new();
+            loop {
+                let batch = repo
+                    .claim(&me, limit(7), Duration::from_secs(60))
+                    .await
+                    .expect("claim succeeds");
+                if batch.is_empty() {
+                    break;
+                }
+                for job in batch {
+                    assert_eq!(job.claimed_by.as_ref(), Some(&me));
+                    mine.push(job.id);
+                }
+            }
+            mine
+        }));
+    }
+    let mut all = Vec::new();
+    let mut per_worker = Vec::new();
+    for claimer in claimers {
+        let mine = claimer.await.expect("claimer finishes");
+        per_worker.push(mine.len());
+        all.extend(mine);
+    }
+    assert_eq!(all.len(), 100);
+    let mut unique = all.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 100);
+    let mut sorted_expected = expected;
+    sorted_expected.sort();
+    assert_eq!(unique, sorted_expected);
+    assert!(per_worker.iter().all(|count| *count > 0));
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn expired_lease_requeues_and_allows_reclaim() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let record = repo
+        .create(new_job("owner-1", "req-1"))
+        .await
+        .expect("create succeeds");
+    let a = worker("worker-a");
+    let b = worker("worker-b");
+    let claimed = repo
+        .claim(&a, limit(1), Duration::from_millis(200))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed.len(), 1);
+    assert!(
+        repo.requeue_expired()
+            .await
+            .expect("requeue succeeds")
+            .is_empty()
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        repo.requeue_expired().await.expect("requeue succeeds"),
+        vec![record.id]
+    );
+    let requeued = repo
+        .get(record.id)
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(requeued.state, JobState::Pending);
+    assert!(requeued.claimed_by.is_none());
+    assert!(requeued.lease_expires_at.is_none());
+    assert_eq!(requeued.attempts, 1);
+    let reclaimed = repo
+        .claim(&b, limit(1), Duration::from_secs(30))
+        .await
+        .expect("reclaim succeeds");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].attempts, 2);
+    assert_eq!(
+        repo.mark_succeeded(record.id, &a, concat_result())
+            .await
+            .expect_err("stale claimant rejected"),
+        JobStoreError::LeaseNotHeld {
+            id: record.id,
+            worker: a,
+        }
+    );
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn heartbeat_extends_lease_for_claimant_only() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let record = repo
+        .create(new_job("owner-1", "req-1"))
+        .await
+        .expect("create succeeds");
+    let a = worker("worker-a");
+    let b = worker("worker-b");
+    let claimed = repo
+        .claim(&a, limit(1), Duration::from_secs(10))
+        .await
+        .expect("claim succeeds");
+    let initial = claimed[0].lease_expires_at.expect("lease set");
+    let extended = repo
+        .heartbeat(record.id, &a, Duration::from_secs(120))
+        .await
+        .expect("heartbeat succeeds");
+    assert!(extended > initial);
+    assert_eq!(
+        repo.heartbeat(record.id, &b, Duration::from_secs(120))
+            .await
+            .expect_err("foreign heartbeat rejected"),
+        JobStoreError::LeaseNotHeld {
+            id: record.id,
+            worker: b,
+        }
+    );
+    assert!(matches!(
+        repo.heartbeat(JobId::generate(), &a, Duration::from_secs(120))
+            .await
+            .expect_err("unknown job"),
+        JobStoreError::NotFound { .. }
+    ));
+    db.dispose().await;
+}
+
+#[tokio::test]
 async fn corrupt_spec_bytes_surface_as_corrupt_record() {
     let db = fresh_db().await;
     let repo = db.repository();

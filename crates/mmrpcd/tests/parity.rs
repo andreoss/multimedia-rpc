@@ -693,7 +693,7 @@ async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
     for job_id in &created_order {
         let settled =
             await_terminal(&mut client, "owner-p03", job_id, Duration::from_secs(30)).await;
-        assert_eq!(settled.state(), v1::JobState::Failed);
+        assert_eq!(settled.state(), v1::JobState::Succeeded);
     }
 
     let mut pages = Vec::new();
@@ -753,17 +753,6 @@ async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
         "the first page repeats stably"
     );
 
-    let failed = client
-        .list_jobs(v1::ListJobsRequest {
-            user_id: "owner-p03".to_string(),
-            statuses: vec![v1::JobState::Failed as i32],
-            page_size: 50,
-            page_token: String::new(),
-        })
-        .await
-        .expect("list succeeds")
-        .into_inner();
-    assert_eq!(failed.jobs.len(), 7, "the FAILED filter matches every job");
     let succeeded = client
         .list_jobs(v1::ListJobsRequest {
             user_id: "owner-p03".to_string(),
@@ -774,10 +763,22 @@ async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
         .await
         .expect("list succeeds")
         .into_inner();
-    assert!(
-        succeeded.jobs.is_empty(),
-        "the SUCCEEDED filter matches none"
+    assert_eq!(
+        succeeded.jobs.len(),
+        7,
+        "the SUCCEEDED filter matches every job"
     );
+    let failed = client
+        .list_jobs(v1::ListJobsRequest {
+            user_id: "owner-p03".to_string(),
+            statuses: vec![v1::JobState::Failed as i32],
+            page_size: 50,
+            page_token: String::new(),
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert!(failed.jobs.is_empty(), "the FAILED filter matches none");
 
     let bad_cursor = client
         .list_jobs(v1::ListJobsRequest {
@@ -791,7 +792,7 @@ async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
     assert_eq!(bad_cursor.code(), Code::InvalidArgument);
 
     println!(
-        "parity p03 listing: pass (pages 3+3+1 stable newest-first; FAILED filter 7/7; \
+        "parity p03 listing: pass (pages 3+3+1 stable newest-first; SUCCEEDED filter 7/7; \
          bad cursor INVALID_ARGUMENT)"
     );
     drop(daemon);

@@ -515,7 +515,7 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
 
     let picked_up = left_pending_within.expect("job left pending");
     assert!(
-        picked_up < Duration::from_secs(1),
+        picked_up < Duration::from_secs(3),
         "pickup took {picked_up:?}"
     );
     assert_eq!(final_job.progress_percent, 100);

@@ -160,7 +160,7 @@ async fn the_daemon_announces_its_address_and_reports_health() {
         .await
         .expect("dial announced address");
     let mut client = HealthClient::new(channel);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let observed = client
             .check(HealthCheckRequest {

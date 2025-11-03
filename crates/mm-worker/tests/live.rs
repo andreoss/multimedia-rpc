@@ -1095,9 +1095,14 @@ async fn a_created_job_is_claimed_within_a_second_via_notify() {
                 id,
                 owner(),
                 RequestId::from_str(&format!("req-{id}-{attempt}")).unwrap(),
-                OpSpec::Probe(ProbeSpec::new(
-                    MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
-                )),
+                OpSpec::Trim(
+                    TrimSpec::new(
+                        MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
+                        0.0,
+                        2.0,
+                    )
+                    .unwrap(),
+                ),
                 None,
             ))
             .await
@@ -1146,9 +1151,14 @@ async fn without_a_listener_a_job_still_starts_within_one_tick() {
             id,
             owner(),
             RequestId::from_str(&format!("req-{id}")).unwrap(),
-            OpSpec::Probe(ProbeSpec::new(
-                MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
-            )),
+            OpSpec::Trim(
+                TrimSpec::new(
+                    MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
+                    0.0,
+                    2.0,
+                )
+                .unwrap(),
+            ),
             None,
         ))
         .await

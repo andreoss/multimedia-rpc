@@ -6,6 +6,7 @@ object storage.
 == Crates
 - mm-domain — ids, job state machine, op catalog, ports
 - mm-ffmpeg — probe, progress, process supervision
+- mm-integration — live integration suite
 - mm-jobstore — migrations and the job repository
 - mm-proto — v1 contract and conversions
 - mmrpcd — daemon: server, worker, combined

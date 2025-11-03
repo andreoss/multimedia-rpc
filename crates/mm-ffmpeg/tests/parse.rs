@@ -1,0 +1,272 @@
+use std::time::Duration;
+
+use mm_ffmpeg::{ParseError, parse_media_info};
+
+fn mp4_probe_json() -> String {
+    r#"{
+        "streams": [
+            {
+                "index": 0,
+                "codec_name": "h264",
+                "codec_type": "video",
+                "codec_tag_string": "avc1",
+                "width": 1280,
+                "height": 720,
+                "sample_aspect_ratio": "1:1",
+                "pix_fmt": "yuv420p",
+                "field_order": "progressive",
+                "r_frame_rate": "30/1",
+                "avg_frame_rate": "30/1"
+            },
+            {
+                "index": 1,
+                "codec_name": "aac",
+                "codec_type": "audio",
+                "codec_tag_string": "mp4a",
+                "sample_rate": "44100",
+                "channels": 2,
+                "bit_rate": "128000"
+            }
+        ],
+        "format": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "duration": "20.023000",
+            "size": "5242880",
+            "bit_rate": "2100000"
+        }
+    }"#
+    .to_string()
+}
+
+#[test]
+fn full_mp4_report_parses() {
+    let info = parse_media_info(&mp4_probe_json()).unwrap();
+    assert_eq!(info.container, "mov,mp4,m4a,3gp,3g2,mj2");
+    assert!((info.duration.as_secs_f64() - 20.023).abs() < 1e-6);
+    assert_eq!(info.size_bytes, Some(5_242_880));
+    assert_eq!(info.bit_rate, Some(2_100_000));
+    assert!(!info.drm);
+
+    assert_eq!(info.video.len(), 1);
+    let video = &info.video[0];
+    assert_eq!(video.codec, "h264");
+    assert_eq!(video.width, 1280);
+    assert_eq!(video.height, 720);
+    assert_eq!(video.avg_fps, Some(30.0));
+    assert_eq!(video.real_fps, Some(30.0));
+    assert_eq!(video.rotation, 0);
+    assert_eq!(video.pixel_format.as_deref(), Some("yuv420p"));
+    assert_eq!(video.sample_aspect_ratio, Some((1, 1)));
+    assert!(!video.interlaced);
+
+    assert_eq!(info.audio.len(), 1);
+    let audio = &info.audio[0];
+    assert_eq!(audio.codec, "aac");
+    assert_eq!(audio.channels, 2);
+    assert_eq!(audio.sample_rate, Some(44_100));
+    assert_eq!(audio.bit_rate, Some(128_000));
+}
+
+#[test]
+fn truncated_duration_is_corrected_from_size_and_bit_rate() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+             "avg_frame_rate": "30/1", "r_frame_rate": "30/1"}
+        ],
+        "format": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "duration": "1.500000",
+            "size": "2500000",
+            "bit_rate": "1000000"
+        }
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert!((info.duration.as_secs_f64() - 20.0).abs() < 1e-6);
+}
+
+#[test]
+fn format_duration_wins_when_larger_than_the_estimate() {
+    let json = r#"{
+        "streams": [],
+        "format": {
+            "format_name": "matroska,webm",
+            "duration": "30.000000",
+            "size": "1000",
+            "bit_rate": "1000000"
+        }
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert!((info.duration.as_secs_f64() - 30.0).abs() < 1e-6);
+}
+
+#[test]
+fn missing_duration_falls_back_to_the_estimate() {
+    let json = r#"{
+        "streams": [],
+        "format": {
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "size": "1250000",
+            "bit_rate": "1000000"
+        }
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert_eq!(info.duration, Duration::from_secs(10));
+}
+
+#[test]
+fn absent_duration_sources_are_an_error() {
+    let json = r#"{
+        "streams": [],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"}
+    }"#;
+    assert!(matches!(
+        parse_media_info(json).unwrap_err(),
+        ParseError::MissingDuration
+    ));
+}
+
+#[test]
+fn missing_format_section_is_an_error() {
+    assert!(matches!(
+        parse_media_info(r#"{"streams": []}"#).unwrap_err(),
+        ParseError::MissingFormat
+    ));
+}
+
+#[test]
+fn malformed_json_is_an_error() {
+    assert!(matches!(
+        parse_media_info("not json").unwrap_err(),
+        ParseError::Json { .. }
+    ));
+}
+
+#[test]
+fn vfr_streams_expose_differing_rates() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+             "avg_frame_rate": "2997/100", "r_frame_rate": "60/1"}
+        ],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    let video = &info.video[0];
+    assert!((video.avg_fps.unwrap() - 29.97).abs() < 1e-6);
+    assert_eq!(video.real_fps, Some(60.0));
+}
+
+#[test]
+fn zero_denominator_rates_are_absent() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+             "avg_frame_rate": "0/0", "r_frame_rate": "0/0"}
+        ],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert_eq!(info.video[0].avg_fps, None);
+    assert_eq!(info.video[0].real_fps, None);
+}
+
+#[test]
+fn rotation_comes_from_display_matrix_side_data() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+             "avg_frame_rate": "30/1", "r_frame_rate": "30/1",
+             "side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90}]}
+        ],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert_eq!(info.video[0].rotation, -90);
+}
+
+#[test]
+fn rotation_falls_back_to_the_rotate_tag() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+             "avg_frame_rate": "30/1", "r_frame_rate": "30/1",
+             "tags": {"rotate": "90"}}
+        ],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert_eq!(info.video[0].rotation, 90);
+}
+
+#[test]
+fn interlaced_field_orders_are_detected() {
+    for (order, expected) in [
+        ("tt", true),
+        ("bb", true),
+        ("tb", true),
+        ("bt", true),
+        ("progressive", false),
+    ] {
+        let json = format!(
+            r#"{{
+                "streams": [
+                    {{"codec_type": "video", "codec_name": "h264", "width": 640,
+                      "height": 360, "avg_frame_rate": "30/1", "r_frame_rate": "30/1",
+                      "field_order": "{order}"}}
+                ],
+                "format": {{"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}}
+            }}"#
+        );
+        let info = parse_media_info(&json).unwrap();
+        assert_eq!(info.video[0].interlaced, expected, "field_order {order}");
+    }
+}
+
+#[test]
+fn encrypted_codec_tags_set_the_drm_flag() {
+    for tag in ["encv", "enca"] {
+        let json = format!(
+            r#"{{
+                "streams": [
+                    {{"codec_type": "video", "codec_name": "h264", "width": 640,
+                      "height": 360, "avg_frame_rate": "30/1", "r_frame_rate": "30/1",
+                      "codec_tag_string": "{tag}"}}
+                ],
+                "format": {{"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}}
+            }}"#
+        );
+        let info = parse_media_info(&json).unwrap();
+        assert!(info.drm, "codec tag {tag}");
+    }
+}
+
+#[test]
+fn anamorphic_sample_aspect_ratio_parses() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 720, "height": 576,
+             "avg_frame_rate": "25/1", "r_frame_rate": "25/1",
+             "sample_aspect_ratio": "16:11"}
+        ],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert_eq!(info.video[0].sample_aspect_ratio, Some((16, 11)));
+}
+
+#[test]
+fn non_audio_video_streams_are_ignored() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "subtitle", "codec_name": "mov_text"},
+            {"codec_type": "data", "codec_name": "bin_data"},
+            {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+             "avg_frame_rate": "30/1", "r_frame_rate": "30/1"}
+        ],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert_eq!(info.video.len(), 1);
+    assert!(info.audio.is_empty());
+}

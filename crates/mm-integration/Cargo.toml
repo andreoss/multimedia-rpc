@@ -1,0 +1,21 @@
+[package]
+name = "mm-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+mm-domain = { path = "../mm-domain" }
+mm-ffmpeg = { path = "../mm-ffmpeg" }
+mm-storage = { path = "../mm-storage" }
+bytes.workspace = true
+futures-util.workspace = true
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "time",
+] }

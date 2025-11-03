@@ -19,6 +19,13 @@ impl JobId {
         Self(Uuid::now_v7())
     }
 
+    pub fn from_uuid(value: Uuid) -> Result<Self, JobIdError> {
+        if value.is_nil() {
+            return Err(JobIdError::Nil);
+        }
+        Ok(Self(value))
+    }
+
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -52,7 +59,7 @@ pub enum TextIdError {
     ForbiddenCharacter { character: char },
 }
 
-fn parse_text_id(value: &str, max: usize) -> Result<String, TextIdError> {
+pub(crate) fn parse_text_id(value: &str, max: usize) -> Result<String, TextIdError> {
     if value.is_empty() {
         return Err(TextIdError::Empty);
     }
@@ -90,6 +97,33 @@ impl FromStr for UserId {
 }
 
 impl fmt::Display for UserId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerId(String);
+
+pub type WorkerIdError = TextIdError;
+
+impl WorkerId {
+    pub const MAX_LENGTH: usize = 128;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for WorkerId {
+    type Err = WorkerIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_text_id(value, Self::MAX_LENGTH).map(Self)
+    }
+}
+
+impl fmt::Display for WorkerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }

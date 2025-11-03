@@ -58,12 +58,23 @@ proto-breaking:
       > /etc/objectstore/s3.json &&
       exec /entrypoint.sh server -s3 -s3.config=/etc/objectstore/s3.json -dir=/data
 
+.db-service: &db-service
+  name: postgres:16
+  alias: db
+
+.stack-variables: &stack-variables
+  MM_OBJECTSTORE_ENDPOINT: http://objectstore:8333
+  MM_DATABASE_URL: postgres://mm:mm@db:5432/mm
+  POSTGRES_USER: mm
+  POSTGRES_PASSWORD: mm
+  POSTGRES_DB: mm
+
 test:
   stage: test
   services:
     - *objectstore-service
-  variables:
-    MM_OBJECTSTORE_ENDPOINT: http://objectstore:8333
+    - *db-service
+  variables: *stack-variables
   before_script:
     - apt-get update && apt-get install -y protobuf-compiler
   script:
@@ -73,8 +84,8 @@ coverage:
   stage: test
   services:
     - *objectstore-service
-  variables:
-    MM_OBJECTSTORE_ENDPOINT: http://objectstore:8333
+    - *db-service
+  variables: *stack-variables
   before_script:
     - apt-get update && apt-get install -y protobuf-compiler
   script:

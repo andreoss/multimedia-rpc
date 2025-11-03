@@ -1,11 +1,19 @@
 mod id;
+mod jobs;
 mod op;
 mod resolve;
 mod state;
 mod store;
 mod validate;
 
-pub use id::{JobId, JobIdError, RequestId, RequestIdError, TextIdError, UserId, UserIdError};
+pub use id::{
+    JobId, JobIdError, RequestId, RequestIdError, TextIdError, UserId, UserIdError, WorkerId,
+    WorkerIdError,
+};
+pub use jobs::{
+    JobFailure, JobFailureError, JobPage, JobRecord, JobRepository, JobStoreError, NewJob,
+    PageCursor, ProgressError, ProgressPercent,
+};
 pub use op::{
     ConcatSpec, HttpRef, MediaRef, MediaRefError, ObjectRef, OpResult, OpResultError, OpSpec,
     OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ThumbnailResult,

@@ -1,1 +1,489 @@
+use std::num::NonZeroU32;
+use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
+use async_trait::async_trait;
+use mm_domain::{
+    JobFailure, JobId, JobPage, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
+    OpResult, OpSpec, PageCursor, ProgressPercent, RequestId, UserId, WorkerId,
+};
+use prost::Message;
+use sqlx::PgPool;
+use sqlx::migrate::Migrator;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+pub struct PgJobRepository {
+    pool: PgPool,
+}
+
+impl PgJobRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+struct JobRow {
+    id: Uuid,
+    user_id: String,
+    request_id: String,
+    spec: Vec<u8>,
+    state: String,
+    progress_percent: i16,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    result: Option<Vec<u8>>,
+    created_at: OffsetDateTime,
+    started_at: Option<OffsetDateTime>,
+    finished_at: Option<OffsetDateTime>,
+    attempts: i32,
+    next_attempt_at: Option<OffsetDateTime>,
+    deadline_at: Option<OffsetDateTime>,
+    claimed_by: Option<String>,
+    lease_expires_at: Option<OffsetDateTime>,
+    cancel_requested: bool,
+}
+
+fn backend(error: sqlx::Error) -> JobStoreError {
+    JobStoreError::Backend(error.to_string())
+}
+
+fn corrupt(id: JobId, detail: impl ToString) -> JobStoreError {
+    JobStoreError::CorruptRecord {
+        id,
+        detail: detail.to_string(),
+    }
+}
+
+fn encode_spec(spec: &OpSpec) -> Vec<u8> {
+    mm_proto::v1::OpSpec::from(spec).encode_to_vec()
+}
+
+fn encode_result(result: &OpResult) -> Vec<u8> {
+    mm_proto::v1::OpResult::from(result).encode_to_vec()
+}
+
+fn to_system(value: OffsetDateTime) -> SystemTime {
+    value.into()
+}
+
+fn to_offset(value: SystemTime) -> OffsetDateTime {
+    value.into()
+}
+
+fn to_record(row: JobRow) -> Result<JobRecord, JobStoreError> {
+    let id = JobId::from_uuid(row.id).map_err(|error| JobStoreError::CorruptRecord {
+        id: JobId::generate(),
+        detail: error.to_string(),
+    })?;
+    let spec = mm_proto::v1::OpSpec::decode(row.spec.as_slice())
+        .map_err(|error| corrupt(id, error))
+        .and_then(|proto| OpSpec::try_from(proto).map_err(|error| corrupt(id, error)))?;
+    let result = row
+        .result
+        .as_deref()
+        .map(|bytes| {
+            mm_proto::v1::OpResult::decode(bytes)
+                .map_err(|error| corrupt(id, error))
+                .and_then(|proto| OpResult::try_from(proto).map_err(|error| corrupt(id, error)))
+        })
+        .transpose()?;
+    let failure = match (row.error_code, row.error_message) {
+        (Some(code), message) => Some(
+            JobFailure::new(&code, message.as_deref().unwrap_or(""))
+                .map_err(|error| corrupt(id, error))?,
+        ),
+        (None, _) => None,
+    };
+    let progress = u8::try_from(row.progress_percent)
+        .map_err(|error| corrupt(id, error))
+        .and_then(|value| ProgressPercent::new(value).map_err(|error| corrupt(id, error)))?;
+    Ok(JobRecord {
+        id,
+        owner: UserId::from_str(&row.user_id).map_err(|error| corrupt(id, error))?,
+        request: RequestId::from_str(&row.request_id).map_err(|error| corrupt(id, error))?,
+        spec,
+        state: JobState::from_str(&row.state).map_err(|error| corrupt(id, error))?,
+        progress,
+        failure,
+        result,
+        created_at: to_system(row.created_at),
+        started_at: row.started_at.map(to_system),
+        finished_at: row.finished_at.map(to_system),
+        attempts: u32::try_from(row.attempts).map_err(|error| corrupt(id, error))?,
+        next_attempt_at: row.next_attempt_at.map(to_system),
+        deadline_at: row.deadline_at.map(to_system),
+        claimed_by: row
+            .claimed_by
+            .as_deref()
+            .map(WorkerId::from_str)
+            .transpose()
+            .map_err(|error| corrupt(id, error))?,
+        lease_expires_at: row.lease_expires_at.map(to_system),
+        cancel_requested: row.cancel_requested,
+    })
+}
+
+impl PgJobRepository {
+    async fn transition_conflict(
+        &self,
+        id: JobId,
+        to: JobState,
+        claimant: Option<&WorkerId>,
+    ) -> JobStoreError {
+        let row = match sqlx::query!(
+            "SELECT state, claimed_by FROM jobs WHERE id = $1",
+            id.as_uuid()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => return backend(error),
+        };
+        let Some(row) = row else {
+            return JobStoreError::NotFound { id };
+        };
+        let from = match JobState::from_str(&row.state) {
+            Ok(state) => state,
+            Err(error) => return corrupt(id, error),
+        };
+        if let Some(worker) = claimant
+            && from == JobState::Running
+            && row.claimed_by.as_deref() != Some(worker.as_str())
+        {
+            return JobStoreError::LeaseNotHeld {
+                id,
+                worker: worker.clone(),
+            };
+        }
+        JobStoreError::InvalidTransition { id, from, to }
+    }
+}
+
+#[async_trait]
+impl JobRepository for PgJobRepository {
+    async fn create(&self, job: NewJob) -> Result<JobRecord, JobStoreError> {
+        let inserted = sqlx::query_as!(
+            JobRow,
+            "INSERT INTO jobs (id, user_id, request_id, spec, deadline_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (request_id) DO NOTHING \
+             RETURNING id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested",
+            job.id().as_uuid(),
+            job.owner().as_str(),
+            job.request().as_str(),
+            encode_spec(job.spec()),
+            job.deadline_at().map(to_offset),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        match inserted {
+            Some(row) => to_record(row),
+            None => {
+                let existing = sqlx::query_scalar!(
+                    "SELECT id FROM jobs WHERE request_id = $1",
+                    job.request().as_str()
+                )
+                .fetch_one(&self.pool)
+                .await
+                .map_err(backend)?;
+                Err(JobStoreError::AlreadyExists {
+                    existing: JobId::from_uuid(existing)
+                        .map_err(|error| JobStoreError::Backend(error.to_string()))?,
+                })
+            }
+        }
+    }
+
+    async fn get(&self, id: JobId) -> Result<Option<JobRecord>, JobStoreError> {
+        sqlx::query_as!(
+            JobRow,
+            "SELECT id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested FROM jobs WHERE id = $1",
+            id.as_uuid()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?
+        .map(to_record)
+        .transpose()
+    }
+
+    async fn get_owned(
+        &self,
+        owner: &UserId,
+        id: JobId,
+    ) -> Result<Option<JobRecord>, JobStoreError> {
+        sqlx::query_as!(
+            JobRow,
+            "SELECT id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested \
+             FROM jobs WHERE id = $1 AND user_id = $2",
+            id.as_uuid(),
+            owner.as_str()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?
+        .map(to_record)
+        .transpose()
+    }
+
+    async fn list(
+        &self,
+        owner: &UserId,
+        limit: NonZeroU32,
+        cursor: Option<PageCursor>,
+    ) -> Result<JobPage, JobStoreError> {
+        let rows = sqlx::query_as!(
+            JobRow,
+            "SELECT id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested \
+             FROM jobs \
+             WHERE user_id = $1 \
+               AND ($2::timestamptz IS NULL \
+                    OR (created_at, id) < ($2::timestamptz, $3::uuid)) \
+             ORDER BY created_at DESC, id DESC \
+             LIMIT $4",
+            owner.as_str(),
+            cursor.map(|cursor| to_offset(cursor.created_at)),
+            cursor.map(|cursor| cursor.id.as_uuid()),
+            i64::from(limit.get())
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        let full_page = rows.len() == limit.get() as usize;
+        let jobs = rows
+            .into_iter()
+            .map(to_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next = full_page
+            .then(|| {
+                jobs.last().map(|job| PageCursor {
+                    created_at: job.created_at,
+                    id: job.id,
+                })
+            })
+            .flatten();
+        Ok(JobPage { jobs, next })
+    }
+
+    async fn claim(
+        &self,
+        worker: &WorkerId,
+        limit: NonZeroU32,
+        lease: Duration,
+    ) -> Result<Vec<JobRecord>, JobStoreError> {
+        sqlx::query_as!(
+            JobRow,
+            "UPDATE jobs SET state = 'RUNNING', claimed_by = $1, \
+             lease_expires_at = now() + make_interval(secs => $2), \
+             started_at = COALESCE(started_at, now()), \
+             attempts = attempts + 1 \
+             WHERE id IN ( \
+                 SELECT id FROM jobs \
+                 WHERE state = 'PENDING' \
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= now()) \
+                 ORDER BY created_at \
+                 LIMIT $3 \
+                 FOR UPDATE SKIP LOCKED \
+             ) \
+             RETURNING id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested",
+            worker.as_str(),
+            lease.as_secs_f64(),
+            i64::from(limit.get())
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?
+        .into_iter()
+        .map(to_record)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|mut records| {
+            records.sort_by_key(|record| (record.created_at, record.id));
+            records
+        })
+    }
+
+    async fn heartbeat(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        lease: Duration,
+    ) -> Result<SystemTime, JobStoreError> {
+        let renewed = sqlx::query_scalar!(
+            "UPDATE jobs SET lease_expires_at = now() + make_interval(secs => $3) \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
+             RETURNING lease_expires_at",
+            id.as_uuid(),
+            worker.as_str(),
+            lease.as_secs_f64()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        match renewed.flatten() {
+            Some(expiry) => Ok(to_system(expiry)),
+            None => Err(self
+                .transition_conflict(id, JobState::Running, Some(worker))
+                .await),
+        }
+    }
+
+    async fn requeue_expired(&self) -> Result<Vec<JobId>, JobStoreError> {
+        sqlx::query_scalar!(
+            "UPDATE jobs SET state = 'PENDING', claimed_by = NULL, \
+             lease_expires_at = NULL, progress_percent = 0 \
+             WHERE state = 'RUNNING' AND lease_expires_at <= now() \
+             RETURNING id"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?
+        .into_iter()
+        .map(|id| JobId::from_uuid(id).map_err(|error| JobStoreError::Backend(error.to_string())))
+        .collect()
+    }
+
+    async fn set_progress(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        progress: ProgressPercent,
+    ) -> Result<(), JobStoreError> {
+        let updated = sqlx::query!(
+            "UPDATE jobs SET progress_percent = $3 \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING'",
+            id.as_uuid(),
+            worker.as_str(),
+            i16::from(progress.value())
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        if updated.rows_affected() == 0 {
+            return Err(self
+                .transition_conflict(id, JobState::Running, Some(worker))
+                .await);
+        }
+        Ok(())
+    }
+
+    async fn mark_succeeded(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        result: OpResult,
+    ) -> Result<JobRecord, JobStoreError> {
+        let row = sqlx::query_as!(
+            JobRow,
+            "UPDATE jobs SET state = 'SUCCEEDED', result = $3, \
+             progress_percent = 100, finished_at = now(), lease_expires_at = NULL \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
+             RETURNING id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested",
+            id.as_uuid(),
+            worker.as_str(),
+            encode_result(&result)
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        match row {
+            Some(row) => to_record(row),
+            None => Err(self
+                .transition_conflict(id, JobState::Succeeded, Some(worker))
+                .await),
+        }
+    }
+
+    async fn mark_failed(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        failure: JobFailure,
+    ) -> Result<JobRecord, JobStoreError> {
+        let row = sqlx::query_as!(
+            JobRow,
+            "UPDATE jobs SET state = 'FAILED', error_code = $3, error_message = $4, \
+             finished_at = now(), lease_expires_at = NULL \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
+             RETURNING id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested",
+            id.as_uuid(),
+            worker.as_str(),
+            failure.code(),
+            failure.message()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        match row {
+            Some(row) => to_record(row),
+            None => Err(self
+                .transition_conflict(id, JobState::Failed, Some(worker))
+                .await),
+        }
+    }
+
+    async fn mark_cancelled(&self, id: JobId) -> Result<JobRecord, JobStoreError> {
+        let row = sqlx::query_as!(
+            JobRow,
+            "UPDATE jobs SET state = 'CANCELLED', finished_at = now(), \
+             claimed_by = NULL, lease_expires_at = NULL \
+             WHERE id = $1 AND state IN ('PENDING', 'RUNNING') \
+             RETURNING id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested",
+            id.as_uuid()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        match row {
+            Some(row) => to_record(row),
+            None => Err(self
+                .transition_conflict(id, JobState::Cancelled, None)
+                .await),
+        }
+    }
+
+    async fn request_cancel(&self, id: JobId) -> Result<(), JobStoreError> {
+        let updated = sqlx::query!(
+            "UPDATE jobs SET cancel_requested = true \
+             WHERE id = $1 AND state IN ('PENDING', 'RUNNING')",
+            id.as_uuid()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        if updated.rows_affected() == 0 {
+            return Err(self
+                .transition_conflict(id, JobState::Cancelled, None)
+                .await);
+        }
+        Ok(())
+    }
+}

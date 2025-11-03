@@ -1872,6 +1872,18 @@ dependencies = [
 [[package]]
 name = "mm-worker"
 version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "mm-domain",
+ "mm-ffmpeg",
+ "mm-jobstore",
+ "mm-storage",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "mmrpcd"

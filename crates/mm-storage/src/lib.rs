@@ -1,3 +1,7 @@
+mod queue;
+
+pub use queue::{SqsCallbackPublisher, SqsSettings};
+
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;

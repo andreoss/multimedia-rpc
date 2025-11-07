@@ -9,8 +9,8 @@ mod validate;
 
 pub use callback::{CallbackError, CallbackPublisher, QueueUrl, QueueUrlError};
 pub use id::{
-    JobId, JobIdError, RequestId, RequestIdError, TextIdError, UserId, UserIdError, WorkerId,
-    WorkerIdError,
+    JobId, JobIdError, RequestId, RequestIdError, TextIdError, TraceId, TraceIdError, UserId,
+    UserIdError, WorkerId, WorkerIdError,
 };
 pub use jobs::{
     CancelNotifications, JobEventNotifications, JobFailure, JobFailureError, JobNotifications,

@@ -80,7 +80,8 @@ proto-breaking:
 .test-before-script: &test-before-script
   - apt-get update && apt-get install -y protobuf-compiler ffmpeg imagemagick \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libglib2.0-dev \
-    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-tools
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-tools \
+    nodejs
 
 test:
   stage: test
@@ -92,6 +93,7 @@ test:
   before_script: *test-before-script
   script:
     - cargo test --workspace --no-fail-fast
+    - sh scripts/auth-conformance.sh
 
 coverage:
   stage: test

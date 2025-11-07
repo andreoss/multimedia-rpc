@@ -8,12 +8,12 @@ use bytes::Bytes;
 use mm_domain::{
     ConcatSpec, InputReport, JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef,
     ObjectBody, ObjectRef, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, ProbeResult,
-    ProbeSpec, ProgressPercent, TimedOutput, TranscodeResult, TranscodeSpec, UnsupportedOp,
-    WorkerId, resolve_media_ref, validate_inputs,
+    ProbeSpec, ProgressPercent, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    UnsupportedOp, WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
-    MediaInfo, RunLimits, RunOutcome, ScaleMode, TranscodeTarget, build_concat_args,
-    build_transcode_args,
+    MediaInfo, RunLimits, RunOutcome, ScaleMode, TranscodeTarget, TrimStrategy, TrimTarget,
+    build_concat_args, build_transcode_args, build_trim_args,
 };
 use prost::Message;
 use tokio::io::AsyncReadExt;
@@ -345,6 +345,7 @@ async fn pipeline(
         OpSpec::Concat(spec) => concat_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Probe(spec) => probe_pipeline(ctx, spec, deadline_at, signal).await,
         OpSpec::Transcode(spec) => transcode_pipeline(ctx, job, spec, deadline_at, signal).await,
+        OpSpec::Trim(spec) => trim_pipeline(ctx, job, spec, deadline_at, signal).await,
         unsupported => Err(failed(
             codes::UNSUPPORTED_OPERATION,
             UnsupportedOp {
@@ -557,9 +558,79 @@ async fn concat_pipeline(
     merged
 }
 
+async fn trim_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &TrimSpec,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_input(ctx, &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Trim, &[input_report(&info)])?;
+
+    let inputs = [spec.input().clone()];
+    let infos = [info];
+    let estimate = estimate_bytes(ctx, &inputs, &infos).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+
+    let strategy = trim_strategy(ctx, &url, spec.start_seconds()).await?;
+    let target = TrimTarget {
+        strategy,
+        ..TrimTarget::default()
+    };
+    let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));
+    let args = build_trim_args(
+        &url,
+        &target,
+        spec.start_seconds(),
+        spec.duration_seconds(),
+        &output_path.to_string_lossy(),
+    )
+    .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+    let wanted = Duration::from_secs_f64(spec.duration_seconds());
+    let limits = remaining_limits(ctx, wanted, deadline_at)?;
+
+    check(signal)?;
+    let trimmed = run_and_upload(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        &output_path,
+        signal,
+        OutputShape::Trim,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&output_path).await;
+    trimmed
+}
+
+async fn trim_strategy(
+    ctx: &WorkerConfig,
+    url: &str,
+    start_seconds: f64,
+) -> Result<TrimStrategy, Finish> {
+    let keyframes = ctx
+        .prober
+        .keyframes(url, &ctx.probe_limits)
+        .await
+        .map_err(|error| failed(codes::PROBE_FAILED, format!("keyframes: {error}")))?;
+    Ok(
+        if mm_ffmpeg::aligned_to_keyframe(&keyframes, start_seconds) {
+            TrimStrategy::Copy
+        } else {
+            TrimStrategy::Reencode
+        },
+    )
+}
+
 enum OutputShape {
     Concat,
     Transcode,
+    Trim,
 }
 
 async fn run_and_upload(
@@ -679,6 +750,11 @@ async fn run_and_upload(
         OutputShape::Transcode => Ok(OpResult::Transcode(TranscodeResult::new(MediaRef::Object(
             object,
         )))),
+        OutputShape::Trim => {
+            let timed = TimedOutput::new(MediaRef::Object(object), info.duration.as_secs_f64())
+                .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+            Ok(OpResult::Trim(timed))
+        }
     }
 }
 

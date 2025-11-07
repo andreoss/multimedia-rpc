@@ -445,8 +445,8 @@ pub struct UnsupportedOp {
 impl OpKind {
     pub fn ensure_executable(self) -> Result<(), UnsupportedOp> {
         match self {
-            OpKind::Concat | OpKind::Probe | OpKind::Transcode => Ok(()),
-            OpKind::Trim | OpKind::Thumbnail => Err(UnsupportedOp { kind: self }),
+            OpKind::Concat | OpKind::Probe | OpKind::Transcode | OpKind::Trim => Ok(()),
+            OpKind::Thumbnail => Err(UnsupportedOp { kind: self }),
         }
     }
 }

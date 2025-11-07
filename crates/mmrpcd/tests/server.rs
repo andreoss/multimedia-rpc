@@ -2,6 +2,7 @@ use std::env;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mm_jobstore::MIGRATOR;
@@ -95,6 +96,16 @@ impl TestDb {
 
 struct Daemon {
     child: Child,
+    output: Arc<std::sync::Mutex<String>>,
+}
+
+impl Daemon {
+    fn output(&self) -> String {
+        self.output
+            .lock()
+            .map(|text| text.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for Daemon {
@@ -105,7 +116,7 @@ impl Drop for Daemon {
 }
 
 fn spawn_server(database_url: &str) -> Daemon {
-    let child = Command::new(env!("CARGO_BIN_EXE_mmrpcd"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mmrpcd"))
         .arg("server")
         .env("MM_BIND_ADDR", "127.0.0.1:0")
         .env("MM_DATABASE_URL", database_url)
@@ -122,12 +133,34 @@ fn spawn_server(database_url: &str) -> Daemon {
             "MM_OBJECTSTORE_SECRET_KEY",
             env_or("MM_OBJECTSTORE_SECRET_KEY", DEFAULT_SECRET_KEY),
         )
+        .env(
+            "MM_OBJECTSTORE_REGION",
+            env_or("MM_OBJECTSTORE_REGION", "us-east-1"),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("daemon spawns");
-    Daemon { child }
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let output = Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = Arc::clone(&output);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if let Ok(mut sink) = sink.lock() {
+                        sink.push_str(&line);
+                    }
+                }
+            }
+        }
+    });
+    Daemon { child, output }
 }
 
 async fn announced_address(daemon: &mut Daemon) -> SocketAddr {
@@ -173,7 +206,10 @@ async fn the_daemon_announces_its_address_and_reports_health() {
             break;
         }
         if Instant::now() > deadline {
-            panic!("daemon never became serving: {observed:?}");
+            panic!(
+                "daemon never became serving: {observed:?}\ndaemon output:\n{}",
+                daemon.output()
+            );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

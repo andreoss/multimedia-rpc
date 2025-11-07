@@ -16,6 +16,7 @@ tonic.workspace = true
 tonic-health.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 mm-jobstore = { path = "../mm-jobstore" }
 mm-storage = { path = "../mm-storage" }
 mm-testkit = { path = "../mm-testkit" }

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mm_domain::{
-    ConcatSpec, JobRepository, MediaRef, ObjectStore, OpSpec, ProgressPercent, WorkerId,
+    ConcatSpec, JobRepository, MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError,
+    OpSpec, ProgressPercent, WorkerId,
 };
 use mm_ffmpeg::Prober;
 use mm_jobstore::{MIGRATOR, PgJobEventListener, PgJobRepository};
@@ -163,6 +164,52 @@ async fn start_server(config: ServerConfig) -> ServerHandle {
     mm_server::start(config).await.expect("server starts")
 }
 
+struct StallingStore {
+    inner: Arc<dyn ObjectStore>,
+    stall: Duration,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for StallingStore {
+    async fn get(&self, object: &ObjectRef) -> Result<ObjectBody, ObjectStoreError> {
+        self.inner.get(object).await
+    }
+
+    async fn put(
+        &self,
+        object: &ObjectRef,
+        body: ObjectBody,
+        length: u64,
+    ) -> Result<(), ObjectStoreError> {
+        self.inner.put(object, body, length).await
+    }
+
+    async fn put_multipart(
+        &self,
+        object: &ObjectRef,
+        body: ObjectBody,
+    ) -> Result<(), ObjectStoreError> {
+        self.inner.put_multipart(object, body).await
+    }
+
+    async fn head(&self, object: &ObjectRef) -> Result<u64, ObjectStoreError> {
+        tokio::time::sleep(self.stall).await;
+        self.inner.head(object).await
+    }
+
+    async fn delete(&self, object: &ObjectRef) -> Result<(), ObjectStoreError> {
+        self.inner.delete(object).await
+    }
+
+    async fn presign_get(
+        &self,
+        object: &ObjectRef,
+        expires_in: Duration,
+    ) -> Result<String, ObjectStoreError> {
+        self.inner.presign_get(object, expires_in).await
+    }
+}
+
 async fn health_client(handle: &ServerHandle) -> HealthClient<tonic::transport::Channel> {
     let channel = Endpoint::from_shared(format!("http://{}", handle.local_addr()))
         .expect("valid endpoint")
@@ -275,6 +322,27 @@ async fn a_missing_probe_binary_reports_not_serving() {
     let handle = start_server(test_config(db.repository(), store, prober)).await;
     let mut client = health_client(&handle).await;
     await_status(&mut client, "", ServingStatus::NotServing).await;
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn an_answer_given_before_the_first_check_is_not_serving() {
+    let db = fresh_db().await;
+    let store = Arc::new(StallingStore {
+        inner: store_at(&store_endpoint()).await,
+        stall: Duration::from_secs(30),
+    });
+    let handle = start_server(test_config(db.repository(), store, Prober::default())).await;
+    let mut client = health_client(&handle).await;
+    let observed = client
+        .check(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .map(|response| response.into_inner().status())
+        .map_err(|status| status.code());
+    assert_eq!(observed, Ok(ServingStatus::NotServing));
     handle.shutdown().await;
     db.dispose().await;
 }

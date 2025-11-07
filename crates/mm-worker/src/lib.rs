@@ -12,12 +12,13 @@ use mm_domain::{
     CallbackPublisher, CancelNotifications, JobNotifications, JobRepository, ObjectStore, WorkerId,
 };
 use mm_ffmpeg::{ProbeLimits, Prober, Runner};
+use mm_magick::{Tool as ImageTool, ToolLimits as ImageLimits};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 pub use budget::{DiskBudget, admits};
 pub use pipeline::codes;
-pub use report::{blocks, input_report, render_verdicts, target_profile, warnings};
+pub use report::{blocks, input_report, render_verdicts, still_report, target_profile, warnings};
 pub use retry::{RetryPolicy, is_transient};
 
 pub struct WorkerConfig {
@@ -29,6 +30,8 @@ pub struct WorkerConfig {
     pub prober: Prober,
     pub runner: Runner,
     pub probe_limits: ProbeLimits,
+    pub image_tool: ImageTool,
+    pub image_limits: ImageLimits,
     pub max_concurrent: usize,
     pub claim_batch: NonZeroU32,
     pub lease: Duration,
@@ -63,6 +66,8 @@ impl WorkerConfig {
             prober: Prober::default(),
             runner: Runner::default(),
             probe_limits: ProbeLimits::default(),
+            image_tool: ImageTool::default(),
+            image_limits: ImageLimits::default(),
             max_concurrent: 4,
             claim_batch: NonZeroU32::new(4).expect("positive batch"),
             lease: Duration::from_secs(30),

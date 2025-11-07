@@ -1942,6 +1942,7 @@ dependencies = [
  "mm-domain",
  "mm-ffmpeg",
  "mm-jobstore",
+ "mm-magick",
  "mm-proto",
  "mm-storage",
  "mm-testkit",

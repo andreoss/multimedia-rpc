@@ -1,4 +1,6 @@
-use mm_domain::{AudioReport, InputReport, OutputProfile, Verdict, VerdictCode, VideoReport};
+use mm_domain::{
+    AudioReport, InputReport, MediaKind, OutputProfile, Verdict, VerdictCode, VideoReport,
+};
 use mm_ffmpeg::{MediaInfo, TargetProfile};
 
 pub fn input_report(info: &MediaInfo) -> InputReport {
@@ -7,6 +9,10 @@ pub fn input_report(info: &MediaInfo) -> InputReport {
         duration: info.duration,
         size_bytes: info.size_bytes,
         drm: info.drm,
+        kind: match mm_ffmpeg::media_kind(&info.container) {
+            mm_ffmpeg::MediaKind::Video => MediaKind::Video,
+            mm_ffmpeg::MediaKind::Image => MediaKind::Image,
+        },
         video: info
             .video
             .iter()

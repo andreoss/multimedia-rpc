@@ -3,6 +3,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Video,
+    Image,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaInfo {
     pub container: String,
@@ -235,4 +241,16 @@ pub fn parse_still_info(json: &str) -> Result<StillInfo, ParseError> {
         height: stream.height.unwrap_or_default(),
         size_bytes: parse_number(format.size.as_ref()),
     })
+}
+
+pub fn media_kind(format_name: &str) -> MediaKind {
+    let image = format_name.contains("image")
+        || format_name
+            .split(',')
+            .any(|token| token.trim().ends_with("_pipe"));
+    if image {
+        MediaKind::Image
+    } else {
+        MediaKind::Video
+    }
 }

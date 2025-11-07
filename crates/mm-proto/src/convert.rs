@@ -2,8 +2,8 @@ use crate::v1;
 use mm_domain::{
     ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, JobRecord, JobState, MediaRef,
     MediaRefError, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError,
-    ProbeResult, ProbeSpec, QueueUrl, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimSpec, parse_rendered_verdicts,
+    PackageResult, PackageSpec, ProbeResult, ProbeSpec, QueueUrl, ResizeMode, ThumbnailResult,
+    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, parse_rendered_verdicts,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -99,6 +99,10 @@ impl TryFrom<v1::OpSpec> for OpSpec {
                 thumbnail.width,
                 thumbnail.height,
             )?)),
+            v1::op_spec::Op::Package(package) => Ok(OpSpec::Package(PackageSpec::new(
+                required_ref(package.input)?,
+                package.segment_seconds,
+            )?)),
             v1::op_spec::Op::Image(image) => Ok(OpSpec::Image(ImageSpec::new(
                 ref_list(image.inputs)?,
                 image_op_from_raw(image.op)?,
@@ -135,6 +139,10 @@ impl From<&OpSpec> for v1::OpSpec {
                 offsets_seconds: thumbnail.offsets_seconds().to_vec(),
                 width: thumbnail.width(),
                 height: thumbnail.height(),
+            }),
+            OpSpec::Package(package) => v1::op_spec::Op::Package(v1::PackageSpec {
+                input: Some(v1::MediaRef::from(package.input())),
+                segment_seconds: package.segment_seconds(),
             }),
             OpSpec::Image(image) => v1::op_spec::Op::Image(v1::ImageSpec {
                 inputs: image.inputs().iter().map(v1::MediaRef::from).collect(),
@@ -177,6 +185,10 @@ impl TryFrom<v1::OpResult> for OpResult {
             v1::op_result::Op::Image(image) => {
                 Ok(OpResult::Image(ImageResult::new(ref_list(image.outputs)?)?))
             }
+            v1::op_result::Op::Package(package) => Ok(OpResult::Package(PackageResult::new(
+                required_ref(package.playlist)?,
+                ref_list(package.segments)?,
+            )?)),
         }
     }
 }
@@ -201,6 +213,7 @@ fn spec_inputs(spec: &OpSpec) -> Vec<&MediaRef> {
         OpSpec::Trim(trim) => vec![trim.input()],
         OpSpec::Thumbnail(thumbnail) => vec![thumbnail.input()],
         OpSpec::Image(image) => image.inputs().iter().collect(),
+        OpSpec::Package(package) => vec![package.input()],
     }
 }
 
@@ -282,6 +295,10 @@ impl From<&OpResult> for v1::OpResult {
             }),
             OpResult::Thumbnail(thumbnail) => v1::op_result::Op::Thumbnail(v1::ThumbnailResult {
                 outputs: thumbnail.outputs().iter().map(v1::MediaRef::from).collect(),
+            }),
+            OpResult::Package(package) => v1::op_result::Op::Package(v1::PackageResult {
+                playlist: Some(v1::MediaRef::from(package.playlist())),
+                segments: package.segments().iter().map(v1::MediaRef::from).collect(),
             }),
             OpResult::Image(image) => v1::op_result::Op::Image(v1::ImageResult {
                 outputs: image.outputs().iter().map(v1::MediaRef::from).collect(),

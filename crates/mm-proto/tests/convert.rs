@@ -1,7 +1,8 @@
 use mm_domain::{
     ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError, OpResult,
-    OpResultError, OpSpec, OpSpecError, OutputProfile, ProbeResult, ProbeSpec, ResizeMode,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    OpResultError, OpSpec, OpSpecError, OutputProfile, PackageResult, PackageSpec, ProbeResult,
+    ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
+    TranscodeSpec, TrimSpec,
 };
 use mm_proto::v1;
 use proptest::prelude::*;
@@ -402,4 +403,43 @@ fn a_declared_image_format_round_trips_for_every_image_op() {
 
     assert_eq!(image.declared_format(), Some(ImageFormat::Jpeg));
     assert_eq!(image.format(), ImageFormat::Jpeg);
+}
+
+#[test]
+fn a_package_spec_and_result_round_trip_through_the_contract() {
+    let spec = OpSpec::Package(
+        PackageSpec::new(MediaRef::object_uri("s3://media/in/a.mp4").unwrap(), 2.0).unwrap(),
+    );
+    let wire = v1::OpSpec::from(&spec);
+    assert_eq!(OpSpec::try_from(wire).unwrap(), spec);
+
+    let result = OpResult::Package(
+        PackageResult::new(
+            MediaRef::object_uri("s3://media/out/playlist.m3u8").unwrap(),
+            vec![
+                MediaRef::object_uri("s3://media/out/seg00000.m4s").unwrap(),
+                MediaRef::object_uri("s3://media/out/seg00001.m4s").unwrap(),
+            ],
+        )
+        .unwrap(),
+    );
+    let wire = v1::OpResult::from(&result);
+    assert_eq!(OpResult::try_from(wire).unwrap(), result);
+}
+
+#[test]
+fn a_package_spec_with_a_non_positive_segment_length_is_rejected() {
+    let wire = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Package(v1::PackageSpec {
+            input: Some(v1::MediaRef::from(
+                &MediaRef::object_uri("s3://media/in/a.mp4").unwrap(),
+            )),
+            segment_seconds: 0.0,
+        })),
+    };
+
+    assert!(matches!(
+        OpSpec::try_from(wire),
+        Err(OpSpecError::InvalidSegmentLength { .. })
+    ));
 }

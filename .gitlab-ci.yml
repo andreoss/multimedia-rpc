@@ -78,7 +78,7 @@ proto-breaking:
   POSTGRES_DB: mm
 
 .test-before-script: &test-before-script
-  - apt-get update && apt-get install -y protobuf-compiler ffmpeg
+  - apt-get update && apt-get install -y protobuf-compiler ffmpeg imagemagick
 
 test:
   stage: test

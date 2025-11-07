@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mm-auth = { path = "../mm-auth" }
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 mm-jobstore = { path = "../mm-jobstore" }
@@ -15,6 +16,7 @@ sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
+mm-auth = { path = "../mm-auth", features = ["testing"] }
 mm-domain = { path = "../mm-domain" }
 mm-proto = { path = "../mm-proto" }
 mm-testkit = { path = "../mm-testkit" }

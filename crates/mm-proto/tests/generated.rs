@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use mm_proto::v1;
 use prost::Message;
 

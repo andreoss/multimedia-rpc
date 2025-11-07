@@ -1917,11 +1917,11 @@ name = "mm-auth"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "mm-auth",
  "p256",
  "serde",
  "serde_json",
  "thiserror",
- "time",
 ]
 
 [[package]]
@@ -2023,6 +2023,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "futures-util",
+ "mm-auth",
  "mm-domain",
  "mm-ffmpeg",
  "mm-jobstore",
@@ -2099,6 +2101,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-util",
+ "mm-auth",
  "mm-domain",
  "mm-ffmpeg",
  "mm-jobstore",

@@ -1,18 +1,17 @@
-mod common;
-
 use std::time::{Duration, SystemTime};
 
-use common::{Issuer, tampered_signature, unix};
-use mm_auth::{AuthError, Verifier};
+use mm_auth::testing::{Issuer, fixed_now, tampered_signature, unix};
+use mm_auth::{AuthError, Settings, Verifier};
 
 fn now() -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    fixed_now()
 }
 
 #[test]
 fn a_token_signed_by_a_published_key_carries_its_subject() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let token = issuer.token("owner-1", now(), Duration::from_secs(300));
     let identity = verifier.verify(&token, now()).expect("the token verifies");
     assert_eq!(identity.subject(), "owner-1");
@@ -21,7 +20,8 @@ fn a_token_signed_by_a_published_key_carries_its_subject() {
 #[test]
 fn a_signature_that_does_not_match_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let token = tampered_signature(&issuer, "owner-1");
     let error = verifier
         .verify(&token, now())
@@ -33,7 +33,8 @@ fn a_signature_that_does_not_match_is_rejected() {
 fn a_signature_from_another_key_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
     let other = Issuer::seeded("key-1", 9);
-    let verifier = Verifier::from_jwks(&other.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&other.jwks(), Settings::none()).expect("the published key set loads");
     let token = issuer.token("owner-1", now(), Duration::from_secs(300));
     assert_eq!(
         verifier
@@ -46,7 +47,8 @@ fn a_signature_from_another_key_is_rejected() {
 #[test]
 fn a_symmetric_algorithm_is_refused_even_when_the_issuer_offers_it() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let token = issuer.symmetric_token("owner-1", now(), Duration::from_secs(300));
     assert_eq!(
         verifier
@@ -60,7 +62,8 @@ fn a_symmetric_algorithm_is_refused_even_when_the_issuer_offers_it() {
 fn a_published_shared_secret_is_refused_at_load_time() {
     let document =
         r#"{"keys":[{"kty":"oct","kid":"key-1","alg":"HS256","k":"c2hhcmVkLXNlY3JldA"}]}"#;
-    let error = Verifier::from_jwks(document).expect_err("a shared key loads as a public one");
+    let error = Verifier::from_jwks(document, Settings::none())
+        .expect_err("a shared key loads as a public one");
     assert!(
         matches!(error, mm_auth::KeySetError::UnsupportedKey { .. }),
         "{error}"
@@ -70,7 +73,8 @@ fn a_published_shared_secret_is_refused_at_load_time() {
 #[test]
 fn an_expired_token_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let token = issuer.token("owner-1", now(), Duration::from_secs(60));
     assert!(verifier.verify(&token, now()).is_ok());
     let later = now() + Duration::from_secs(61);
@@ -85,7 +89,8 @@ fn an_expired_token_is_rejected() {
 #[test]
 fn a_token_that_is_not_yet_valid_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let token = issuer.token(
         "owner-1",
         now() + Duration::from_secs(600),
@@ -102,8 +107,11 @@ fn a_token_that_is_not_yet_valid_is_rejected() {
 #[test]
 fn the_clock_is_granted_a_bounded_leeway() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks_with_leeway(&issuer.jwks(), Duration::from_secs(30))
-        .expect("the published key set loads");
+    let verifier = Verifier::from_jwks(
+        &issuer.jwks(),
+        Settings::none().with_leeway(Duration::from_secs(30)),
+    )
+    .expect("the published key set loads");
     let token = issuer.token("owner-1", now(), Duration::from_secs(60));
     assert!(
         verifier
@@ -123,7 +131,8 @@ fn the_clock_is_granted_a_bounded_leeway() {
 fn an_unknown_key_id_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
     let other = Issuer::seeded("key-2", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let token = other.token("owner-1", now(), Duration::from_secs(300));
     assert_eq!(
         verifier
@@ -136,8 +145,8 @@ fn an_unknown_key_id_is_rejected() {
 #[test]
 fn an_issuer_that_is_not_the_expected_one_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier =
-        Verifier::from_jwks_for_issuer(&issuer.jwks(), "other-issuer").expect("the key set loads");
+    let verifier = Verifier::from_jwks(&issuer.jwks(), Settings::none().issued_by("other-issuer"))
+        .expect("the key set loads");
     let token = issuer.token("owner-1", now(), Duration::from_secs(300));
     assert_eq!(
         verifier
@@ -150,7 +159,8 @@ fn an_issuer_that_is_not_the_expected_one_is_rejected() {
 #[test]
 fn a_token_without_a_subject_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let issued = unix(now());
     let token = issuer.token_with_claims(&format!(
         "{{\"iss\":\"test-issuer\",\"exp\":{}}}",
@@ -167,7 +177,8 @@ fn a_token_without_a_subject_is_rejected() {
 #[test]
 fn a_token_that_is_not_three_parts_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     assert_eq!(
         verifier
             .verify("not-a-token", now())
@@ -179,7 +190,8 @@ fn a_token_that_is_not_three_parts_is_rejected() {
 #[test]
 fn an_unreadable_part_is_rejected() {
     let issuer = Issuer::seeded("key-1", 7);
-    let verifier = Verifier::from_jwks(&issuer.jwks()).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the published key set loads");
     let token = format!("{}.{}.{}", "!!!", "!!!", "!!!");
     assert_eq!(
         verifier
@@ -191,8 +203,8 @@ fn an_unreadable_part_is_rejected() {
 
 #[test]
 fn a_key_set_without_usable_keys_is_refused() {
-    assert!(Verifier::from_jwks(r#"{"keys":[]}"#).is_err());
-    assert!(Verifier::from_jwks("not json").is_err());
+    assert!(Verifier::from_jwks(r#"{"keys":[]}"#, Settings::none()).is_err());
+    assert!(Verifier::from_jwks("not json", Settings::none()).is_err());
 }
 
 #[test]
@@ -204,7 +216,8 @@ fn two_published_keys_are_both_accepted_and_an_unknown_one_is_not() {
         trim_document(&first.jwks()),
         trim_document(&second.jwks())
     );
-    let verifier = Verifier::from_jwks(&document).expect("the published key set loads");
+    let verifier =
+        Verifier::from_jwks(&document, Settings::none()).expect("the published key set loads");
     assert_eq!(
         verifier
             .verify(

@@ -6,10 +6,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mm_auth::Settings;
 use mm_domain::WorkerId;
 use mm_ffmpeg::Prober;
 use mm_jobstore::{PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository};
-use mm_server::ServerConfig;
+use mm_server::{Auth, ServerConfig};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings, SqsCallbackPublisher, SqsSettings};
 use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, WorkerHandle};
 use sqlx::postgres::PgPoolOptions;
@@ -44,6 +45,7 @@ struct ServerEnv {
     bind: SocketAddr,
     stack: StackEnv,
     notify: bool,
+    auth: AuthSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,7 @@ fn server_env(get: &dyn Fn(&str) -> Option<String>) -> Result<ServerEnv, String>
         bind,
         stack: stack_env(get)?,
         notify: notify_var(get, "MM_SERVER_NOTIFY")?,
+        auth: auth_settings(get)?,
     })
 }
 
@@ -231,6 +234,7 @@ async fn connect_stack(
 
 async fn start_server(env: &ServerEnv) -> Result<mm_server::ServerHandle, String> {
     let (repository, store) = connect_stack(&env.stack).await?;
+    let auth = build_auth(&env.auth)?;
     let mut config = ServerConfig::new(
         repository,
         store,
@@ -239,6 +243,7 @@ async fn start_server(env: &ServerEnv) -> Result<mm_server::ServerHandle, String
     )
     .map_err(|error| error.to_string())?;
     config.bind = env.bind;
+    config.auth = auth;
     if env.notify {
         let events = PgJobEventListener::connect(&env.stack.database_url)
             .await
@@ -351,6 +356,58 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthSettings {
+    jwks_file: Option<PathBuf>,
+    issuer: Option<String>,
+    leeway: Duration,
+}
+
+impl Default for AuthSettings {
+    fn default() -> Self {
+        AuthSettings {
+            jwks_file: None,
+            issuer: None,
+            leeway: Duration::from_secs(0),
+        }
+    }
+}
+
+fn auth_settings(get: &dyn Fn(&str) -> Option<String>) -> Result<AuthSettings, String> {
+    let jwks_file = get("MM_AUTH_JWKS_FILE").map(PathBuf::from);
+    let issuer = get("MM_AUTH_ISSUER");
+    let leeway = Duration::from_secs(match get("MM_AUTH_LEEWAY_SECS") {
+        None => 0,
+        Some(raw) => raw
+            .parse::<u64>()
+            .map_err(|_| format!("MM_AUTH_LEEWAY_SECS is not a number of seconds: {raw}"))?,
+    });
+    if jwks_file.is_none() && (issuer.is_some() || leeway > Duration::from_secs(0)) {
+        return Err(String::from(
+            "MM_AUTH_JWKS_FILE must be set when MM_AUTH_ISSUER or MM_AUTH_LEEWAY_SECS is",
+        ));
+    }
+    Ok(AuthSettings {
+        jwks_file,
+        issuer,
+        leeway,
+    })
+}
+
+fn build_auth(settings: &AuthSettings) -> Result<Auth, String> {
+    let Some(path) = &settings.jwks_file else {
+        return Ok(Auth::open());
+    };
+    let document = std::fs::read_to_string(path)
+        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+    let mut verifier_settings = Settings::none().with_leeway(settings.leeway);
+    if let Some(issuer) = &settings.issuer {
+        verifier_settings = verifier_settings.issued_by(issuer);
+    }
+    Auth::from_settings(Some(&document), verifier_settings)
+        .map_err(|error| format!("{} is not a usable key document: {error}", path.display()))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_role(&args) {
@@ -369,9 +426,12 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, ServerEnv, WorkerEnv, parse_role, server_env, worker_env};
+    use super::{
+        AuthSettings, Role, ServerEnv, WorkerEnv, build_auth, parse_role, server_env, worker_env,
+    };
     use std::collections::HashMap;
-    use std::time::Duration;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -609,5 +669,94 @@ mod tests {
         assert!(!env.notify);
         map.insert("MM_SERVER_NOTIFY".into(), "maybe".into());
         assert!(env_from(&map).unwrap_err().contains("MM_SERVER_NOTIFY"));
+    }
+
+    #[test]
+    fn the_auth_settings_default_to_no_published_key() {
+        let env = env_from(&complete()).expect("environment parses");
+        assert_eq!(env.auth, AuthSettings::default());
+        assert_eq!(env.auth.jwks_file, None);
+        assert_eq!(env.auth.issuer, None);
+        assert_eq!(env.auth.leeway, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn the_auth_settings_are_configurable() {
+        let mut map = complete();
+        map.insert("MM_AUTH_JWKS_FILE".into(), "scratch/jwks.json".into());
+        map.insert("MM_AUTH_ISSUER".into(), "https://issuer.example".into());
+        map.insert("MM_AUTH_LEEWAY_SECS".into(), "45".into());
+        let env = env_from(&map).expect("environment parses");
+        assert_eq!(env.auth.jwks_file, Some(PathBuf::from("scratch/jwks.json")));
+        assert_eq!(env.auth.issuer.as_deref(), Some("https://issuer.example"));
+        assert_eq!(env.auth.leeway, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn a_malformed_auth_leeway_is_rejected() {
+        let mut map = complete();
+        map.insert("MM_AUTH_JWKS_FILE".into(), "scratch/jwks.json".into());
+        map.insert("MM_AUTH_LEEWAY_SECS".into(), "later".into());
+        assert!(env_from(&map).unwrap_err().contains("MM_AUTH_LEEWAY_SECS"));
+    }
+
+    #[test]
+    fn the_issuer_without_a_published_key_is_rejected() {
+        let mut map = complete();
+        map.insert("MM_AUTH_ISSUER".into(), "https://issuer.example".into());
+        assert!(env_from(&map).unwrap_err().contains("MM_AUTH_JWKS_FILE"));
+        let mut map = complete();
+        map.insert("MM_AUTH_LEEWAY_SECS".into(), "10".into());
+        assert!(env_from(&map).unwrap_err().contains("MM_AUTH_JWKS_FILE"));
+    }
+
+    #[test]
+    fn a_published_key_document_is_read_into_a_verifier() {
+        let issuer = mm_auth::testing::Issuer::seeded("key-1", 7);
+        let path = mm_testkit::scratch_path("auth").join("jwks.json");
+        std::fs::write(&path, issuer.jwks()).expect("key document written");
+        let settings = AuthSettings {
+            jwks_file: Some(path.clone()),
+            issuer: Some("test-issuer".to_string()),
+            leeway: Duration::from_secs(5),
+        };
+        let auth = build_auth(&settings).expect("the published key document loads");
+        assert!(auth.verifies_tokens());
+        let token = issuer.token("owner-1", SystemTime::now(), Duration::from_secs(300));
+        assert!(auth.verify(&token).is_ok());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_key_document_fails_the_daemon() {
+        let missing = AuthSettings {
+            jwks_file: Some(PathBuf::from("scratch/auth/absent.json")),
+            ..AuthSettings::default()
+        };
+        assert!(build_auth(&missing).is_err());
+        let path = mm_testkit::scratch_path("auth").join("broken.json");
+        std::fs::write(&path, "not json").expect("key document written");
+        let broken = AuthSettings {
+            jwks_file: Some(path.clone()),
+            ..AuthSettings::default()
+        };
+        assert!(build_auth(&broken).is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_published_shared_secret_is_refused_before_the_server_binds() {
+        let path = mm_testkit::scratch_path("auth").join("oct.json");
+        std::fs::write(
+            &path,
+            r#"{"keys":[{"kty":"oct","kid":"key-1","alg":"HS256","k":"c2hhcmVkLXNlY3JldA"}]}"#,
+        )
+        .expect("key document written");
+        let settings = AuthSettings {
+            jwks_file: Some(path.clone()),
+            ..AuthSettings::default()
+        };
+        assert!(build_auth(&settings).is_err());
+        std::fs::remove_file(&path).ok();
     }
 }

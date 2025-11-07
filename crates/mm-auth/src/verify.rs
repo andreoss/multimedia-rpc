@@ -47,8 +47,34 @@ pub struct Identity {
 }
 
 impl Identity {
+    pub fn from_subject(subject: Subject) -> Self {
+        Self { subject }
+    }
+
     pub fn subject(&self) -> &str {
         self.subject.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Settings {
+    issuer: Option<String>,
+    leeway: Duration,
+}
+
+impl Settings {
+    pub fn none() -> Self {
+        Settings::default()
+    }
+
+    pub fn issued_by(mut self, issuer: &str) -> Self {
+        self.issuer = Some(issuer.to_string());
+        self
+    }
+
+    pub fn with_leeway(mut self, leeway: Duration) -> Self {
+        self.leeway = leeway;
+        self
     }
 }
 
@@ -60,29 +86,11 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    pub fn from_jwks(document: &str) -> Result<Self, crate::KeySetError> {
-        Self::from_jwks_for_issuer(document, "").map(|verifier| Verifier {
-            issuer: None,
-            ..verifier
-        })
-    }
-
-    pub fn from_jwks_for_issuer(document: &str, issuer: &str) -> Result<Self, crate::KeySetError> {
+    pub fn from_jwks(document: &str, settings: Settings) -> Result<Self, crate::KeySetError> {
         Ok(Verifier {
             keys: KeySet::from_published(document)?,
-            issuer: (!issuer.is_empty()).then(|| issuer.to_string()),
-            leeway: Duration::from_secs(0),
-        })
-    }
-
-    pub fn from_jwks_with_leeway(
-        document: &str,
-        leeway: Duration,
-    ) -> Result<Self, crate::KeySetError> {
-        Ok(Verifier {
-            keys: KeySet::from_published(document)?,
-            issuer: None,
-            leeway,
+            issuer: settings.issuer,
+            leeway: settings.leeway,
         })
     }
 

@@ -1,5 +1,6 @@
 mod cursor;
 mod health;
+mod interceptor;
 mod service;
 
 use std::net::SocketAddr;
@@ -20,6 +21,8 @@ use tonic::transport::Server;
 use health::Dependencies;
 use service::{MediaJobs, WatchHub};
 
+pub use interceptor::{Auth, Interceptor, Owner};
+
 pub const SERVICE_NAME: &str = <MediaJobServiceServer<MediaJobs> as NamedService>::NAME;
 
 const DEFAULT_BIND: ([u8; 4], u16) = ([127, 0, 0, 1], 0);
@@ -30,6 +33,7 @@ pub struct ServerConfig {
     pub check_timeout: Duration,
     pub watch_poll_interval: Duration,
     pub job_events: Option<Arc<dyn JobEventNotifications>>,
+    pub auth: Auth,
     repository: Arc<dyn JobRepository>,
     store: Arc<dyn ObjectStore>,
     store_probe: ObjectRef,
@@ -62,6 +66,7 @@ impl ServerConfig {
             check_timeout: Duration::from_secs(2),
             watch_poll_interval: Duration::from_secs(1),
             job_events: None,
+            auth: Auth::open(),
             repository,
             store,
             store_probe,
@@ -124,9 +129,9 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
     let router =
         Server::builder()
             .add_service(health_service)
-            .add_service(MediaJobServiceServer::new(MediaJobs::new(
-                config.repository,
-                watch,
+            .add_service(MediaJobServiceServer::new(Interceptor::new(
+                config.auth,
+                MediaJobs::new(config.repository, watch),
             )));
     let server = tokio::spawn(router.serve_with_incoming_shutdown(
         TcpListenerStream::new(listener),

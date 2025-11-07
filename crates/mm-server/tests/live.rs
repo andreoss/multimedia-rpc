@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::num::NonZeroU32;

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::env;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};

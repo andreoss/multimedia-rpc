@@ -1,0 +1,16 @@
+[package]
+name = "mm-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64.workspace = true
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["parsing", "formatting"] }
+
+[dev-dependencies]
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }

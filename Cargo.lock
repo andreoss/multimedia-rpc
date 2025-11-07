@@ -1913,6 +1913,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-auth"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "p256",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "mm-domain"
 version = "0.1.0"
 dependencies = [

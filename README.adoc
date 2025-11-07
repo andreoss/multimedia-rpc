@@ -4,6 +4,7 @@ Media jobs as a gRPC service: typed operations, async workers,
 object storage.
 
 == Crates
+- mm-auth — bearer token verification
 - mm-domain — ids, job state machine, op catalog, ports
 - mm-ffmpeg — probe, progress, process supervision
 - mm-gst — pipeline description, bus parsing, packaging runner

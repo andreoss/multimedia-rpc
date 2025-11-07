@@ -1839,7 +1839,6 @@ async fn a_deadline_reaped_job_still_delivers_one_callback() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore]
 async fn a_package_job_lands_a_playlist_and_its_segments() {
     let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;

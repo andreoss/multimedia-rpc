@@ -424,7 +424,7 @@ async fn package_pipeline(
 fn packaging_description(request: &GstRequest) -> GstDescription {
     GstDescription::new(
         vec![
-            GstElement::new("filesrc", "source"),
+            GstElement::new("souphttpsrc", "source"),
             GstElement::new("qtdemux", "demux"),
             GstElement::new("mp4mux", "mux")
                 .with("streamable", GstProperty::Flag(true))
@@ -502,21 +502,15 @@ async fn upload_set(
     let init = artifact_object_named(ctx, id, "init.mp4").await?;
     let playlist = artifact_object_named(ctx, id, mm_gst::playlist_name()).await?;
     let mut segments = Vec::with_capacity(written.segments.len());
-    let mut paths: Vec<PathBuf> = vec![written.init.clone(), playlist_path.to_path_buf()];
-    paths.extend(written.segments.iter().cloned());
-    let mut keys = Vec::with_capacity(paths.len());
-    keys.push(init.clone());
-    keys.push(playlist.clone());
+    upload_object(ctx, &init, &written.init).await?;
+    landed.record(init.clone());
+    upload_object(ctx, &playlist, playlist_path).await?;
+    landed.record(playlist.clone());
     for path in &written.segments {
-        keys.push(artifact_object_named(ctx, id, &segment_name(path)).await?);
-    }
-    for (index, path) in paths.iter().enumerate() {
-        let key = keys[index].clone();
+        let key = artifact_object_named(ctx, id, &segment_name(path)).await?;
         upload_object(ctx, &key, path).await?;
         landed.record(key.clone());
-        if key.key() != playlist.key() {
-            segments.push(MediaRef::Object(key));
-        }
+        segments.push(MediaRef::Object(key));
     }
     let result = PackageResult::new(MediaRef::Object(playlist), segments)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;

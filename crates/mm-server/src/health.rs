@@ -6,6 +6,23 @@ use mm_ffmpeg::Prober;
 use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dependency {
+    JobStore,
+    ObjectStore,
+    ProbeBinary,
+}
+
+impl Dependency {
+    fn name(self) -> &'static str {
+        match self {
+            Dependency::JobStore => "job store",
+            Dependency::ObjectStore => "object store",
+            Dependency::ProbeBinary => "probe binary",
+        }
+    }
+}
+
 pub(crate) struct Dependencies {
     repository: Arc<dyn JobRepository>,
     store: Arc<dyn ObjectStore>,
@@ -49,10 +66,37 @@ impl Dependencies {
         self.prober.version(self.timeout).await.is_ok()
     }
 
-    pub(crate) async fn healthy(&self) -> bool {
-        self.job_store_healthy().await
-            && self.object_store_healthy().await
-            && self.prober_healthy().await
+    pub(crate) async fn unhealthy(&self) -> Option<Dependency> {
+        if !self.job_store_healthy().await {
+            return Some(Dependency::JobStore);
+        }
+        if !self.object_store_healthy().await {
+            return Some(Dependency::ObjectStore);
+        }
+        if !self.prober_healthy().await {
+            return Some(Dependency::ProbeBinary);
+        }
+        None
+    }
+}
+
+fn log_line(message: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{message}");
+}
+
+async fn report(reporter: &HealthReporter, status: ServingStatus) {
+    reporter.set_service_status("", status).await;
+    reporter
+        .set_service_status(crate::SERVICE_NAME, status)
+        .await;
+}
+
+fn status_of(unhealthy: Option<Dependency>) -> ServingStatus {
+    if unhealthy.is_some() {
+        ServingStatus::NotServing
+    } else {
+        ServingStatus::Serving
     }
 }
 
@@ -61,16 +105,16 @@ pub(crate) async fn watch(
     dependencies: Dependencies,
     interval: Duration,
 ) {
+    report(&reporter, ServingStatus::NotServing).await;
     loop {
-        let status = if dependencies.healthy().await {
-            ServingStatus::Serving
-        } else {
-            ServingStatus::NotServing
-        };
-        reporter.set_service_status("", status).await;
-        reporter
-            .set_service_status(crate::SERVICE_NAME, status)
-            .await;
+        let unhealthy = dependencies.unhealthy().await;
+        if let Some(dependency) = unhealthy {
+            log_line(format_args!(
+                "health: the {} is not answering",
+                dependency.name()
+            ));
+        }
+        report(&reporter, status_of(unhealthy)).await;
         tokio::time::sleep(interval).await;
     }
 }

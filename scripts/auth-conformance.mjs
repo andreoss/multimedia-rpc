@@ -1,6 +1,21 @@
 import { connect } from "node:http2";
 import { createHmac, generateKeyPairSync, randomUUID, sign } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+
+import {
+  ALREADY_EXISTS,
+  CREATE_PATH,
+  GET_PATH,
+  NOT_FOUND,
+  OK,
+  UNAUTHENTICATED,
+  call,
+  createRequest,
+  decodeCreateResponse,
+  decodeJobOwner,
+  getRequest,
+  statusName,
+} from "./lib/grpc.mjs";
 
 const base64url = (value) => Buffer.from(value).toString("base64url");
 
@@ -46,172 +61,8 @@ function writeKeys(jwksPath, tokensPath) {
   writeFileSync(tokensPath, JSON.stringify({ live, other, expired, foreign, symmetric, tampered }));
 }
 
-function varint(value) {
-  let remaining = BigInt(value);
-  const bytes = [];
-  while (remaining > 0n) {
-    let byte = Number(remaining & 0x7fn);
-    remaining >>= 7n;
-    if (remaining > 0n) {
-      byte |= 0x80;
-    }
-    bytes.push(byte);
-  }
-  return Buffer.from(bytes);
-}
-
-function stringField(field, value) {
-  const body = Buffer.from(value, "utf8");
-  return Buffer.concat([varint(field * 8 + 2), varint(body.length), body]);
-}
-
-function messageField(field, value) {
-  return Buffer.concat([varint(field * 8 + 2), varint(value.length), value]);
-}
-
-function boolField(field, value) {
-  return Buffer.concat([varint(field * 8), varint(value ? 1 : 0)]);
-}
-
-function readVarint(buffer, start) {
-  let value = 0n;
-  let shift = 0n;
-  let index = start;
-  for (;;) {
-    const byte = buffer[index];
-    value |= BigInt(byte & 0x7f) << shift;
-    index += 1;
-    if ((byte & 0x80) === 0) {
-      break;
-    }
-    shift += 7n;
-  }
-  return { value, index };
-}
-
-function readFields(buffer) {
-  const fields = new Map();
-  let index = 0;
-  while (index < buffer.length) {
-    const key = readVarint(buffer, index);
-    const field = Number(key.value >> 3n);
-    const wire = Number(key.value & 7n);
-    if (wire === 2) {
-      const length = readVarint(buffer, key.index);
-      const from = length.index;
-      const to = from + Number(length.value);
-      const existing = fields.get(field) ?? [];
-      existing.push(buffer.subarray(from, to));
-      fields.set(field, existing);
-      index = to;
-    } else if (wire === 0) {
-      const value = readVarint(buffer, key.index);
-      const existing = fields.get(field) ?? [];
-      existing.push(value.value);
-      fields.set(field, existing);
-      index = value.index;
-    } else {
-      throw new Error(`unsupported wire type ${wire}`);
-    }
-  }
-  return fields;
-}
-
-function probeSpec(uri) {
-  const probeSpec = messageField(1, stringField(1, uri));
-  return messageField(2, probeSpec);
-}
-
-function createRequest(bodyOwner, idempotencyKey, uri) {
-  return Buffer.concat([
-    stringField(1, bodyOwner),
-    stringField(2, idempotencyKey),
-    messageField(3, probeSpec(uri)),
-  ]);
-}
-
-function getRequest(bodyOwner, jobId) {
-  return Buffer.concat([stringField(1, bodyOwner), stringField(2, jobId)]);
-}
-
-function decodeCreateResponse(body) {
-  const frame = body.subarray(5);
-  const fields = readFields(frame);
-  return {
-    jobId: fields.get(1)?.[0]?.toString("utf8") ?? "",
-    created: fields.get(3)?.[0] === 1n,
-  };
-}
-
-function decodeJobOwner(body) {
-  const frame = body.subarray(5);
-  const response = readFields(frame);
-  const job = response.get(1)?.[0];
-  if (!job) {
-    return "";
-  }
-  const fields = readFields(job);
-  return fields.get(2)?.[0]?.toString("utf8") ?? "";
-}
-
-function call(client, path, message, authorization) {
-  return new Promise((resolve, reject) => {
-    const headers = {
-      ":method": "POST",
-      ":path": path,
-      "content-type": "application/grpc",
-      te: "trailers",
-    };
-    if (authorization) {
-      headers.authorization = authorization;
-    }
-    const stream = client.request(headers);
-    const chunks = [];
-    let status = null;
-    let message0 = "";
-    const record = (received) => {
-      if (received["grpc-status"] !== undefined) {
-        status = Number(received["grpc-status"]);
-        message0 = String(received["grpc-message"] ?? "");
-      }
-    };
-    stream.on("response", record);
-    stream.on("trailers", record);
-    stream.on("data", (chunk) => chunks.push(chunk));
-    stream.on("end", () => resolve({ status, message: message0, body: Buffer.concat(chunks) }));
-    stream.on("error", reject);
-    const frame = Buffer.alloc(5 + message.length);
-    frame.writeUInt8(0, 0);
-    frame.writeUInt32BE(message.length, 1);
-    message.copy(frame, 5);
-    stream.end(frame);
-  });
-}
-
-const CREATE_PATH = "/mmrpc.v1.MediaJobService/CreateJob";
-const GET_PATH = "/mmrpc.v1.MediaJobService/GetJob";
-const OK = 0;
-const NOT_FOUND = 5;
-const ALREADY_EXISTS = 6;
-const UNAUTHENTICATED = 16;
-
-function statusName(status) {
-  switch (status) {
-    case OK:
-      return "OK";
-    case NOT_FOUND:
-      return "NOT_FOUND";
-    case ALREADY_EXISTS:
-      return "ALREADY_EXISTS";
-    case UNAUTHENTICATED:
-      return "UNAUTHENTICATED";
-    default:
-      return `grpc-status ${status}`;
-  }
-}
-
 async function run(address, tokensPath) {
-  const tokens = JSON.parse(await import("node:fs").then((fs) => fs.readFileSync(tokensPath, "utf8")));
+  const tokens = JSON.parse(readFileSync(tokensPath, "utf8"));
   const uri = `s3://conformance/inputs/probe-${randomUUID()}.mp4`;
   const client = connect(`http://${address}`);
   client.on("error", (error) => {
@@ -223,9 +74,7 @@ async function run(address, tokensPath) {
     const passed = expected === observed;
     results.push(passed);
     console.log(
-      `${passed ? "pass" : "FAIL"} ${name}: expected ${expected}, observed ${observed}${
-        detail ? ` (${detail})` : ""
-      }`,
+      `${passed ? "pass" : "FAIL"} ${name}: expected ${expected}, observed ${observed}${detail ? ` (${detail})` : ""}`,
     );
   };
 
@@ -258,7 +107,12 @@ async function run(address, tokensPath) {
     `Bearer ${tokens.live}`,
   );
   const replayed = decodeCreateResponse(replay.body);
-  check("a replayed key answers the original job", jobId, replayed.jobId, `status=${statusName(replay.status)}`);
+  check(
+    "a replayed key answers the original job",
+    jobId,
+    replayed.jobId,
+    `status=${statusName(replay.status)}`,
+  );
   check("a replayed key is not a new job", false, replayed.created, `created=${replayed.created}`);
 
   const ownerView = await call(

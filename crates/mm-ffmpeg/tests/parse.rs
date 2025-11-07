@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use mm_ffmpeg::{ParseError, parse_media_info};
+use mm_ffmpeg::{ParseError, parse_keyframe_times, parse_media_info};
 
 fn mp4_probe_json() -> String {
     r#"{
@@ -269,4 +269,33 @@ fn non_audio_video_streams_are_ignored() {
     let info = parse_media_info(json).unwrap();
     assert_eq!(info.video.len(), 1);
     assert!(info.audio.is_empty());
+}
+
+#[test]
+fn keyframe_times_are_read_one_per_line() {
+    assert_eq!(
+        parse_keyframe_times("0.000000\n1.000000\n2.000000\n"),
+        vec![0.0, 1.0, 2.0]
+    );
+}
+
+#[test]
+fn keyframe_lines_that_carry_no_time_are_skipped() {
+    assert_eq!(
+        parse_keyframe_times("0.000000\nN/A\n\n2.500000\n"),
+        vec![0.0, 2.5]
+    );
+}
+
+#[test]
+fn a_keyframe_line_with_trailing_side_data_reads_its_first_field() {
+    assert_eq!(
+        parse_keyframe_times("0.000000,H.26[45] User Data Unregistered SEI message\n"),
+        vec![0.0]
+    );
+}
+
+#[test]
+fn an_empty_keyframe_output_reads_as_no_keyframe() {
+    assert!(parse_keyframe_times("").is_empty());
 }

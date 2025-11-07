@@ -201,3 +201,10 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, ParseError> {
         drm,
     })
 }
+
+pub fn parse_keyframe_times(text: &str) -> Vec<f64> {
+    text.lines()
+        .filter_map(|line| line.split(',').next())
+        .filter_map(|field| field.trim().parse::<f64>().ok())
+        .collect()
+}

@@ -58,7 +58,16 @@ function writeKeys(jwksPath, tokensPath) {
   const symmetric = mintHs256("a-shared-secret-the-issuer-never-publishes", claims("subject-owner", 300));
   const parts = live.split(".");
   const tampered = `${parts[0]}.${parts[1]}.${base64url(Buffer.alloc(64, 7))}`;
-  writeFileSync(tokensPath, JSON.stringify({ live, other, expired, foreign, symmetric, tampered }));
+  const noExpiry = mintEs256(published.privateKey, "conformance-1", {
+    sub: "subject-owner",
+    iss: "conformance-issuer",
+    iat: now,
+    nbf: now - 5,
+  });
+  writeFileSync(
+    tokensPath,
+    JSON.stringify({ live, other, expired, foreign, symmetric, tampered, noExpiry }),
+  );
 }
 
 async function run(address, tokensPath) {
@@ -146,6 +155,7 @@ async function run(address, tokensPath) {
     ["a token signed by an unpublished key", tokens.foreign],
     ["a symmetric token", tokens.symmetric],
     ["an expired token", tokens.expired],
+    ["a token that carries no expiry", tokens.noExpiry],
     ["a tampered signature", tokens.tampered],
   ];
   for (const [name, token] of refused) {

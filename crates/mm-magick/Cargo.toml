@@ -1,0 +1,13 @@
+[package]
+name = "mm-magick"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "process", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

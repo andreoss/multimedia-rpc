@@ -1,7 +1,8 @@
 use mm_domain::{
-    ConcatSpec, MediaRef, MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, ProbeResult, ProbeSpec, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeSpec, TrimSpec, UnsupportedOp,
+    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError, OpKind,
+    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec,
+    ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec, TrimSpec,
+    UnsupportedOp,
 };
 
 fn object() -> MediaRef {
@@ -331,4 +332,141 @@ fn thumbnail_result_rejects_empty_outputs() {
     );
     let result = ThumbnailResult::new(vec![object()]).unwrap();
     assert_eq!(result.outputs().len(), 1);
+}
+
+fn image_ref() -> MediaRef {
+    MediaRef::object_uri("s3://media/in/a.png").unwrap()
+}
+
+#[test]
+fn a_resize_spec_takes_exactly_one_input_and_a_frame() {
+    let spec = ImageSpec::new(
+        vec![image_ref()],
+        ImageOp::Resize,
+        320,
+        180,
+        ResizeMode::Fit,
+        None,
+    )
+    .expect("valid resize spec");
+
+    assert_eq!(spec.inputs().len(), 1);
+    assert_eq!((spec.width(), spec.height()), (320, 180));
+    assert_eq!(spec.mode(), ResizeMode::Fit);
+    assert_eq!(spec.format(), ImageFormat::Png);
+}
+
+#[test]
+fn a_convert_spec_needs_a_format() {
+    assert_eq!(
+        ImageSpec::new(
+            vec![image_ref()],
+            ImageOp::Convert,
+            0,
+            0,
+            ResizeMode::Fit,
+            None
+        )
+        .unwrap_err(),
+        OpSpecError::MissingImageFormat
+    );
+    let spec = ImageSpec::new(
+        vec![image_ref()],
+        ImageOp::Convert,
+        0,
+        0,
+        ResizeMode::Fit,
+        Some(ImageFormat::Jpeg),
+    )
+    .expect("valid convert spec");
+    assert_eq!(spec.format(), ImageFormat::Jpeg);
+}
+
+#[test]
+fn a_composite_spec_takes_the_overlay_and_the_base() {
+    assert_eq!(
+        ImageSpec::new(
+            vec![image_ref()],
+            ImageOp::Composite,
+            0,
+            0,
+            ResizeMode::Fit,
+            None
+        )
+        .unwrap_err(),
+        OpSpecError::WrongInputCount {
+            op: "composite",
+            expected: 2,
+            got: 1
+        }
+    );
+    let spec = ImageSpec::new(
+        vec![image_ref(), image_ref()],
+        ImageOp::Composite,
+        0,
+        0,
+        ResizeMode::Fit,
+        None,
+    )
+    .expect("valid composite spec");
+    assert_eq!(spec.inputs().len(), 2);
+}
+
+#[test]
+fn a_resize_spec_rejects_a_zero_frame() {
+    assert_eq!(
+        ImageSpec::new(
+            vec![image_ref()],
+            ImageOp::Resize,
+            0,
+            180,
+            ResizeMode::Exact,
+            None
+        )
+        .unwrap_err(),
+        OpSpecError::ZeroDimension { dimension: "width" }
+    );
+}
+
+#[test]
+fn the_image_op_kinds_are_named_and_executable() {
+    assert_eq!(OpKind::Resize.to_string(), "resize");
+    assert_eq!(OpKind::Convert.to_string(), "convert");
+    assert_eq!(OpKind::Composite.to_string(), "composite");
+    for kind in [OpKind::Resize, OpKind::Convert, OpKind::Composite] {
+        assert!(kind.ensure_executable().is_ok());
+    }
+}
+
+#[test]
+fn an_image_spec_names_its_kind() {
+    let spec = ImageSpec::new(
+        vec![image_ref()],
+        ImageOp::Resize,
+        8,
+        8,
+        ResizeMode::Fit,
+        None,
+    )
+    .unwrap();
+    assert_eq!(OpSpec::Image(spec).kind(), OpKind::Resize);
+}
+
+#[test]
+fn an_image_result_rejects_empty_outputs() {
+    assert!(matches!(
+        ImageResult::new(Vec::new()),
+        Err(OpResultError::EmptyOutputs)
+    ));
+    let result = ImageResult::new(vec![image_ref()]).expect("valid result");
+    assert_eq!(result.outputs().len(), 1);
+}
+
+#[test]
+fn image_formats_parse_from_their_names() {
+    assert_eq!(ImageFormat::parse("jpg"), Some(ImageFormat::Jpeg));
+    assert_eq!(ImageFormat::parse("jpeg"), Some(ImageFormat::Jpeg));
+    assert_eq!(ImageFormat::parse("png"), Some(ImageFormat::Png));
+    assert_eq!(ImageFormat::parse("tiff"), None);
+    assert_eq!(ImageFormat::Jpeg.extension(), "jpg");
 }

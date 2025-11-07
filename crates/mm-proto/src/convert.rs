@@ -1,9 +1,9 @@
 use crate::v1;
 use mm_domain::{
-    ConcatSpec, JobRecord, JobState, MediaRef, MediaRefError, OpResult, OpResultError, OpSpec,
-    OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, QueueUrl,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    parse_rendered_verdicts,
+    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, JobRecord, JobState, MediaRef,
+    MediaRefError, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError,
+    ProbeResult, ProbeSpec, QueueUrl, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    TranscodeResult, TranscodeSpec, TrimSpec, parse_rendered_verdicts,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -99,6 +99,14 @@ impl TryFrom<v1::OpSpec> for OpSpec {
                 thumbnail.width,
                 thumbnail.height,
             )?)),
+            v1::op_spec::Op::Image(image) => Ok(OpSpec::Image(ImageSpec::new(
+                ref_list(image.inputs)?,
+                image_op_from_raw(image.op)?,
+                image.width,
+                image.height,
+                resize_mode_from_raw(image.resize_mode),
+                image_format_from_raw(image.format),
+            )?)),
         }
     }
 }
@@ -127,6 +135,14 @@ impl From<&OpSpec> for v1::OpSpec {
                 offsets_seconds: thumbnail.offsets_seconds().to_vec(),
                 width: thumbnail.width(),
                 height: thumbnail.height(),
+            }),
+            OpSpec::Image(image) => v1::op_spec::Op::Image(v1::ImageSpec {
+                inputs: image.inputs().iter().map(v1::MediaRef::from).collect(),
+                op: image_op_to_raw(image.op()),
+                width: image.width(),
+                height: image.height(),
+                resize_mode: resize_mode_to_raw(image.mode()),
+                format: image_format_to_raw(image.declared_format()),
             }),
         };
         v1::OpSpec { op: Some(op) }
@@ -158,6 +174,9 @@ impl TryFrom<v1::OpResult> for OpResult {
             v1::op_result::Op::Thumbnail(thumbnail) => Ok(OpResult::Thumbnail(
                 ThumbnailResult::new(ref_list(thumbnail.outputs)?)?,
             )),
+            v1::op_result::Op::Image(image) => {
+                Ok(OpResult::Image(ImageResult::new(ref_list(image.outputs)?)?))
+            }
         }
     }
 }
@@ -181,6 +200,7 @@ fn spec_inputs(spec: &OpSpec) -> Vec<&MediaRef> {
         OpSpec::Transcode(transcode) => vec![transcode.input()],
         OpSpec::Trim(trim) => vec![trim.input()],
         OpSpec::Thumbnail(thumbnail) => vec![thumbnail.input()],
+        OpSpec::Image(image) => image.inputs().iter().collect(),
     }
 }
 
@@ -263,7 +283,63 @@ impl From<&OpResult> for v1::OpResult {
             OpResult::Thumbnail(thumbnail) => v1::op_result::Op::Thumbnail(v1::ThumbnailResult {
                 outputs: thumbnail.outputs().iter().map(v1::MediaRef::from).collect(),
             }),
+            OpResult::Image(image) => v1::op_result::Op::Image(v1::ImageResult {
+                outputs: image.outputs().iter().map(v1::MediaRef::from).collect(),
+            }),
         };
         v1::OpResult { op: Some(op) }
+    }
+}
+
+fn image_op_from_raw(value: i32) -> Result<ImageOp, OpSpecError> {
+    match value {
+        raw if raw == v1::ImageOp::Resize as i32 => Ok(ImageOp::Resize),
+        raw if raw == v1::ImageOp::Convert as i32 => Ok(ImageOp::Convert),
+        raw if raw == v1::ImageOp::Composite as i32 => Ok(ImageOp::Composite),
+        _ => Err(OpSpecError::MissingOp),
+    }
+}
+
+fn image_op_to_raw(value: ImageOp) -> i32 {
+    match value {
+        ImageOp::Resize => v1::ImageOp::Resize as i32,
+        ImageOp::Convert => v1::ImageOp::Convert as i32,
+        ImageOp::Composite => v1::ImageOp::Composite as i32,
+    }
+}
+
+fn resize_mode_from_raw(value: i32) -> ResizeMode {
+    if value == v1::ResizeMode::Exact as i32 {
+        ResizeMode::Exact
+    } else if value == v1::ResizeMode::Fill as i32 {
+        ResizeMode::Fill
+    } else {
+        ResizeMode::Fit
+    }
+}
+
+fn resize_mode_to_raw(value: ResizeMode) -> i32 {
+    match value {
+        ResizeMode::Fit => v1::ResizeMode::Fit as i32,
+        ResizeMode::Exact => v1::ResizeMode::Exact as i32,
+        ResizeMode::Fill => v1::ResizeMode::Fill as i32,
+    }
+}
+
+fn image_format_from_raw(value: i32) -> Option<ImageFormat> {
+    if value == v1::ImageFormat::Jpeg as i32 {
+        Some(ImageFormat::Jpeg)
+    } else if value == v1::ImageFormat::Png as i32 {
+        Some(ImageFormat::Png)
+    } else {
+        None
+    }
+}
+
+fn image_format_to_raw(value: Option<ImageFormat>) -> i32 {
+    match value {
+        Some(ImageFormat::Jpeg) => v1::ImageFormat::Jpeg as i32,
+        Some(ImageFormat::Png) => v1::ImageFormat::Png as i32,
+        None => v1::ImageFormat::Unspecified as i32,
     }
 }

@@ -218,6 +218,14 @@ pub enum OpSpecError {
     InvalidOffset { value: f64 },
     #[error("{dimension} is zero")]
     ZeroDimension { dimension: &'static str },
+    #[error("{op} takes exactly {expected} inputs, got {got}")]
+    WrongInputCount {
+        op: &'static str,
+        expected: usize,
+        got: usize,
+    },
+    #[error("convert needs an output format")]
+    MissingImageFormat,
     #[error(transparent)]
     MediaRef(#[from] MediaRefError),
     #[error(transparent)]
@@ -405,6 +413,136 @@ impl ThumbnailSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ImageOp {
+    #[error("resize")]
+    Resize,
+    #[error("convert")]
+    Convert,
+    #[error("composite")]
+    Composite,
+}
+
+impl ImageOp {
+    pub fn kind(self) -> OpKind {
+        match self {
+            ImageOp::Resize => OpKind::Resize,
+            ImageOp::Convert => OpKind::Convert,
+            ImageOp::Composite => OpKind::Composite,
+        }
+    }
+
+    pub fn input_count(self) -> usize {
+        match self {
+            ImageOp::Resize | ImageOp::Convert => 1,
+            ImageOp::Composite => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeMode {
+    Fit,
+    Exact,
+    Fill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Jpeg,
+    Png,
+}
+
+impl ImageFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageFormat::Jpeg => "jpg",
+            ImageFormat::Png => "png",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "jpeg" | "jpg" => Some(ImageFormat::Jpeg),
+            "png" => Some(ImageFormat::Png),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageSpec {
+    inputs: Vec<MediaRef>,
+    op: ImageOp,
+    width: u32,
+    height: u32,
+    mode: ResizeMode,
+    format: Option<ImageFormat>,
+}
+
+impl ImageSpec {
+    pub fn new(
+        inputs: Vec<MediaRef>,
+        op: ImageOp,
+        width: u32,
+        height: u32,
+        mode: ResizeMode,
+        format: Option<ImageFormat>,
+    ) -> Result<Self, OpSpecError> {
+        if inputs.len() != op.input_count() {
+            return Err(OpSpecError::WrongInputCount {
+                op: op.to_string().leak(),
+                expected: op.input_count(),
+                got: inputs.len(),
+            });
+        }
+        if op == ImageOp::Resize && (width == 0 || height == 0) {
+            return Err(OpSpecError::ZeroDimension {
+                dimension: if width == 0 { "width" } else { "height" },
+            });
+        }
+        if op == ImageOp::Convert && format.is_none() {
+            return Err(OpSpecError::MissingImageFormat);
+        }
+        Ok(Self {
+            inputs,
+            op,
+            width,
+            height,
+            mode,
+            format,
+        })
+    }
+
+    pub fn inputs(&self) -> &[MediaRef] {
+        &self.inputs
+    }
+
+    pub fn op(&self) -> ImageOp {
+        self.op
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn mode(&self) -> ResizeMode {
+        self.mode
+    }
+
+    pub fn format(&self) -> ImageFormat {
+        self.format.unwrap_or(ImageFormat::Png)
+    }
+
+    pub fn declared_format(&self) -> Option<ImageFormat> {
+        self.format
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpSpec {
     Concat(ConcatSpec),
@@ -412,6 +550,7 @@ pub enum OpSpec {
     Transcode(TranscodeSpec),
     Trim(TrimSpec),
     Thumbnail(ThumbnailSpec),
+    Image(ImageSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -421,6 +560,9 @@ pub enum OpKind {
     Transcode,
     Trim,
     Thumbnail,
+    Resize,
+    Convert,
+    Composite,
 }
 
 impl std::fmt::Display for OpKind {
@@ -431,6 +573,9 @@ impl std::fmt::Display for OpKind {
             OpKind::Transcode => "transcode",
             OpKind::Trim => "trim",
             OpKind::Thumbnail => "thumbnail",
+            OpKind::Resize => "resize",
+            OpKind::Convert => "convert",
+            OpKind::Composite => "composite",
         };
         formatter.write_str(name)
     }
@@ -450,6 +595,7 @@ impl OpKind {
             | OpKind::Transcode
             | OpKind::Trim
             | OpKind::Thumbnail => Ok(()),
+            OpKind::Resize | OpKind::Convert | OpKind::Composite => Ok(()),
         }
     }
 }
@@ -462,6 +608,7 @@ impl OpSpec {
             OpSpec::Transcode(_) => OpKind::Transcode,
             OpSpec::Trim(_) => OpKind::Trim,
             OpSpec::Thumbnail(_) => OpKind::Thumbnail,
+            OpSpec::Image(spec) => spec.op.kind(),
         }
     }
 }
@@ -583,10 +730,29 @@ impl ThumbnailResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ImageResult {
+    outputs: Vec<MediaRef>,
+}
+
+impl ImageResult {
+    pub fn new(outputs: Vec<MediaRef>) -> Result<Self, OpResultError> {
+        if outputs.is_empty() {
+            return Err(OpResultError::EmptyOutputs);
+        }
+        Ok(Self { outputs })
+    }
+
+    pub fn outputs(&self) -> &[MediaRef] {
+        &self.outputs
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum OpResult {
     Concat(TimedOutput),
     Probe(ProbeResult),
     Transcode(TranscodeResult),
     Trim(TimedOutput),
     Thumbnail(ThumbnailResult),
+    Image(ImageResult),
 }

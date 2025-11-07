@@ -2,13 +2,36 @@ use std::str::FromStr;
 use std::time::SystemTime;
 
 use mm_auth::{Identity, Settings, Verifier, bearer_token};
-use mm_domain::UserId;
+use mm_domain::{TraceId, UserId};
+use mm_observability::{Component, record};
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 pub const AUTHORIZATION: &str = "authorization";
+pub const TRACE_ID: &str = "x-trace-id";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trace(TraceId);
+
+impl Trace {
+    pub fn id(self) -> TraceId {
+        self.0
+    }
+
+    pub fn as_ref(&self) -> Option<&TraceId> {
+        Some(&self.0)
+    }
+}
+
+fn read_trace(metadata: &MetadataMap) -> TraceId {
+    metadata
+        .get(TRACE_ID)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| TraceId::from_str(value).ok())
+        .unwrap_or_else(TraceId::generate)
+}
 
 pub trait DeprecatedOwner {
     fn deprecated_owner(&self) -> &str;
@@ -87,6 +110,14 @@ pub(crate) fn owner_of<T>(request: &Request<T>) -> Result<UserId, Status> {
         .user_id()
 }
 
+pub(crate) fn trace_of<T>(request: &Request<T>) -> TraceId {
+    request
+        .extensions()
+        .get::<Trace>()
+        .map(|trace| trace.id())
+        .unwrap_or_else(TraceId::generate)
+}
+
 impl Auth {
     pub fn open() -> Self {
         Auth::Open
@@ -146,10 +177,29 @@ impl<T> Interceptor<T> {
     fn identify<TMessage: DeprecatedOwner>(
         &self,
         request: Request<TMessage>,
+        method: &str,
     ) -> Result<Request<TMessage>, Status> {
         let deprecated_owner = request.get_ref().deprecated_owner().to_string();
         let (metadata, mut extensions, message) = request.into_parts();
-        extensions.insert(self.auth.owner(&metadata, &deprecated_owner)?);
+        let owner = self.auth.owner(&metadata, &deprecated_owner)?;
+        let trace = Trace(read_trace(&metadata));
+        record(
+            Component::Server,
+            trace.as_ref(),
+            "rpc.received",
+            &[
+                ("method", method.to_string()),
+                (
+                    "owner",
+                    match owner.user_id() {
+                        Ok(owner) => owner.to_string(),
+                        Err(status) => format!("refused:{:?}", status.code()),
+                    },
+                ),
+            ],
+        );
+        extensions.insert(owner);
+        extensions.insert(trace);
         Ok(Request::from_parts(metadata, extensions, message))
     }
 }
@@ -160,28 +210,34 @@ impl<T: MediaJobService> MediaJobService for Interceptor<T> {
         &self,
         request: Request<v1::CreateJobRequest>,
     ) -> Result<Response<v1::CreateJobResponse>, Status> {
-        self.inner.create_job(self.identify(request)?).await
+        self.inner
+            .create_job(self.identify(request, "create_job")?)
+            .await
     }
 
     async fn get_job(
         &self,
         request: Request<v1::GetJobRequest>,
     ) -> Result<Response<v1::GetJobResponse>, Status> {
-        self.inner.get_job(self.identify(request)?).await
+        self.inner.get_job(self.identify(request, "get_job")?).await
     }
 
     async fn cancel_job(
         &self,
         request: Request<v1::CancelJobRequest>,
     ) -> Result<Response<v1::CancelJobResponse>, Status> {
-        self.inner.cancel_job(self.identify(request)?).await
+        self.inner
+            .cancel_job(self.identify(request, "cancel_job")?)
+            .await
     }
 
     async fn list_jobs(
         &self,
         request: Request<v1::ListJobsRequest>,
     ) -> Result<Response<v1::ListJobsResponse>, Status> {
-        self.inner.list_jobs(self.identify(request)?).await
+        self.inner
+            .list_jobs(self.identify(request, "list_jobs")?)
+            .await
     }
 
     type WatchJobStream = T::WatchJobStream;
@@ -190,7 +246,9 @@ impl<T: MediaJobService> MediaJobService for Interceptor<T> {
         &self,
         request: Request<v1::WatchJobRequest>,
     ) -> Result<Response<Self::WatchJobStream>, Status> {
-        self.inner.watch_job(self.identify(request)?).await
+        self.inner
+            .watch_job(self.identify(request, "watch_job")?)
+            .await
     }
 }
 

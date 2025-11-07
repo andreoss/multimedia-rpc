@@ -167,13 +167,14 @@ async fn announced_address(daemon: &mut Daemon) -> SocketAddr {
     let stdout = daemon.child.stdout.take().expect("stdout is piped");
     tokio::task::spawn_blocking(move || {
         let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("announce line readable");
-        line.trim()
-            .strip_prefix("listening ")
-            .unwrap_or_else(|| panic!("unexpected announce line: {line:?}"))
-            .parse()
-            .expect("announced address parses")
+        loop {
+            let mut line = String::new();
+            let count = reader.read_line(&mut line).expect("announce line readable");
+            assert!(count > 0, "the daemon exited before announcing");
+            if let Some(address) = line.trim().strip_prefix("listening ") {
+                return address.parse().expect("announced address parses");
+            }
+        }
     })
     .await
     .expect("announce reader finishes")

@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 mm-domain = { path = "../mm-domain" }
+mm-observability = { path = "../mm-observability" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 mm-magick = { path = "../mm-magick" }
 mm-gst = { path = "../mm-gst", features = ["gst"] }

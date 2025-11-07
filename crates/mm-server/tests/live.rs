@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mm_domain::{
-    ConcatSpec, JobRepository, MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError,
-    OpSpec, ProgressPercent, WorkerId,
+    ConcatSpec, JobId, JobRepository, MediaRef, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpSpec, ProgressPercent, TraceId, WorkerId,
 };
 use mm_ffmpeg::Prober;
 use mm_jobstore::{MIGRATOR, PgJobEventListener, PgJobRepository};
@@ -18,6 +18,7 @@ use mm_server::{ServerConfig, ServerHandle};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use tonic::Request;
 use tonic::transport::Endpoint;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
@@ -1184,6 +1185,83 @@ async fn invalid_list_arguments_are_rejected() {
         .await
         .expect_err("unknown status rejected");
     assert_eq!(unknown.code(), tonic::Code::InvalidArgument);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_job_carries_the_trace_the_caller_offered() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let trace = TraceId::generate();
+    let mut request = Request::new(create_request("owner-trace", "req-trace-1"));
+    request.metadata_mut().insert(
+        "x-trace-id",
+        trace.to_string().parse().expect("metadata value"),
+    );
+    let created = client
+        .create_job(request)
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let record = db
+        .repository()
+        .get(JobId::from_str(&created.job_id).expect("job id parses"))
+        .await
+        .expect("read succeeds")
+        .expect("job exists");
+    assert_eq!(record.trace_id, Some(trace));
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_call_without_a_trace_gets_one_of_its_own() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let created = client
+        .create_job(create_request("owner-trace", "req-trace-2"))
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let record = db
+        .repository()
+        .get(JobId::from_str(&created.job_id).expect("job id parses"))
+        .await
+        .expect("read succeeds")
+        .expect("job exists");
+    assert!(
+        record.trace_id.is_some(),
+        "a generated trace must be stored"
+    );
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn an_unusable_trace_header_is_replaced_rather_than_refused() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut request = Request::new(create_request("owner-trace", "req-trace-3"));
+    request
+        .metadata_mut()
+        .insert("x-trace-id", "not-a-uuid".parse().expect("metadata value"));
+    let created = client
+        .create_job(request)
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let record = db
+        .repository()
+        .get(JobId::from_str(&created.job_id).expect("job id parses"))
+        .await
+        .expect("read succeeds")
+        .expect("job exists");
+    assert!(record.trace_id.is_some());
+    assert_ne!(
+        record.trace_id,
+        TraceId::from_str("00000000-0000-0000-0000-000000000000").ok()
+    );
     handle.shutdown().await;
     db.dispose().await;
 }

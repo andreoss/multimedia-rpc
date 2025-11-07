@@ -219,16 +219,19 @@ fn concat_job(inputs: Vec<MediaRef>) -> NewJob {
     )
 }
 
-fn unsupported_spec() -> OpSpec {
-    OpSpec::Thumbnail(
-        ThumbnailSpec::new(
-            MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
-            vec![0.0],
-            320,
-            180,
+fn blocked_spec(input: MediaRef) -> OpSpec {
+    OpSpec::Transcode(
+        TranscodeSpec::new(
+            input,
+            OutputProfile::from_raw(24.0, 0, 0, 0, 0, 0, 0).unwrap(),
         )
         .unwrap(),
     )
+}
+
+async fn blocked_input(store: &S3ObjectStore) -> MediaRef {
+    let foreign = fixture("pickup-blocked.mkv", 1, 30, "matroska");
+    upload_input(store, &foreign, "inputs/pickup-blocked.mkv").await
 }
 
 fn base_config(db: &TestDb, store: Arc<dyn ObjectStore>, name: &str) -> WorkerConfig {
@@ -476,6 +479,59 @@ async fn a_trim_job_succeeds_with_a_verified_output() {
     assert!(info.container.split(',').any(|token| token == "mp4"));
     let staged = scratch_dir("staging").join(format!("{}.mp4", job.id));
     assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thumbnail_job_lands_every_requested_key() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("thumbnail-30fps-6s.mp4", 6, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/thumbnail-30fps-6s.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Thumbnail(
+            ThumbnailSpec::new(input, vec![0.0, 1.5, 3.0], 160, 120).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-thumbnail"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(180)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    assert_eq!(record.progress.value(), 100);
+    let OpResult::Thumbnail(result) = record.result.expect("result recorded") else {
+        panic!("expected a thumbnail result");
+    };
+    assert_eq!(result.outputs().len(), 3);
+    let mut sizes = Vec::new();
+    for (index, output) in result.outputs().iter().enumerate() {
+        let MediaRef::Object(object) = output else {
+            panic!("expected an object output");
+        };
+        assert_eq!(object.key(), format!("jobs/{}/thumb-{index}.jpg", job.id));
+        let body = store.get(object).await.expect("output fetches");
+        let bytes = collect_body(body).await.expect("output body collects");
+        let local = scratch_dir("verify").join(format!("{}-{index}.jpg", job.id));
+        tokio::fs::write(&local, &bytes).await.unwrap();
+        let still = mm_ffmpeg::Prober::default()
+            .still(&local.to_string_lossy(), &mm_ffmpeg::ProbeLimits::default())
+            .await
+            .expect("the stored thumbnail reports");
+        assert_eq!((still.width, still.height), (160, 120));
+        sizes.push(still.size_bytes.unwrap_or_default());
+    }
+    assert!(
+        sizes.windows(2).any(|pair| pair[0] != pair[1]),
+        "every offset produced the same frame: {sizes:?}"
+    );
+    for index in 0..3 {
+        let staged = scratch_dir("staging").join(format!("{}-{index}.jpg", job.id));
+        assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    }
     db.dispose().await;
 }
 
@@ -946,38 +1002,6 @@ async fn a_transient_upload_failure_retries_with_growing_gaps_until_failed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unsupported_operation_fails_with_a_typed_code() {
-    let db = fresh_db().await;
-    let store = test_store().await;
-    let repository = db.repository();
-    let id = JobId::generate();
-    let job = repository
-        .create(NewJob::new(
-            id,
-            owner(),
-            RequestId::from_str(&format!("req-{id}")).unwrap(),
-            unsupported_spec(),
-            None,
-        ))
-        .await
-        .unwrap();
-
-    let handle = start(base_config(&db, store, "worker-unsupported"));
-    let record = await_terminal(&repository, job.id, Duration::from_secs(30)).await;
-    handle.shutdown().await;
-
-    assert_eq!(record.state, JobState::Failed);
-    let failure = record.failure.expect("failure recorded");
-    assert_eq!(failure.code(), codes::UNSUPPORTED_OPERATION);
-    assert!(
-        failure.message().contains("thumbnail"),
-        "{}",
-        failure.message()
-    );
-    db.dispose().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_passed_deadline_fails_before_any_work() {
     let db = fresh_db().await;
     let store = test_store().await;
@@ -1134,6 +1158,7 @@ async fn a_created_job_is_claimed_via_notify_well_before_any_tick() {
     let db = fresh_db().await;
     let store = test_store().await;
     let repository = db.repository();
+    let blocked = blocked_input(&store).await;
 
     let mut config = base_config(&db, store, "worker-notified");
     config.reconcile_interval = Duration::from_secs(60);
@@ -1154,7 +1179,7 @@ async fn a_created_job_is_claimed_via_notify_well_before_any_tick() {
                 id,
                 owner(),
                 RequestId::from_str(&format!("req-{id}-{attempt}")).unwrap(),
-                unsupported_spec(),
+                blocked_spec(blocked.clone()),
                 None,
             ))
             .await
@@ -1190,6 +1215,7 @@ async fn without_a_listener_a_job_still_starts_within_one_tick() {
     let db = fresh_db().await;
     let store = test_store().await;
     let repository = db.repository();
+    let blocked = blocked_input(&store).await;
 
     let mut config = base_config(&db, store, "worker-ticking");
     config.reconcile_interval = Duration::from_secs(1);
@@ -1204,7 +1230,7 @@ async fn without_a_listener_a_job_still_starts_within_one_tick() {
             id,
             owner(),
             RequestId::from_str(&format!("req-{id}")).unwrap(),
-            unsupported_spec(),
+            blocked_spec(blocked.clone()),
             None,
         ))
         .await

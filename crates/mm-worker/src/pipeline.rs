@@ -7,13 +7,14 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
     ConcatSpec, InputReport, JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef,
-    ObjectBody, ObjectRef, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, ProbeResult,
-    ProbeSpec, ProgressPercent, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    UnsupportedOp, WorkerId, resolve_media_ref, validate_inputs,
+    ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey,
+    ProbeResult, ProbeSpec, ProgressPercent, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    TranscodeResult, TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
-    MediaInfo, RunLimits, RunOutcome, ScaleMode, TranscodeTarget, TrimStrategy, TrimTarget,
-    build_concat_args, build_transcode_args, build_trim_args,
+    ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, ThumbnailTarget, TranscodeTarget,
+    TrimStrategy, TrimTarget, build_concat_args, build_thumbnail_args, build_transcode_args,
+    build_trim_args,
 };
 use prost::Message;
 use tokio::io::AsyncReadExt;
@@ -36,6 +37,7 @@ pub mod codes {
 }
 
 const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
+const THUMBNAIL_RUN_SECONDS: u32 = 5;
 
 enum Finish {
     Cancelled,
@@ -346,12 +348,7 @@ async fn pipeline(
         OpSpec::Probe(spec) => probe_pipeline(ctx, spec, deadline_at, signal).await,
         OpSpec::Transcode(spec) => transcode_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Trim(spec) => trim_pipeline(ctx, job, spec, deadline_at, signal).await,
-        unsupported => Err(failed(
-            codes::UNSUPPORTED_OPERATION,
-            UnsupportedOp {
-                kind: unsupported.kind(),
-            },
-        )),
+        OpSpec::Thumbnail(spec) => thumbnail_pipeline(ctx, job, spec, deadline_at, signal).await,
     }
 }
 
@@ -558,6 +555,161 @@ async fn concat_pipeline(
     merged
 }
 
+async fn thumbnail_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &ThumbnailSpec,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_input(ctx, &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Thumbnail, &[input_report(&info)])?;
+
+    let offsets = spec.offsets_seconds();
+    let estimate = estimate_bytes(ctx, &[spec.input().clone()], &[info]).await
+        + staged_frame_bytes(offsets.len(), spec.width(), spec.height());
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+
+    let target = ThumbnailTarget {
+        width: spec.width(),
+        height: spec.height(),
+        format: ImageFormat::Jpeg,
+    };
+    let staged: Vec<PathBuf> = (0..offsets.len())
+        .map(|index| ctx.staging_dir.join(format!("{}-{index}.jpg", job.id)))
+        .collect();
+    let runs: Vec<Vec<String>> = offsets
+        .iter()
+        .zip(staged.iter())
+        .map(|(offset, path)| build_thumbnail_args(&url, *offset, &target, &path.to_string_lossy()))
+        .collect();
+    let total = Duration::from_secs(u64::from(THUMBNAIL_RUN_SECONDS) * offsets.len() as u64);
+    let limits = remaining_limits(ctx, total, deadline_at)?;
+
+    check(signal)?;
+    let produced = run_all_and_upload(
+        ctx,
+        job.id,
+        &runs,
+        &limits,
+        &staged,
+        (spec.width(), spec.height()),
+        signal,
+    )
+    .await;
+    for path in &staged {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    let outputs = produced?;
+    let result =
+        ThumbnailResult::new(outputs).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    Ok(OpResult::Thumbnail(result))
+}
+
+fn staged_frame_bytes(count: usize, width: u32, height: u32) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(3)
+        .saturating_mul(count as u64)
+}
+
+struct Landed<'a> {
+    store: &'a dyn ObjectStore,
+    keys: Vec<ObjectRef>,
+}
+
+impl Landed<'_> {
+    fn record(&mut self, key: ObjectRef) {
+        self.keys.push(key);
+    }
+
+    async fn discard(&self) {
+        for key in &self.keys {
+            let _ = self.store.delete(key).await;
+        }
+    }
+}
+
+async fn run_all_and_upload(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    runs: &[Vec<String>],
+    limits: &RunLimits,
+    staged: &[PathBuf],
+    expected: (u32, u32),
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<Vec<MediaRef>, Finish> {
+    let total = runs.len();
+    for (index, args) in runs.iter().enumerate() {
+        check(signal)?;
+        supervise(ctx, id, args, limits, signal, index, total).await?;
+    }
+
+    let mut landed = Landed {
+        store: ctx.store.as_ref(),
+        keys: Vec::with_capacity(total),
+    };
+    let outcome = upload_each(ctx, id, staged, expected, &mut landed, signal).await;
+    match outcome {
+        Ok(outputs) => Ok(outputs),
+        Err(finish) => {
+            landed.discard().await;
+            Err(finish)
+        }
+    }
+}
+
+async fn upload_each(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    staged: &[PathBuf],
+    expected: (u32, u32),
+    landed: &mut Landed<'_>,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<Vec<MediaRef>, Finish> {
+    let mut outputs = Vec::with_capacity(staged.len());
+    for (index, path) in staged.iter().enumerate() {
+        check(signal)?;
+        let still = ctx
+            .prober
+            .still(&path.to_string_lossy(), &ctx.probe_limits)
+            .await
+            .map_err(|error| failed(codes::OUTPUT_INVALID, format!("output {index}: {error}")))?;
+        if (still.width, still.height) != expected {
+            return Err(failed(
+                codes::OUTPUT_INVALID,
+                format!(
+                    "output {index}: {}x{} instead of the requested {}x{}",
+                    still.width, still.height, expected.0, expected.1
+                ),
+            ));
+        }
+        let object = artifact_object(ctx, id, index)?;
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+        ctx.store
+            .put_multipart(&object, file_body(file))
+            .await
+            .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+        landed.record(object.clone());
+        outputs.push(MediaRef::Object(object));
+    }
+    check(signal)?;
+    Ok(outputs)
+}
+
+fn artifact_object(ctx: &WorkerConfig, id: JobId, index: usize) -> Result<ObjectRef, Finish> {
+    let artifact = format!("thumb-{index}.jpg");
+    OutputKey::new(&id, &artifact)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+        .into_object(&ctx.bucket)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))
+}
+
 async fn trim_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
@@ -633,15 +785,15 @@ enum OutputShape {
     Trim,
 }
 
-async fn run_and_upload(
+async fn supervise(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
     args: &[String],
     limits: &RunLimits,
-    output_path: &PathBuf,
     signal: &mut watch::Receiver<Signal>,
-    shape: OutputShape,
-) -> Result<OpResult, Finish> {
+    completed: usize,
+    total: usize,
+) -> Result<(), Finish> {
     let mut run = ctx
         .runner
         .start(args, limits)
@@ -664,8 +816,7 @@ async fn run_and_upload(
                 match update {
                     Some(update) => {
                         if last_persisted.elapsed() >= ctx.progress_interval || update.complete {
-                            let percent = ProgressPercent::new(update.percent as u8)
-                                .unwrap_or(ProgressPercent::COMPLETE);
+                            let percent = shared_percent(update.percent, completed, total);
                             let _ = ctx
                                 .repository
                                 .set_progress(id, &ctx.worker_id, percent)
@@ -701,26 +852,42 @@ async fn run_and_upload(
     };
 
     match outcome {
-        RunOutcome::Succeeded => {}
-        RunOutcome::Cancelled => {
-            return Err(interrupted.unwrap_or(Finish::Cancelled));
-        }
-        RunOutcome::DeadlineExceeded { after } => {
-            return Err(failed(
-                codes::TIMEOUT,
-                format!("merge exceeded the deadline after {after:?}"),
-            ));
-        }
+        RunOutcome::Succeeded => Ok(()),
+        RunOutcome::Cancelled => Err(interrupted.unwrap_or(Finish::Cancelled)),
+        RunOutcome::DeadlineExceeded { after } => Err(failed(
+            codes::TIMEOUT,
+            format!("merge exceeded the deadline after {after:?}"),
+        )),
         RunOutcome::Failed {
             status,
             stderr_tail,
-        } => {
-            return Err(failed(
-                codes::MERGE_FAILED,
-                format!("exit status {status:?}: {stderr_tail}"),
-            ));
-        }
+        } => Err(failed(
+            codes::MERGE_FAILED,
+            format!("exit status {status:?}: {stderr_tail}"),
+        )),
     }
+}
+
+fn shared_percent(run_percent: f64, completed: usize, total: usize) -> ProgressPercent {
+    let share = completed as f64 + run_percent / 100.0;
+    let overall = if total == 0 {
+        0.0
+    } else {
+        (share * 100.0 / total as f64).clamp(0.0, 100.0)
+    };
+    ProgressPercent::new(overall as u8).unwrap_or(ProgressPercent::COMPLETE)
+}
+
+async fn run_and_upload(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    args: &[String],
+    limits: &RunLimits,
+    output_path: &PathBuf,
+    signal: &mut watch::Receiver<Signal>,
+    shape: OutputShape,
+) -> Result<OpResult, Finish> {
+    supervise(ctx, id, args, limits, signal, 0, 1).await?;
 
     check(signal)?;
     let info = ctx

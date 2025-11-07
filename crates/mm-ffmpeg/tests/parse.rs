@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use mm_ffmpeg::{ParseError, parse_keyframe_times, parse_media_info};
+use mm_ffmpeg::{ParseError, parse_keyframe_times, parse_media_info, parse_still_info};
 
 fn mp4_probe_json() -> String {
     r#"{
@@ -298,4 +298,44 @@ fn a_keyframe_line_with_trailing_side_data_reads_its_first_field() {
 #[test]
 fn an_empty_keyframe_output_reads_as_no_keyframe() {
     assert!(parse_keyframe_times("").is_empty());
+}
+
+fn still_probe_json() -> &'static str {
+    r#"{
+        "streams": [
+            {"index": 0, "codec_name": "mjpeg", "codec_type": "video",
+             "width": 320, "height": 180}
+        ],
+        "format": {"filename": "frame.jpg", "nb_streams": 1,
+                   "format_name": "image_pipe", "size": "5432"}
+    }"#
+}
+
+#[test]
+fn a_still_report_reads_its_container_and_frame() {
+    let still = parse_still_info(still_probe_json()).unwrap();
+    assert_eq!(still.container, "image_pipe");
+    assert_eq!(still.codec, "mjpeg");
+    assert_eq!(still.width, 320);
+    assert_eq!(still.height, 180);
+    assert_eq!(still.size_bytes, Some(5432));
+}
+
+#[test]
+fn a_still_report_without_an_image_stream_is_an_error() {
+    let json = r#"{"streams": [{"codec_type": "audio", "codec_name": "aac"}],
+                   "format": {"format_name": "wav"}}"#;
+    assert!(matches!(
+        parse_still_info(json),
+        Err(ParseError::NoImageStream)
+    ));
+}
+
+#[test]
+fn a_still_report_without_a_format_section_is_an_error() {
+    let json = r#"{"streams": [{"codec_type": "video", "width": 4, "height": 4}]}"#;
+    assert!(matches!(
+        parse_still_info(json),
+        Err(ParseError::MissingFormat)
+    ));
 }

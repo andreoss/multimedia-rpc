@@ -35,6 +35,15 @@ pub struct AudioStream {
     pub bit_rate: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StillInfo {
+    pub container: String,
+    pub codec: String,
+    pub width: u32,
+    pub height: u32,
+    pub size_bytes: Option<u64>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("probe output is not valid json: {source}")]
@@ -46,6 +55,8 @@ pub enum ParseError {
     MissingFormat,
     #[error("probe output carries no duration and no size and bit rate to estimate one")]
     MissingDuration,
+    #[error("probe output carries no image stream")]
+    NoImageStream,
 }
 
 #[derive(Deserialize)]
@@ -207,4 +218,21 @@ pub fn parse_keyframe_times(text: &str) -> Vec<f64> {
         .filter_map(|line| line.split(',').next())
         .filter_map(|field| field.trim().parse::<f64>().ok())
         .collect()
+}
+
+pub fn parse_still_info(json: &str) -> Result<StillInfo, ParseError> {
+    let raw: RawProbe = serde_json::from_str(json)?;
+    let format = raw.format.ok_or(ParseError::MissingFormat)?;
+    let stream = raw
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type.as_deref() == Some("video"))
+        .ok_or(ParseError::NoImageStream)?;
+    Ok(StillInfo {
+        container: format.format_name.unwrap_or_default(),
+        codec: stream.codec_name.clone().unwrap_or_default(),
+        width: stream.width.unwrap_or_default(),
+        height: stream.height.unwrap_or_default(),
+        size_bytes: parse_number(format.size.as_ref()),
+    })
 }

@@ -5,7 +5,9 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::parse::{MediaInfo, ParseError, parse_keyframe_times, parse_media_info};
+use crate::parse::{
+    MediaInfo, ParseError, StillInfo, parse_keyframe_times, parse_media_info, parse_still_info,
+};
 
 const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -72,6 +74,21 @@ impl Prober {
     pub async fn probe(&self, input: &str, limits: &ProbeLimits) -> Result<MediaInfo, ProbeError> {
         let text = self.capture(&stream_args(limits, input), limits).await?;
         Ok(parse_media_info(&text)?)
+    }
+
+    pub async fn still(&self, input: &str, limits: &ProbeLimits) -> Result<StillInfo, ProbeError> {
+        let mut args = vec![
+            "-v".to_string(),
+            "quiet".to_string(),
+            "-print_format".to_string(),
+            "json".to_string(),
+            "-show_format".to_string(),
+            "-show_streams".to_string(),
+        ];
+        args.extend(limits_args(limits));
+        args.push(input.to_string());
+        let text = self.capture(&args, limits).await?;
+        Ok(parse_still_info(&text)?)
     }
 
     pub async fn keyframes(

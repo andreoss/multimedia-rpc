@@ -119,6 +119,7 @@ pub struct Histogram {
 #[derive(Debug, Clone)]
 pub struct Metrics {
     pub jobs_pending: Gauge,
+    pub queue_depth_errors: Counter,
     pub jobs_started: Counter,
     pub jobs_finished: Counter,
     pub claim_latency: Histogram,
@@ -209,6 +210,10 @@ impl Registry {
             jobs_pending: registry.gauge(
                 "mm_jobs_pending",
                 "jobs waiting to be claimed by any worker",
+            ),
+            queue_depth_errors: registry.counter(
+                "mm_queue_depth_errors_total",
+                "queue depth samples that failed, after which mm_jobs_pending is stale",
             ),
             jobs_started: registry.counter("mm_jobs_started_total", "jobs claimed for execution"),
             jobs_finished: registry.counter(

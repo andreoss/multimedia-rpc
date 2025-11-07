@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mm_auth::Settings;
-use mm_domain::{JobRepository, WorkerId};
+use mm_domain::{JobRepository, JobStoreError, WorkerId};
 use mm_ffmpeg::Prober;
 use mm_jobstore::{PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository};
+use mm_observability::{Component, record};
 use mm_observability::{Metrics, Registry, Scrape};
 use mm_server::{Auth, ServerConfig};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings, SqsCallbackPublisher, SqsSettings};
@@ -282,15 +283,48 @@ async fn start_telemetry(
     })
 }
 
+#[async_trait::async_trait]
+trait QueueDepth: Send + Sync {
+    async fn pending_count(&self) -> Result<u64, JobStoreError>;
+}
+
+#[async_trait::async_trait]
+impl QueueDepth for PgJobRepository {
+    async fn pending_count(&self) -> Result<u64, JobStoreError> {
+        JobRepository::pending_count(self).await
+    }
+}
+
+async fn sample_once(repository: &dyn QueueDepth, metrics: &Metrics) -> Result<(), String> {
+    match repository.pending_count().await {
+        Ok(pending) => {
+            metrics.jobs_pending.set(pending);
+            Ok(())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            metrics.queue_depth_errors.add(1);
+            record(
+                Component::Daemon,
+                None,
+                "queue.depth.unavailable",
+                &[
+                    ("dependency", "job store".to_string()),
+                    ("error", message.clone()),
+                ],
+            );
+            Err(message)
+        }
+    }
+}
+
 async fn sample_queue_depth(
     repository: Arc<PgJobRepository>,
     metrics: Metrics,
     interval: Duration,
 ) {
     loop {
-        if let Ok(pending) = repository.pending_count().await {
-            metrics.jobs_pending.set(pending);
-        }
+        let _ = sample_once(repository.as_ref(), &metrics).await;
         tokio::time::sleep(interval).await;
     }
 }
@@ -544,8 +578,10 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthSettings, Role, ServerEnv, WorkerEnv, build_auth, parse_role, server_env, worker_env,
+        AuthSettings, QueueDepth, Role, ServerEnv, WorkerEnv, build_auth, parse_role, sample_once,
+        server_env, worker_env,
     };
+    use mm_observability::Registry;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
@@ -799,6 +835,51 @@ mod tests {
         assert!(!env.notify);
         map.insert("MM_SERVER_NOTIFY".into(), "maybe".into());
         assert!(env_from(&map).unwrap_err().contains("MM_SERVER_NOTIFY"));
+    }
+
+    #[test]
+    fn a_failed_depth_sample_counts_the_failure_and_keeps_the_last_value() {
+        let (registry, metrics) = Registry::new();
+        metrics.jobs_pending.set(3);
+        let depth = Failing(Err("connection refused".to_string()));
+        let outcome = block_on(sample_once(&depth, &metrics));
+        assert_eq!(
+            outcome,
+            Err("job store backend error: connection refused".to_string())
+        );
+        assert_eq!(metrics.jobs_pending.value(), 3);
+        assert_eq!(metrics.queue_depth_errors.value(), 1);
+        assert!(registry.render().contains("mm_queue_depth_errors_total 1"));
+    }
+
+    #[test]
+    fn a_depth_sample_that_answers_publishes_the_depth() {
+        let (registry, metrics) = Registry::new();
+        let depth = Failing(Ok(7));
+        assert_eq!(block_on(sample_once(&depth, &metrics)), Ok(()));
+        assert_eq!(metrics.jobs_pending.value(), 7);
+        assert_eq!(metrics.queue_depth_errors.value(), 0);
+        assert!(registry.render().contains("mm_jobs_pending 7"));
+    }
+
+    struct Failing(Result<u64, String>);
+
+    #[async_trait::async_trait]
+    impl QueueDepth for Failing {
+        async fn pending_count(&self) -> Result<u64, mm_domain::JobStoreError> {
+            match &self.0 {
+                Ok(count) => Ok(*count),
+                Err(message) => Err(mm_domain::JobStoreError::Backend(message.clone())),
+            }
+        }
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds")
+            .block_on(future)
     }
 
     #[test]

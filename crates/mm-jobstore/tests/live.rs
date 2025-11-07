@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use mm_domain::{
     CancelNotifications, ConcatSpec, JobEventNotifications, JobFailure, JobId, JobNotifications,
     JobRepository, JobState, JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProgressPercent,
-    QueueUrl, RequestId, TimedOutput, UserId, WorkerId,
+    QueueUrl, RequestId, TimedOutput, TraceId, UserId, WorkerId,
 };
 use mm_jobstore::{
     MIGRATOR, PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository,
@@ -1338,5 +1338,82 @@ async fn a_reaped_job_with_a_callback_becomes_publishable() {
             .map(|failure| failure.code()),
         Some("timeout")
     );
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_job_keeps_the_trace_it_was_created_under() {
+    let db = fresh_db().await;
+    let repository = db.repository();
+    let trace = TraceId::generate();
+    let job = new_job("owner-trace", "req-trace-1").with_trace_id(trace);
+    let created = repository.create(job).await.expect("create succeeds");
+    assert_eq!(created.trace_id, Some(trace));
+    let read = repository
+        .get(created.id)
+        .await
+        .expect("read succeeds")
+        .expect("job exists");
+    assert_eq!(read.trace_id, Some(trace));
+    let owned = repository
+        .get_owned(&owner("owner-trace"), created.id)
+        .await
+        .expect("owned read succeeds")
+        .expect("job exists");
+    assert_eq!(owned.trace_id, Some(trace));
+    let claimed = repository
+        .claim(&worker("worker-trace"), limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed[0].trace_id, Some(trace));
+    let page = repository
+        .list(&owner("owner-trace"), &[], limit(10), None)
+        .await
+        .expect("list succeeds");
+    assert_eq!(page.jobs[0].trace_id, Some(trace));
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_job_created_without_a_trace_reads_back_without_one() {
+    let db = fresh_db().await;
+    let repository = db.repository();
+    let created = repository
+        .create(new_job("owner-no-trace", "req-trace-2"))
+        .await
+        .expect("create succeeds");
+    assert_eq!(created.trace_id, None);
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn the_pending_count_is_the_jobs_waiting_to_be_claimed() {
+    let db = fresh_db().await;
+    let repository = db.repository();
+    assert_eq!(repository.pending_count().await.expect("count succeeds"), 0);
+    let first = repository
+        .create(new_job("owner-depth", "req-depth-1"))
+        .await
+        .expect("create succeeds");
+    let second = repository
+        .create(new_job("owner-depth", "req-depth-2"))
+        .await
+        .expect("create succeeds");
+    assert_eq!(repository.pending_count().await.expect("count succeeds"), 2);
+
+    let claimed = repository
+        .claim(&worker("worker-depth"), limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(repository.pending_count().await.expect("count succeeds"), 1);
+
+    repository
+        .mark_cancelled(second.id)
+        .await
+        .expect("cancel succeeds");
+    assert_eq!(repository.pending_count().await.expect("count succeeds"), 0);
+    assert_ne!(claimed[0].id, second.id);
+    assert_ne!(first.id, second.id);
     db.dispose().await;
 }

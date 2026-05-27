@@ -1,29 +1,72 @@
 = multimedia-rpc
 
-Media jobs as a gRPC service: typed operations, async workers,
-object storage.
+Media jobs as a gRPC service backed by ffmpeg, ImageMagick and GStreamer:
+typed operations, async workers, object storage.
+
+== Service
+
+`mmrpc.v1.MediaJobService`, ordered by what a caller needs first.
+
+[cols="1,3"]
+|===
+|Method |Use case
+
+|`CreateJob` |Submit a job; idempotent on `idempotency_key`, optional callback queue.
+|`GetJob` |Read state, progress and result by job id.
+|`WatchJob` |Stream state and progress until the job reaches a terminal state.
+|`ListJobs` |Page one owner's jobs, filtered by state.
+|`CancelJob` |Cancel a pending or running job.
+|===
+
+Operations (`OpSpec` oneof): `probe` inspect, `transcode`, `trim`,
+`thumbnail`, `concat`, `image` resize/convert/composite, `package` HLS.
+Results are object-storage keys; no media bytes cross the API.
+
+== Example
+
+[source,sh]
+----
+MM_BIND_ADDR=127.0.0.1:50051 mmrpcd combined
+
+grpcurl -plaintext \
+  -import-path proto -proto mmrpc/v1/service.proto \
+  -d '{"idempotencyKey":"demo-1","spec":{"probe":{"input":{"objectUri":"s3://mm/demo.mp4"}}}}' \
+  127.0.0.1:50051 mmrpc.v1.MediaJobService/CreateJob
+----
+
+`mmrpcd combined` needs `MM_DATABASE_URL` and `MM_OBJECTSTORE_*`. When
+`MM_AUTH_JWKS_FILE`/`MM_AUTH_ISSUER` are set, add
+`-H 'authorization: Bearer <token>'`.
 
 == Crates
-- mm-auth — bearer token verification
-- mm-domain — ids, job state machine, op catalog, ports
-- mm-ffmpeg — probe, progress, process supervision
-- mm-gst — pipeline description, bus parsing, packaging runner
-- mm-integration — live integration suite
-- mm-jobstore — migrations and the job repository
-- mm-magick — identify and convert argv, parsing, runner
-- mm-observability — metrics registry, scrape endpoint, records
-- mm-proto — v1 contract and conversions
 - mmrpcd — daemon: server, worker, combined
+- mm-domain — ids, job state machine, op catalog, ports
+- mm-proto — v1 contract and conversions
+- mm-jobstore — migrations and the job repository
+- mm-worker — claim loop, op pipelines, callbacks
+- mm-ffmpeg — probe, progress, process supervision
+- mm-magick — identify and convert argv, parsing, runner
+- mm-gst — pipeline description, bus parsing, packaging runner
 - mm-server — gRPC service, auth interceptor, health
 - mm-storage — object store and callback queue adapters
+- mm-auth — bearer token verification
+- mm-observability — metrics registry, scrape endpoint, records
 - mm-testkit — shared test harness
-- mm-worker — claim loop, op pipelines, callbacks
+- mm-integration — live integration suite
 
 == Verify
-- cargo test --workspace
-- cargo clippy --workspace --all-targets -- -D warnings
-- cargo fmt --all --check
-- sh scripts/parity.sh
-- sh scripts/auth-conformance.sh
-- sh scripts/stability.sh
-- buf lint && buf breaking --against .git#branch=master
+
+`nix develop` opens the shell the pinned toolchain lives in: rust, ffmpeg,
+ImageMagick, GStreamer, node and buf, at the versions `flake.lock` holds.
+
+[source,sh]
+----
+nix develop
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+sh scripts/parity.sh
+sh scripts/auth-conformance.sh
+sh scripts/stability.sh
+buf lint && buf breaking --against .git#branch=master
+----

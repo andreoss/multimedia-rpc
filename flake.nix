@@ -45,6 +45,8 @@
         packages = [
           pkgs.nodejs
           pkgs.buf
+          pkgs.cargo-llvm-cov
+          pkgs.sqlx-cli
         ];
       };
     };

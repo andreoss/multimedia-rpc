@@ -677,11 +677,12 @@ impl JobRepository for PgJobRepository {
         id: JobId,
         worker: &WorkerId,
         failure: JobFailure,
+        result: Option<OpResult>,
     ) -> Result<JobRecord, JobStoreError> {
         let row = sqlx::query_as!(
             JobRow,
             "UPDATE jobs SET state = 'FAILED', error_code = $3, error_message = $4, \
-             input_failures = $5, \
+             input_failures = $5, result = $6, \
              finished_at = now(), lease_expires_at = NULL \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
@@ -693,7 +694,8 @@ impl JobRepository for PgJobRepository {
             worker.as_str(),
             failure.code(),
             failure.message(),
-            encode_input_failures(failure.inputs())
+            encode_input_failures(failure.inputs()),
+            result.as_ref().map(encode_result)
         )
         .fetch_optional(&self.pool)
         .await

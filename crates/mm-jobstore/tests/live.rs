@@ -378,7 +378,8 @@ async fn guarded_transitions_reject_illegal_moves_and_freeze_terminal_rows() {
         repo.mark_failed(
             pending.id,
             &a,
-            JobFailure::new("TOOL_FAILED", "boom").expect("valid failure")
+            JobFailure::new("TOOL_FAILED", "boom").expect("valid failure"),
+            None,
         )
         .await
         .expect_err("terminal row immutable"),
@@ -435,7 +436,7 @@ async fn mark_failed_records_code_and_message() {
         .expect("claim succeeds");
     let failure = JobFailure::new("TOOL_FAILED", "exit status 1").expect("valid failure");
     let failed = repo
-        .mark_failed(record.id, &a, failure.clone())
+        .mark_failed(record.id, &a, failure.clone(), None)
         .await
         .expect("mark failed succeeds");
     assert_eq!(failed.state, JobState::Failed);
@@ -794,6 +795,7 @@ async fn release_returns_a_claimed_job_to_pending_with_a_retry_delay() {
             job.id,
             &claimant,
             JobFailure::new("stale", "finalize after release").expect("valid failure"),
+            None,
         )
         .await;
     assert!(matches!(

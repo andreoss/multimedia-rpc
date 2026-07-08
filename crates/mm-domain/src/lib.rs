@@ -19,11 +19,12 @@ pub use jobs::{
     PageCursor, ProgressError, ProgressPercent,
 };
 pub use op::{
-    ConcatSpec, HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError,
-    ObjectRef, OpKind, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    UnsupportedInput, UnsupportedOp,
+    BatchResult, BatchSpec, ConcatSpec, HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec,
+    MAX_BATCH_STEPS, MAX_NESTING_DEPTH, MAX_TREE_STEPS, MediaRef, MediaRefError, ObjectRef, OpKind,
+    OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, PackageResult,
+    PackageSpec, ProbeResult, ProbeSpec, ResizeMode, StepOutcome, StepState, ThumbnailResult,
+    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput,
+    UnsupportedOp,
 };
 pub use resolve::{ResolveError, resolve_media_ref};
 

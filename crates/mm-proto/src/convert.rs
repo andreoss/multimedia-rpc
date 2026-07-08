@@ -1,10 +1,11 @@
 use crate::v1;
 use mm_domain::{
-    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError,
-    InputSource, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeRef, OpResult,
-    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, PackageResult,
-    PackageSpec, ProbeResult, ProbeSpec, QueueUrl, ResizeMode, SourceError, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
+    BatchResult, BatchSpec, ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure,
+    InputFailureError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, MediaRef,
+    MediaRefError, MediaSource, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError,
+    OutputProfile, OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
+    QueueUrl, ResizeMode, SourceError, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
+    TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -131,6 +132,28 @@ fn source_list(values: Vec<v1::InputSource>) -> Result<Vec<InputSource>, SourceE
     values.into_iter().map(InputSource::try_from).collect()
 }
 
+impl TryFrom<v1::BatchSpec> for BatchSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::BatchSpec) -> Result<Self, Self::Error> {
+        let steps = value
+            .steps
+            .into_iter()
+            .map(OpSpec::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        BatchSpec::new(steps, value.stop_on_failure.unwrap_or(true))
+    }
+}
+
+impl From<&BatchSpec> for v1::BatchSpec {
+    fn from(value: &BatchSpec) -> Self {
+        Self {
+            steps: value.steps().iter().map(v1::OpSpec::from).collect(),
+            stop_on_failure: Some(value.stop_on_failure()),
+        }
+    }
+}
+
 impl TryFrom<v1::OutputProfile> for OutputProfile {
     type Error = OutputProfileError;
 
@@ -206,6 +229,7 @@ impl TryFrom<v1::OpSpec> for OpSpec {
                 resize_mode_from_raw(image.resize_mode),
                 image_format_from_raw(image.format),
             )?)),
+            v1::op_spec::Op::Batch(batch) => Ok(OpSpec::Batch(BatchSpec::try_from(batch)?)),
         }
     }
 }
@@ -247,6 +271,7 @@ impl From<&OpSpec> for v1::OpSpec {
                 resize_mode: resize_mode_to_raw(image.mode()),
                 format: image_format_to_raw(image.declared_format()),
             }),
+            OpSpec::Batch(batch) => v1::op_spec::Op::Batch(v1::BatchSpec::from(batch)),
         };
         v1::OpSpec { op: Some(op) }
     }
@@ -284,7 +309,86 @@ impl TryFrom<v1::OpResult> for OpResult {
                 required_ref(package.playlist)?,
                 ref_list(package.segments)?,
             )?)),
+            v1::op_result::Op::Batch(batch) => Ok(OpResult::Batch(BatchResult::try_from(batch)?)),
         }
+    }
+}
+
+impl TryFrom<v1::BatchResult> for BatchResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::BatchResult) -> Result<Self, Self::Error> {
+        let steps = value
+            .steps
+            .iter()
+            .map(StepOutcome::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        BatchResult::new(steps)
+    }
+}
+
+impl From<&BatchResult> for v1::BatchResult {
+    fn from(value: &BatchResult) -> Self {
+        Self {
+            steps: value.steps().iter().map(v1::StepOutcome::from).collect(),
+        }
+    }
+}
+
+impl TryFrom<&v1::StepOutcome> for StepOutcome {
+    type Error = OpResultError;
+
+    fn try_from(value: &v1::StepOutcome) -> Result<Self, Self::Error> {
+        let state = match &value.outcome {
+            Some(v1::step_outcome::Outcome::Result(result)) => {
+                StepState::Result(OpResult::try_from(result.clone())?)
+            }
+            Some(v1::step_outcome::Outcome::Failure(failure)) => {
+                StepState::Failure(JobFailure::try_from(failure)?)
+            }
+            None => return Err(OpResultError::MissingOp),
+        };
+        Ok(StepOutcome::new(value.position, state))
+    }
+}
+
+impl From<&StepOutcome> for v1::StepOutcome {
+    fn from(value: &StepOutcome) -> Self {
+        let outcome = match value.state() {
+            StepState::Result(result) => {
+                v1::step_outcome::Outcome::Result(v1::OpResult::from(result))
+            }
+            StepState::Failure(failure) => {
+                v1::step_outcome::Outcome::Failure(v1::StepFailure::from(failure))
+            }
+        };
+        Self {
+            position: value.position(),
+            outcome: Some(outcome),
+        }
+    }
+}
+
+impl From<&JobFailure> for v1::StepFailure {
+    fn from(value: &JobFailure) -> Self {
+        Self {
+            code: value.code().to_string(),
+            message: value.message().to_string(),
+            file_errors: value.inputs().iter().map(input_failure).collect(),
+        }
+    }
+}
+
+impl TryFrom<&v1::StepFailure> for JobFailure {
+    type Error = JobFailureError;
+
+    fn try_from(value: &v1::StepFailure) -> Result<Self, Self::Error> {
+        let inputs = value
+            .file_errors
+            .iter()
+            .map(InputFailure::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(JobFailure::new(&value.code, &value.message)?.with_inputs(inputs))
     }
 }
 
@@ -440,6 +544,7 @@ impl From<&OpResult> for v1::OpResult {
             OpResult::Image(image) => v1::op_result::Op::Image(v1::ImageResult {
                 outputs: image.outputs().iter().map(v1::MediaRef::from).collect(),
             }),
+            OpResult::Batch(batch) => v1::op_result::Op::Batch(v1::BatchResult::from(batch)),
         };
         v1::OpResult { op: Some(op) }
     }

@@ -297,7 +297,7 @@ impl OpKind {
                 video_codecs: &SUPPORTED_VIDEO_CODECS,
                 audio_codecs: &SUPPORTED_AUDIO_CODECS,
             }),
-            OpKind::Probe => None,
+            OpKind::Probe | OpKind::Batch => None,
         }
     }
 }

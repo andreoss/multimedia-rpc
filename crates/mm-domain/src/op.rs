@@ -1,6 +1,11 @@
 use thiserror::Error;
 
+use crate::jobs::{JobFailure, JobFailureError};
 use crate::source::{InputSource, SourceError};
+
+pub const MAX_BATCH_STEPS: usize = 32;
+pub const MAX_NESTING_DEPTH: usize = 4;
+pub const MAX_TREE_STEPS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRef {
@@ -230,6 +235,14 @@ pub enum OpSpecError {
     },
     #[error("convert needs an output format")]
     MissingImageFormat,
+    #[error("batch has no steps")]
+    EmptyBatch,
+    #[error("batch has {count} steps, above the {max} allowed")]
+    BatchTooLarge { count: usize, max: usize },
+    #[error("composition nests {depth} levels, above the {max} allowed")]
+    NestingTooDeep { depth: usize, max: usize },
+    #[error("composition holds {count} steps, above the {max} allowed")]
+    TreeTooLarge { count: usize, max: usize },
     #[error("{op} cannot apply {field} to its input")]
     InputCut {
         op: &'static str,
@@ -619,6 +632,110 @@ impl PackageSpec {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct StepOutcome {
+    position: u32,
+    state: StepState,
+}
+
+impl StepOutcome {
+    pub fn new(position: u32, state: StepState) -> Self {
+        Self { position, state }
+    }
+
+    pub fn position(&self) -> u32 {
+        self.position
+    }
+
+    pub fn state(&self) -> &StepState {
+        &self.state
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepState {
+    Result(OpResult),
+    Failure(JobFailure),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchResult {
+    steps: Vec<StepOutcome>,
+}
+
+impl BatchResult {
+    pub fn new(steps: Vec<StepOutcome>) -> Result<Self, OpResultError> {
+        if steps.is_empty() {
+            return Err(OpResultError::EmptyBatchResult);
+        }
+        Ok(Self { steps })
+    }
+
+    pub fn steps(&self) -> &[StepOutcome] {
+        &self.steps
+    }
+}
+
+fn tree_steps(spec: &OpSpec) -> usize {
+    match spec {
+        OpSpec::Batch(batch) => batch.steps().iter().map(tree_steps).sum(),
+        _ => 1,
+    }
+}
+
+fn tree_depth(spec: &OpSpec) -> usize {
+    match spec {
+        OpSpec::Batch(batch) => 1 + batch.steps().iter().map(tree_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchSpec {
+    steps: Vec<OpSpec>,
+    stop_on_failure: bool,
+}
+
+impl BatchSpec {
+    pub fn new(steps: Vec<OpSpec>, stop_on_failure: bool) -> Result<Self, OpSpecError> {
+        if steps.is_empty() {
+            return Err(OpSpecError::EmptyBatch);
+        }
+        if steps.len() > MAX_BATCH_STEPS {
+            return Err(OpSpecError::BatchTooLarge {
+                count: steps.len(),
+                max: MAX_BATCH_STEPS,
+            });
+        }
+        let count: usize = steps.iter().map(tree_steps).sum();
+        if count > MAX_TREE_STEPS {
+            return Err(OpSpecError::TreeTooLarge {
+                count,
+                max: MAX_TREE_STEPS,
+            });
+        }
+        let depth = 1 + steps.iter().map(tree_depth).max().unwrap_or(0);
+        if depth > MAX_NESTING_DEPTH {
+            return Err(OpSpecError::NestingTooDeep {
+                depth,
+                max: MAX_NESTING_DEPTH,
+            });
+        }
+        Ok(Self {
+            steps,
+            stop_on_failure,
+        })
+    }
+
+    pub fn steps(&self) -> &[OpSpec] {
+        &self.steps
+    }
+
+    pub fn stop_on_failure(&self) -> bool {
+        self.stop_on_failure
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum OpSpec {
     Concat(ConcatSpec),
     Probe(ProbeSpec),
@@ -627,6 +744,7 @@ pub enum OpSpec {
     Thumbnail(ThumbnailSpec),
     Image(ImageSpec),
     Package(PackageSpec),
+    Batch(BatchSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -640,6 +758,7 @@ pub enum OpKind {
     Convert,
     Composite,
     Package,
+    Batch,
 }
 
 impl std::fmt::Display for OpKind {
@@ -654,6 +773,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Convert => "convert",
             OpKind::Composite => "composite",
             OpKind::Package => "package",
+            OpKind::Batch => "batch",
         };
         formatter.write_str(name)
     }
@@ -683,6 +803,7 @@ impl OpKind {
             | OpKind::Convert
             | OpKind::Composite
             | OpKind::Package => Ok(()),
+            OpKind::Batch => Err(UnsupportedOp { kind: self }),
         }
     }
 }
@@ -697,6 +818,7 @@ impl OpSpec {
             OpSpec::Thumbnail(_) => OpKind::Thumbnail,
             OpSpec::Image(spec) => spec.op.kind(),
             OpSpec::Package(_) => OpKind::Package,
+            OpSpec::Batch(_) => OpKind::Batch,
         }
     }
 
@@ -709,6 +831,7 @@ impl OpSpec {
             OpSpec::Thumbnail(thumbnail) => vec![thumbnail.input()],
             OpSpec::Image(image) => image.inputs().iter().collect(),
             OpSpec::Package(package) => vec![package.input()],
+            OpSpec::Batch(batch) => batch.steps().iter().flat_map(OpSpec::inputs).collect(),
         }
     }
 
@@ -730,6 +853,10 @@ pub enum OpResultError {
     InvalidDuration { value: f64 },
     #[error("thumbnail result has no outputs")]
     EmptyOutputs,
+    #[error("batch result has no steps")]
+    EmptyBatchResult,
+    #[error(transparent)]
+    JobFailure(#[from] JobFailureError),
     #[error(transparent)]
     MediaRef(#[from] MediaRefError),
 }
@@ -888,4 +1015,5 @@ pub enum OpResult {
     Thumbnail(ThumbnailResult),
     Image(ImageResult),
     Package(PackageResult),
+    Batch(BatchResult),
 }

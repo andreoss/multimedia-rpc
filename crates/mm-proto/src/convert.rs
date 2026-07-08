@@ -8,6 +8,7 @@ use mm_domain::{
     ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl, ResizeMode,
     SourceError, StepOutcome, StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec,
     TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
+    verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -679,7 +680,7 @@ fn position(index: usize) -> u32 {
 fn input_failure(failure: &InputFailure) -> v1::FileError {
     v1::FileError {
         media_ref: None,
-        code: failure.code().to_string(),
+        code: verdict_code(failure.code()).to_string(),
         step_index: failure.step().map(position),
         node_id: failure.node().map(|node| node.as_str().to_string()),
         input_index: failure.input().map(position),

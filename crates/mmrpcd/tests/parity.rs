@@ -873,7 +873,10 @@ async fn p04_a_blocked_container_fails_with_the_typed_code_in_file_errors() {
     assert_eq!(settled.state(), v1::JobState::Failed);
     assert!(settled.result.is_none(), "a blocked job has no result");
     assert!(!settled.file_errors.is_empty(), "file errors are reported");
-    assert_eq!(settled.file_errors[0].code, "UnsupportedContainer");
+    assert_eq!(
+        settled.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER",
+        "the wire carries the reference vocabulary"
+    );
     assert_eq!(
         settled.file_errors[0].media_ref,
         Some(object_ref(&inputs[0])),
@@ -882,7 +885,7 @@ async fn p04_a_blocked_container_fails_with_the_typed_code_in_file_errors() {
 
     println!(
         "parity p04 block-verdict: pass (job {} FAILED with \
-         file_errors[0]=UnsupportedContainer on input 0)",
+         file_errors[0]=ERROR_UNSUPPORTED_CONTAINER on input 0)",
         created.job_id
     );
     drop(daemon);
@@ -1323,10 +1326,13 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
     assert_eq!(outcome.job_id, created.job_id);
     assert_eq!(outcome.request_id, "req-cb-block");
     assert_eq!(outcome.state, v1::JobState::Failed as i32);
-    assert_eq!(outcome.error_code, "validation_blocked");
+    assert_eq!(
+        outcome.error_code, "validation_blocked",
+        "the outcome carries the job's own failure code"
+    );
     assert!(outcome.result.is_none());
     assert!(!outcome.file_errors.is_empty());
-    assert_eq!(outcome.file_errors[0].code, "UnsupportedContainer");
+    assert_eq!(outcome.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER");
     assert_eq!(
         outcome.file_errors[0].media_ref,
         Some(object_ref(&inputs[0]))
@@ -1334,7 +1340,7 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
 
     println!(
         "parity p10 callback-block: pass (one outcome, validation_blocked, \
-         file_errors[0]=UnsupportedContainer)"
+         file_errors[0]=ERROR_UNSUPPORTED_CONTAINER)"
     );
     publisher.delete_queue(&queue).await.expect("queue removed");
     drop(daemon);

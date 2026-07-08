@@ -10,8 +10,8 @@ fn video() -> VideoReport {
         codec: "h264".to_string(),
         width: 1280,
         height: 720,
-        avg_fps: Some(30.0),
-        real_fps: Some(30.0),
+        avg_fps: Some(24.0),
+        real_fps: Some(24.0),
         rotation: 0,
         sample_aspect_ratio: Some((1, 1)),
         interlaced: false,
@@ -23,6 +23,7 @@ fn audio() -> AudioReport {
         codec: "aac".to_string(),
         channels: 2,
         sample_rate: Some(44_100),
+        loudness_lufs: Some(-16.0),
     }
 }
 
@@ -383,13 +384,16 @@ fn an_empty_input_list_is_too_few() {
 }
 
 #[test]
-fn inputs_without_audio_pass_audio_checks() {
+fn inputs_without_audio_pass_the_audio_blocks() {
     let silent = InputReport {
         audio: vec![],
         ..input()
     };
     let verdicts = validate_concat_inputs(&[silent.clone(), silent]);
-    assert!(verdicts.is_empty(), "unexpected verdicts: {verdicts:?}");
+    assert!(
+        blocks(&verdicts).is_empty(),
+        "a silent input still merges: {verdicts:?}"
+    );
 }
 
 #[test]
@@ -465,8 +469,14 @@ fn transcode_policy_skips_cross_input_drift() {
     other.video[0].height = 480;
     other.video[0].avg_fps = Some(25.0);
     other.video[0].real_fps = Some(25.0);
+    other.audio[0].loudness_lufs = Some(-40.0);
     let verdicts = validate_inputs(OpKind::Transcode, &[input(), other]);
-    assert!(warns(&verdicts).is_empty(), "{verdicts:?}");
+    assert_eq!(
+        warns(&verdicts),
+        vec![(Some(1), WarnCode::FrameRateOffTarget)],
+        "the per-input rows fire for one input of its own, the cross-input ones do not: \
+         {verdicts:?}"
+    );
 }
 
 #[test]
@@ -635,4 +645,203 @@ fn a_composite_needs_two_inputs_and_both_must_be_images() {
         blocks(&mixed),
         vec![(Some(1), BlockCode::MediaKindMismatch)]
     );
+}
+
+#[test]
+fn a_video_input_without_an_audio_track_warns() {
+    let silent = InputReport {
+        audio: vec![],
+        ..input()
+    };
+    let verdicts = validate_concat_inputs(&[silent.clone(), silent]);
+    assert_eq!(
+        warns(&verdicts),
+        vec![
+            (Some(0), WarnCode::NoAudioStream),
+            (Some(1), WarnCode::NoAudioStream)
+        ]
+    );
+    assert!(blocks(&verdicts).is_empty(), "a silent input still merges");
+}
+
+#[test]
+fn a_still_without_an_audio_track_does_not_warn() {
+    let still = InputReport {
+        kind: MediaKind::Image,
+        container: "png_pipe".to_string(),
+        duration: Duration::ZERO,
+        video: vec![VideoReport {
+            codec: "png".to_string(),
+            ..video()
+        }],
+        audio: vec![],
+        ..input()
+    };
+    let verdicts = validate_concat_inputs(&[still.clone(), still]);
+    assert!(
+        !warns(&verdicts)
+            .iter()
+            .any(|(_, code)| *code == WarnCode::NoAudioStream),
+        "a still has no audio track to warn about: {verdicts:?}"
+    );
+}
+
+#[test]
+fn a_frame_rate_off_the_reference_target_warns() {
+    let thirty = InputReport {
+        video: vec![VideoReport {
+            avg_fps: Some(30.0),
+            real_fps: Some(30.0),
+            ..video()
+        }],
+        ..input()
+    };
+    let verdicts = validate_concat_inputs(&[thirty.clone(), thirty]);
+    assert_eq!(
+        warns(&verdicts),
+        vec![
+            (Some(0), WarnCode::FrameRateOffTarget),
+            (Some(1), WarnCode::FrameRateOffTarget)
+        ]
+    );
+}
+
+#[test]
+fn a_frame_rate_on_the_target_and_just_off_it_do_not_warn() {
+    let on_target = InputReport {
+        video: vec![VideoReport {
+            avg_fps: Some(24.04),
+            real_fps: Some(24.0),
+            ..video()
+        }],
+        ..input()
+    };
+    let verdicts = validate_concat_inputs(&[on_target.clone(), on_target]);
+    assert_eq!(
+        warns(&verdicts),
+        vec![
+            (Some(0), WarnCode::VariableFrameRate),
+            (Some(1), WarnCode::VariableFrameRate)
+        ],
+        "the target tolerance is 0.05fps, so 24.04 is on target"
+    );
+}
+
+#[test]
+fn a_loudness_difference_above_six_db_warns() {
+    let quiet = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: Some(-22.0),
+            ..audio()
+        }],
+        ..input()
+    };
+    let loud = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: Some(-14.0),
+            ..audio()
+        }],
+        ..input()
+    };
+    let verdicts = validate_concat_inputs(&[quiet, loud]);
+    assert!(
+        warns(&verdicts).contains(&(None, WarnCode::LoudnessDrift)),
+        "an eight dB gap warns: {verdicts:?}"
+    );
+}
+
+#[test]
+fn a_loudness_difference_of_exactly_six_db_does_not_warn() {
+    let quiet = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: Some(-20.0),
+            ..audio()
+        }],
+        ..input()
+    };
+    let loud = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: Some(-14.0),
+            ..audio()
+        }],
+        ..input()
+    };
+    let verdicts = validate_concat_inputs(&[quiet, loud]);
+    assert!(
+        !warns(&verdicts)
+            .iter()
+            .any(|(_, code)| *code == WarnCode::LoudnessDrift),
+        "six dB is the reference's threshold, not beyond it: {verdicts:?}"
+    );
+}
+
+#[test]
+fn an_unmeasured_loudness_leaves_the_row_silent() {
+    let unmeasured = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: None,
+            ..audio()
+        }],
+        ..input()
+    };
+    let loud = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: Some(-40.0),
+            ..audio()
+        }],
+        ..input()
+    };
+    let verdicts = validate_concat_inputs(&[unmeasured, loud]);
+    assert!(
+        !warns(&verdicts)
+            .iter()
+            .any(|(_, code)| *code == WarnCode::LoudnessDrift),
+        "a level nobody measured is not a claim about the other one: {verdicts:?}"
+    );
+}
+
+#[test]
+fn every_reference_warn_row_is_in_the_matrix() {
+    let silent = InputReport {
+        audio: vec![],
+        ..input()
+    };
+    let off_target = InputReport {
+        video: vec![VideoReport {
+            avg_fps: Some(30.0),
+            real_fps: Some(30.0),
+            ..video()
+        }],
+        ..input()
+    };
+    let quiet = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: Some(-30.0),
+            ..audio()
+        }],
+        ..input()
+    };
+    let loud = InputReport {
+        audio: vec![AudioReport {
+            loudness_lufs: Some(-14.0),
+            ..audio()
+        }],
+        ..input()
+    };
+    let rows: [(WarnCode, Vec<InputReport>); 3] = [
+        (WarnCode::NoAudioStream, vec![silent.clone(), silent]),
+        (
+            WarnCode::FrameRateOffTarget,
+            vec![off_target.clone(), off_target],
+        ),
+        (WarnCode::LoudnessDrift, vec![quiet, loud]),
+    ];
+    for (code, inputs) in rows {
+        let verdicts = validate_concat_inputs(&inputs);
+        assert!(
+            warns(&verdicts).contains(&(None, code)) || warns(&verdicts).contains(&(Some(0), code)),
+            "row {code:?} is not produced by its fixture: {verdicts:?}"
+        );
+        assert!(blocks(&verdicts).is_empty(), "row {code:?} is a warning");
+    }
 }

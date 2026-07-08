@@ -21,8 +21,11 @@ fn all_warn_codes() -> Vec<WarnCode> {
     vec![
         WarnCode::AspectDrift,
         WarnCode::FpsDrift,
+        WarnCode::FrameRateOffTarget,
         WarnCode::AudioChannelDrift,
         WarnCode::SampleRateDrift,
+        WarnCode::LoudnessDrift,
+        WarnCode::NoAudioStream,
         WarnCode::VariableFrameRate,
         WarnCode::Interlaced,
         WarnCode::Rotation,

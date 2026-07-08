@@ -7,16 +7,16 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
     ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure,
-    InputReport, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError, MediaRef,
-    ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey,
-    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
+    InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
+    MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
+    OutputKey, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
     ResizeMode as DomainResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
     TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
-    ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, StillInfo, ThumbnailTarget,
-    TranscodeTarget, TrimStrategy, TrimTarget, build_concat_args, build_thumbnail_args,
-    build_transcode_args, build_trim_args,
+    ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
+    ThumbnailTarget, TranscodeTarget, TrimStrategy, TrimTarget, build_concat_args,
+    build_thumbnail_args, build_transcode_args, build_trim_args,
 };
 use mm_gst::Written as GstWritten;
 use mm_gst::{
@@ -95,14 +95,14 @@ fn admit(ctx: &WorkerConfig, estimate: u64) -> Result<Option<Reservation<'_>>, u
     }))
 }
 
-async fn estimate_bytes(ctx: &WorkerConfig, inputs: &[MediaRef], infos: &[MediaInfo]) -> u64 {
+async fn estimate_bytes(ctx: &WorkerConfig, inputs: &[InputSource], infos: &[MediaInfo]) -> u64 {
     let mut total = 0u64;
     for (input, info) in inputs.iter().zip(infos) {
         let size = match info.size_bytes {
             Some(size) => size,
-            None => match input {
-                MediaRef::Object(object) => ctx.store.head(object).await.unwrap_or(0),
-                MediaRef::Http(_) => 0,
+            None => match input.media().map(|source| source.media()) {
+                Some(MediaRef::Object(object)) => ctx.store.head(object).await.unwrap_or(0),
+                Some(MediaRef::Http(_)) | None => 0,
             },
         };
         total = total.saturating_add(size);
@@ -840,11 +840,17 @@ fn image_args(spec: &ImageSpec, urls: &[String], output: &str) -> Vec<String> {
 
 async fn resolve_input(
     ctx: &WorkerConfig,
-    input: &MediaRef,
+    input: &InputSource,
     deadline_at: SystemTime,
     index: usize,
 ) -> Result<String, Finish> {
-    resolve_media_ref(ctx.store.as_ref(), input, deadline_at, SystemTime::now())
+    let media = input.media().map(|source| source.media()).ok_or_else(|| {
+        failed(
+            codes::UNSUPPORTED_OPERATION,
+            "a node reference reached the worker",
+        )
+    })?;
+    resolve_media_ref(ctx.store.as_ref(), media, deadline_at, SystemTime::now())
         .await
         .map_err(|error| failed(codes::INPUT_UNRESOLVABLE, format!("input {index}: {error}")))
 }
@@ -967,9 +973,18 @@ async fn transcode_pipeline(
     let estimate = estimate_bytes(ctx, &inputs, &infos).await;
     let _reservation = admit_or_release(ctx, job.id, estimate).await?;
 
+    let source = spec.input().media();
     let target = TranscodeTarget {
         scale_mode: ScaleMode::PadToFit,
         profile: target_profile(Some(spec.profile())),
+        cut: source.and_then(|source| {
+            source.trim().map(|trim| SourceCut {
+                start_seconds: trim.start_seconds(),
+                duration_seconds: trim.duration_seconds(),
+            })
+        }),
+        speed: source.and_then(|source| source.speed()),
+        volume: source.and_then(|source| source.volume()),
         ..TranscodeTarget::default()
     };
     let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));

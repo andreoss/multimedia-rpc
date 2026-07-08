@@ -196,6 +196,8 @@ fn parse_spec(value: Option<v1::OpSpec>) -> Result<OpSpec, Status> {
     spec.kind()
         .ensure_executable()
         .map_err(|error| Status::unimplemented(error.to_string()))?;
+    spec.ensure_resolvable()
+        .map_err(|error| Status::unimplemented(error.to_string()))?;
     Ok(spec)
 }
 

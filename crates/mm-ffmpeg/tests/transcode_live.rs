@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use mm_ffmpeg::{
-    ProbeLimits, Prober, ScaleMode, TargetProfile, TranscodeTarget, build_transcode_args,
+    ProbeLimits, Prober, ScaleMode, SourceCut, TargetProfile, TranscodeTarget, build_transcode_args,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -63,5 +63,75 @@ async fn transcoding_a_fixture_matches_the_requested_parameters() {
     assert!(
         common::moov_precedes_mdat(&output),
         "the output is not faststart"
+    );
+}
+
+async fn run(args: &[String]) {
+    let status = tokio::time::timeout(
+        Duration::from_secs(120),
+        tokio::process::Command::new("ffmpeg")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .expect("transcode must finish inside the timeout")
+    .unwrap();
+    assert!(status.success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_at_half_speed_lands_twice_the_duration() {
+    let input = common::keyed_fixture("cuts-half-speed-8s.mp4", 8, 30, 640, 360, 1);
+    let output = common::scratch_dir().join("cuts-half-speed.mp4");
+
+    let target = TranscodeTarget {
+        speed: Some(0.5),
+        ..TranscodeTarget::default()
+    };
+    let args =
+        build_transcode_args(input.to_str().unwrap(), &target, output.to_str().unwrap()).unwrap();
+    run(&args).await;
+
+    let info = Prober::default()
+        .probe(output.to_str().unwrap(), &ProbeLimits::default())
+        .await
+        .unwrap();
+    assert!(
+        (info.duration.as_secs_f64() - 16.0).abs() < 1.0,
+        "half speed produced {:?}",
+        info.duration
+    );
+    assert_eq!(info.video.len(), 1);
+    assert_eq!(info.audio.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trimmed_source_lands_the_requested_duration() {
+    let input = common::keyed_fixture("cuts-trim-8s.mp4", 8, 30, 640, 360, 1);
+    let output = common::scratch_dir().join("cuts-trim.mp4");
+
+    let target = TranscodeTarget {
+        cut: Some(SourceCut {
+            start_seconds: 2.0,
+            duration_seconds: 3.0,
+        }),
+        ..TranscodeTarget::default()
+    };
+    let args =
+        build_transcode_args(input.to_str().unwrap(), &target, output.to_str().unwrap()).unwrap();
+    run(&args).await;
+
+    let info = Prober::default()
+        .probe(output.to_str().unwrap(), &ProbeLimits::default())
+        .await
+        .unwrap();
+    assert!(
+        (info.duration.as_secs_f64() - 3.0).abs() < 0.6,
+        "the trimmed source produced {:?}",
+        info.duration
     );
 }

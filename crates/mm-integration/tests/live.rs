@@ -131,6 +131,100 @@ fn fixture(name: &str, seconds: u32, fps: u32, container: &str) -> PathBuf {
     path
 }
 
+fn keyed_fixture(name: &str, seconds: u32, fps: u32) -> PathBuf {
+    static GENERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = GENERATION.lock().unwrap();
+    let path = fixtures_dir().join(name);
+    if path.is_file() && path.metadata().unwrap().len() > 0 {
+        return path;
+    }
+    let mut command = Command::new("ffmpeg");
+    command.arg("-y");
+    for index in 0..seconds {
+        let level = (index * 255 / seconds.max(1)).min(255);
+        let hex = format!("{level:02x}");
+        command.arg("-f").arg("lavfi").arg("-i").arg(format!(
+            "color=c=0x{hex}{hex}{hex}:size=1280x720:rate={fps}:duration=1"
+        ));
+    }
+    let sources: String = (0..seconds).map(|index| format!("[{index}:v]")).collect();
+    let status = command
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(format!(
+            "sine=frequency=440:sample_rate=44100:duration={seconds}"
+        ))
+        .arg("-filter_complex")
+        .arg(format!("{sources}concat=n={seconds}:v=1:a=0[v]"))
+        .arg("-map")
+        .arg("[v]")
+        .arg("-map")
+        .arg(format!("{seconds}:a"))
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-g")
+        .arg("1")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("128k")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg("-f")
+        .arg("mp4")
+        .arg(&path)
+        .output()
+        .expect("ffmpeg must be runnable to generate fixtures");
+    assert!(status.status.success(), "fixture generation failed: {name}");
+    path
+}
+
+const FRAME_SAMPLES: usize = 16 * 16;
+
+fn frame_signature(input: &str, at_seconds: Option<f64>) -> Vec<u8> {
+    let mut command = Command::new("ffmpeg");
+    command.arg("-v").arg("quiet").arg("-nostdin");
+    if let Some(seconds) = at_seconds {
+        command.arg("-ss").arg(format!("{seconds:.3}"));
+    }
+    let output = command
+        .arg("-i")
+        .arg(input)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-vf")
+        .arg(
+            "scale=w=640:h=360:force_original_aspect_ratio=decrease,\
+             pad=w=640:h=360:x=(ow-iw)/2:y=(oh-ih)/2,setsar=1,fps=24,\
+             format=yuv420p,scale=16:16",
+        )
+        .arg("-pix_fmt")
+        .arg("gray")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-")
+        .output()
+        .expect("ffmpeg must be runnable to extract a frame");
+    assert!(
+        output.status.success(),
+        "frame extraction failed for {input}"
+    );
+    assert_eq!(output.stdout.len(), FRAME_SAMPLES, "a frame is 16x16 gray");
+    output.stdout
+}
+
+fn frame_difference(left: &[u8], right: &[u8]) -> u32 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| u32::from(left.abs_diff(*right)))
+        .sum()
+}
+
 fn file_body(path: &Path) -> (ObjectBody, u64) {
     let payload = std::fs::read(path).unwrap();
     let length = payload.len() as u64;
@@ -893,9 +987,9 @@ async fn a_probe_job_returns_stream_metadata_through_the_api() {
             .expect("dial announced address");
     let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
 
-    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Probe(mm_domain::ProbeSpec::new(
-        input.clone(),
-    )));
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Probe(
+        mm_domain::ProbeSpec::new(input.clone()).expect("a bare reference cuts nothing"),
+    ));
     let created = client
         .create_job(mm_proto::v1::CreateJobRequest {
             user_id: "owner-probe".to_string(),
@@ -1255,6 +1349,210 @@ async fn a_trim_job_reaches_success_through_server_and_worker() {
     worker.shutdown().await;
     server.shutdown().await;
     drop_db(&admin, pool, &name).await;
+}
+
+async fn transcode_through_server_and_worker(
+    owner: &str,
+    key: &str,
+    input: mm_domain::InputSource,
+) -> String {
+    let _slot = mm_testkit::stack_slot();
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let mut server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    server_config.job_events = Some(Arc::new(
+        mm_jobstore::PgJobEventListener::connect(&url)
+            .await
+            .expect("events listener connects"),
+    ));
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let profile =
+        mm_domain::OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).expect("valid profile");
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Transcode(
+        mm_domain::TranscodeSpec::new(input, profile).expect("valid transcode spec"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: owner.to_string(),
+            idempotency_key: key.to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-cut-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-cut-e2e").unwrap(),
+        staging,
+    );
+    worker_config.reconcile_interval = Duration::from_secs(30);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+
+    let final_job = loop {
+        let job = client
+            .get_job(mm_proto::v1::GetJobRequest {
+                user_id: owner.to_string(),
+                job_id: created.job_id.clone(),
+            })
+            .await
+            .expect("get succeeds")
+            .into_inner()
+            .job
+            .expect("job present");
+        if job.state() == mm_proto::v1::JobState::Succeeded
+            || job.state() == mm_proto::v1::JobState::Failed
+            || job.state() == mm_proto::v1::JobState::Cancelled
+        {
+            break job;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        final_job.state(),
+        mm_proto::v1::JobState::Succeeded,
+        "the transcode of a cut source did not succeed"
+    );
+    let result = mm_domain::OpResult::try_from(final_job.result.expect("result present"))
+        .expect("result decodes");
+    let mm_domain::OpResult::Transcode(transcoded) = result else {
+        panic!("expected a transcode result");
+    };
+    let MediaRef::Object(object) = transcoded.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/output.mp4", created.job_id));
+    assert!(store.head(&object).await.expect("output exists") > 0);
+
+    let output_url = resolve_media_ref(
+        store.as_ref(),
+        &MediaRef::Object(object),
+        SystemTime::now() + Duration::from_secs(300),
+        SystemTime::now(),
+    )
+    .await
+    .expect("output presigns");
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+    output_url
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transcode_at_half_speed_lands_an_output_twice_as_long() {
+    let _slot = mm_testkit::stack_slot();
+    let store = Arc::new(test_store().await);
+    let source = keyed_fixture("cuts-e2e-speed-6s.mp4", 6, 30);
+    let media = upload_object(&store, &source, "inputs/cuts-e2e-speed-6s.mp4").await;
+
+    let input = mm_domain::InputSource::from(
+        mm_domain::MediaSource::new(media, None, Some(0.5), None).expect("valid source"),
+    );
+    let output_url = transcode_through_server_and_worker("owner-speed", "req-speed", input).await;
+
+    let info = Prober::default()
+        .probe(&output_url, &probe_limits())
+        .await
+        .expect("output probes");
+    assert!(
+        (info.duration.as_secs_f64() - 12.0).abs() < 1.0,
+        "half speed produced {}s from a 6s source",
+        info.duration.as_secs_f64()
+    );
+    assert_eq!(info.video.len(), 1);
+    assert_eq!(info.audio.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trimmed_transcode_start_lands_where_the_range_asked() {
+    let _slot = mm_testkit::stack_slot();
+    let store = Arc::new(test_store().await);
+    let source = keyed_fixture("cuts-e2e-trim-6s.mp4", 6, 30);
+    let media = upload_object(&store, &source, "inputs/cuts-e2e-trim-6s.mp4").await;
+
+    let input = mm_domain::InputSource::from(
+        mm_domain::MediaSource::new(
+            media,
+            Some(mm_domain::TrimRange::new(1.0, 2.0).expect("valid range")),
+            None,
+            None,
+        )
+        .expect("valid source"),
+    );
+    let output_url =
+        transcode_through_server_and_worker("owner-trimmed", "req-trimmed", input).await;
+
+    let info = Prober::default()
+        .probe(&output_url, &probe_limits())
+        .await
+        .expect("output probes");
+    assert!(
+        (info.duration.as_secs_f64() - 2.0).abs() < 0.4,
+        "the trimmed output is {}s long",
+        info.duration.as_secs_f64()
+    );
+
+    let landed = frame_signature(&output_url, None);
+    let candidates: Vec<(f64, Vec<u8>)> = [0.0f64, 1.0, 2.0, 3.0]
+        .into_iter()
+        .map(|seconds| {
+            (
+                seconds,
+                frame_signature(source.to_str().unwrap(), Some(seconds)),
+            )
+        })
+        .collect();
+    let nearest = candidates
+        .iter()
+        .map(|(seconds, frame)| (*seconds, frame_difference(frame, &landed)))
+        .min_by_key(|(_, difference)| *difference)
+        .expect("candidates are present");
+    assert_eq!(
+        nearest.0, 1.0,
+        "the first output frame is the source frame at {nearest:?}"
+    );
+    let runner_up = candidates
+        .iter()
+        .map(|(_, frame)| frame_difference(frame, &landed))
+        .filter(|difference| *difference > nearest.1)
+        .min()
+        .expect("the other frames are further away");
+    assert!(
+        runner_up > nearest.1 * 10,
+        "the nearest frame at {} is not decisively closer than the runner up at {runner_up}",
+        nearest.1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

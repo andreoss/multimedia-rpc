@@ -1,10 +1,10 @@
 use crate::v1;
 use mm_domain::{
     ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError,
-    JobRecord, JobState, MediaRef, MediaRefError, OpResult, OpResultError, OpSpec, OpSpecError,
-    OutputProfile, OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
-    QueueUrl, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
-    TranscodeSpec, TrimSpec,
+    InputSource, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeRef, OpResult,
+    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, PackageResult,
+    PackageSpec, ProbeResult, ProbeSpec, QueueUrl, ResizeMode, SourceError, ThumbnailResult,
+    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -35,6 +35,100 @@ fn required_ref(value: Option<v1::MediaRef>) -> Result<MediaRef, MediaRefError> 
 
 fn ref_list(values: Vec<v1::MediaRef>) -> Result<Vec<MediaRef>, MediaRefError> {
     values.into_iter().map(MediaRef::try_from).collect()
+}
+
+impl TryFrom<v1::TrimRange> for TrimRange {
+    type Error = SourceError;
+
+    fn try_from(value: v1::TrimRange) -> Result<Self, Self::Error> {
+        TrimRange::new(value.start_seconds, value.duration_seconds)
+    }
+}
+
+impl From<&TrimRange> for v1::TrimRange {
+    fn from(value: &TrimRange) -> Self {
+        Self {
+            start_seconds: value.start_seconds(),
+            duration_seconds: value.duration_seconds(),
+        }
+    }
+}
+
+impl TryFrom<v1::MediaSource> for MediaSource {
+    type Error = SourceError;
+
+    fn try_from(value: v1::MediaSource) -> Result<Self, Self::Error> {
+        let media = MediaRef::try_from(value.media.ok_or(SourceError::MissingMedia)?)?;
+        let trim = value.trim.map(TrimRange::try_from).transpose()?;
+        MediaSource::new(media, trim, value.speed, value.volume)
+    }
+}
+
+impl From<&MediaSource> for v1::MediaSource {
+    fn from(value: &MediaSource) -> Self {
+        Self {
+            media: Some(v1::MediaRef::from(value.media())),
+            trim: value.trim().map(v1::TrimRange::from),
+            speed: value.speed(),
+            volume: value.volume(),
+        }
+    }
+}
+
+impl TryFrom<v1::NodeRef> for NodeRef {
+    type Error = SourceError;
+
+    fn try_from(value: v1::NodeRef) -> Result<Self, Self::Error> {
+        NodeRef::new(&value.id, value.output)
+    }
+}
+
+impl From<&NodeRef> for v1::NodeRef {
+    fn from(value: &NodeRef) -> Self {
+        Self {
+            id: value.id().as_str().to_string(),
+            output: value.output(),
+        }
+    }
+}
+
+impl TryFrom<v1::InputSource> for InputSource {
+    type Error = SourceError;
+
+    fn try_from(value: v1::InputSource) -> Result<Self, Self::Error> {
+        match value.source {
+            Some(v1::input_source::Source::Media(source)) => {
+                MediaSource::try_from(source).map(InputSource::from)
+            }
+            Some(v1::input_source::Source::Node(node)) => {
+                NodeRef::try_from(node).map(InputSource::from)
+            }
+            None => Err(SourceError::MissingSource),
+        }
+    }
+}
+
+impl From<&InputSource> for v1::InputSource {
+    fn from(value: &InputSource) -> Self {
+        match value {
+            InputSource::Media(source) => v1::InputSource {
+                source: Some(v1::input_source::Source::Media(v1::MediaSource::from(
+                    source,
+                ))),
+            },
+            InputSource::Node(node) => v1::InputSource {
+                source: Some(v1::input_source::Source::Node(v1::NodeRef::from(node))),
+            },
+        }
+    }
+}
+
+fn required_source(value: Option<v1::InputSource>) -> Result<InputSource, SourceError> {
+    value.ok_or(SourceError::MissingSource)?.try_into()
+}
+
+fn source_list(values: Vec<v1::InputSource>) -> Result<Vec<InputSource>, SourceError> {
+    values.into_iter().map(InputSource::try_from).collect()
 }
 
 impl TryFrom<v1::OutputProfile> for OutputProfile {
@@ -74,15 +168,15 @@ impl TryFrom<v1::OpSpec> for OpSpec {
     fn try_from(value: v1::OpSpec) -> Result<Self, Self::Error> {
         match value.op.ok_or(OpSpecError::MissingOp)? {
             v1::op_spec::Op::Concat(concat) => {
-                let inputs = ref_list(concat.inputs)?;
+                let inputs = source_list(concat.inputs)?;
                 let profile = concat.profile.map(OutputProfile::try_from).transpose()?;
                 Ok(OpSpec::Concat(ConcatSpec::new(inputs, profile)?))
             }
-            v1::op_spec::Op::Probe(probe) => {
-                Ok(OpSpec::Probe(ProbeSpec::new(required_ref(probe.input)?)))
-            }
+            v1::op_spec::Op::Probe(probe) => Ok(OpSpec::Probe(ProbeSpec::new(required_source(
+                probe.input,
+            )?)?)),
             v1::op_spec::Op::Transcode(transcode) => {
-                let input = required_ref(transcode.input)?;
+                let input = required_source(transcode.input)?;
                 let profile = transcode
                     .profile
                     .ok_or(OpSpecError::EmptyProfile)
@@ -90,22 +184,22 @@ impl TryFrom<v1::OpSpec> for OpSpec {
                 Ok(OpSpec::Transcode(TranscodeSpec::new(input, profile)?))
             }
             v1::op_spec::Op::Trim(trim) => Ok(OpSpec::Trim(TrimSpec::new(
-                required_ref(trim.input)?,
+                required_source(trim.input)?,
                 trim.start_seconds,
                 trim.duration_seconds,
             )?)),
             v1::op_spec::Op::Thumbnail(thumbnail) => Ok(OpSpec::Thumbnail(ThumbnailSpec::new(
-                required_ref(thumbnail.input)?,
+                required_source(thumbnail.input)?,
                 thumbnail.offsets_seconds,
                 thumbnail.width,
                 thumbnail.height,
             )?)),
             v1::op_spec::Op::Package(package) => Ok(OpSpec::Package(PackageSpec::new(
-                required_ref(package.input)?,
+                required_source(package.input)?,
                 package.segment_seconds,
             )?)),
             v1::op_spec::Op::Image(image) => Ok(OpSpec::Image(ImageSpec::new(
-                ref_list(image.inputs)?,
+                source_list(image.inputs)?,
                 image_op_from_raw(image.op)?,
                 image.width,
                 image.height,
@@ -120,33 +214,33 @@ impl From<&OpSpec> for v1::OpSpec {
     fn from(value: &OpSpec) -> Self {
         let op = match value {
             OpSpec::Concat(concat) => v1::op_spec::Op::Concat(v1::ConcatSpec {
-                inputs: concat.inputs().iter().map(v1::MediaRef::from).collect(),
+                inputs: concat.inputs().iter().map(v1::InputSource::from).collect(),
                 profile: concat.profile().map(v1::OutputProfile::from),
             }),
             OpSpec::Probe(probe) => v1::op_spec::Op::Probe(v1::ProbeSpec {
-                input: Some(v1::MediaRef::from(probe.input())),
+                input: Some(v1::InputSource::from(probe.input())),
             }),
             OpSpec::Transcode(transcode) => v1::op_spec::Op::Transcode(v1::TranscodeSpec {
-                input: Some(v1::MediaRef::from(transcode.input())),
+                input: Some(v1::InputSource::from(transcode.input())),
                 profile: Some(v1::OutputProfile::from(transcode.profile())),
             }),
             OpSpec::Trim(trim) => v1::op_spec::Op::Trim(v1::TrimSpec {
-                input: Some(v1::MediaRef::from(trim.input())),
+                input: Some(v1::InputSource::from(trim.input())),
                 start_seconds: trim.start_seconds(),
                 duration_seconds: trim.duration_seconds(),
             }),
             OpSpec::Thumbnail(thumbnail) => v1::op_spec::Op::Thumbnail(v1::ThumbnailSpec {
-                input: Some(v1::MediaRef::from(thumbnail.input())),
+                input: Some(v1::InputSource::from(thumbnail.input())),
                 offsets_seconds: thumbnail.offsets_seconds().to_vec(),
                 width: thumbnail.width(),
                 height: thumbnail.height(),
             }),
             OpSpec::Package(package) => v1::op_spec::Op::Package(v1::PackageSpec {
-                input: Some(v1::MediaRef::from(package.input())),
+                input: Some(v1::InputSource::from(package.input())),
                 segment_seconds: package.segment_seconds(),
             }),
             OpSpec::Image(image) => v1::op_spec::Op::Image(v1::ImageSpec {
-                inputs: image.inputs().iter().map(v1::MediaRef::from).collect(),
+                inputs: image.inputs().iter().map(v1::InputSource::from).collect(),
                 op: image_op_to_raw(image.op()),
                 width: image.width(),
                 height: image.height(),
@@ -206,16 +300,11 @@ impl From<JobState> for v1::JobState {
     }
 }
 
-fn spec_inputs(spec: &OpSpec) -> Vec<&MediaRef> {
-    match spec {
-        OpSpec::Concat(concat) => concat.inputs().iter().collect(),
-        OpSpec::Probe(probe) => vec![probe.input()],
-        OpSpec::Transcode(transcode) => vec![transcode.input()],
-        OpSpec::Trim(trim) => vec![trim.input()],
-        OpSpec::Thumbnail(thumbnail) => vec![thumbnail.input()],
-        OpSpec::Image(image) => image.inputs().iter().collect(),
-        OpSpec::Package(package) => vec![package.input()],
-    }
+fn spec_inputs(spec: &OpSpec) -> Vec<Option<&MediaRef>> {
+    spec.inputs()
+        .iter()
+        .map(|input| input.media().map(MediaSource::media))
+        .collect()
 }
 
 fn position(index: usize) -> u32 {
@@ -245,7 +334,8 @@ fn file_errors(record: &JobRecord) -> Vec<v1::FileError> {
             proto.media_ref = failure
                 .input()
                 .and_then(|position| inputs.get(position))
-                .map(|input| v1::MediaRef::from(*input));
+                .and_then(|input| *input)
+                .map(v1::MediaRef::from);
             proto
         })
         .collect()

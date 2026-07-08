@@ -1,5 +1,5 @@
 use mm_ffmpeg::{
-    AudioCodec, ScaleMode, TargetProfile, TranscodeError, TranscodeTarget, VideoCodec,
+    AudioCodec, ScaleMode, SourceCut, TargetProfile, TranscodeError, TranscodeTarget, VideoCodec,
     build_transcode_args,
 };
 
@@ -14,7 +14,13 @@ fn target(resolution: Option<(u32, u32)>, scale_mode: ScaleMode) -> TranscodeTar
             resolution,
             ..TargetProfile::default()
         },
+        ..TranscodeTarget::default()
     }
+}
+
+fn argument_after<'a>(args: &'a [String], flag: &str) -> &'a str {
+    let position = args.iter().position(|arg| arg == flag).unwrap();
+    &args[position + 1]
 }
 
 #[test]
@@ -127,4 +133,88 @@ fn an_unsupported_channel_count_is_rejected() {
         error,
         TranscodeError::UnsupportedChannelCount { channels: 6 }
     ));
+}
+
+#[test]
+fn an_uncut_source_reads_the_input_without_seeking() {
+    let args =
+        build_transcode_args(INPUT, &target(None, ScaleMode::PadToFit), "scratch/out.mp4").unwrap();
+    let head: Vec<&String> = args[..5].iter().collect();
+    assert_eq!(head[0], "-y");
+    assert_eq!(head[3], "-i");
+    assert_eq!(head[4], INPUT);
+    assert!(!args.iter().any(|arg| arg == "-ss" || arg == "-t"));
+}
+
+#[test]
+fn a_trimmed_source_bounds_what_it_reads_before_the_input() {
+    let mut target = target(None, ScaleMode::PadToFit);
+    target.cut = Some(SourceCut {
+        start_seconds: 1.0,
+        duration_seconds: 2.5,
+    });
+    let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
+
+    let input_position = args.iter().position(|arg| arg == "-i").unwrap();
+    let head: Vec<&String> = args[..input_position + 2].iter().collect();
+    assert_eq!(
+        head,
+        vec![
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-ss",
+            "1.000",
+            "-t",
+            "2.500",
+            "-i",
+            INPUT
+        ]
+    );
+}
+
+#[test]
+fn a_slow_source_retimes_the_picture_and_the_sound_together() {
+    let mut target = target(None, ScaleMode::PadToFit);
+    target.speed = Some(0.5);
+    let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
+
+    assert_eq!(
+        argument_after(&args, "-vf"),
+        "setpts=PTS/0.5,fps=24,format=yuv420p"
+    );
+    assert_eq!(
+        argument_after(&args, "-af"),
+        "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,atempo=0.5"
+    );
+}
+
+#[test]
+fn a_quiet_source_scales_the_sound_only() {
+    let mut target = target(None, ScaleMode::PadToFit);
+    target.volume = Some(0.25);
+    let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
+
+    assert_eq!(argument_after(&args, "-vf"), "fps=24,format=yuv420p");
+    assert_eq!(
+        argument_after(&args, "-af"),
+        "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=0.25"
+    );
+}
+
+#[test]
+fn a_cut_a_speed_and_a_volume_travel_on_one_command() {
+    let mut target = target(Some((640, 360)), ScaleMode::PadToFit);
+    target.cut = Some(SourceCut {
+        start_seconds: 0.5,
+        duration_seconds: 3.0,
+    });
+    target.speed = Some(2.0);
+    target.volume = Some(1.5);
+    let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
+
+    assert_eq!(argument_after(&args, "-ss"), "0.500");
+    assert_eq!(argument_after(&args, "-t"), "3.000");
+    assert!(argument_after(&args, "-vf").starts_with("setpts=PTS/2.0,"));
+    assert!(argument_after(&args, "-af").ends_with(",atempo=2.0,volume=1.5"));
 }

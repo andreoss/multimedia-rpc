@@ -353,7 +353,9 @@ async fn a_probe_job_succeeds_with_stream_metadata() {
     let input = upload_input(&store, &source, "inputs/probe-4s.mp4").await;
     let repository = db.repository();
     let job = repository
-        .create(single_input_job(OpSpec::Probe(ProbeSpec::new(input))))
+        .create(single_input_job(OpSpec::Probe(
+            ProbeSpec::new(input).expect("a bare reference cuts nothing"),
+        )))
         .await
         .unwrap();
 

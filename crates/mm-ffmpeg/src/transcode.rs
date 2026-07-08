@@ -1,6 +1,7 @@
 use crate::profile::{
     Scaling, TargetProfile, audio_filter, channel_layout, encode_args, video_filter,
 };
+use crate::trim::seconds_arg;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
@@ -40,6 +41,15 @@ pub struct TranscodeTarget {
     pub audio_codec: AudioCodec,
     pub scale_mode: ScaleMode,
     pub profile: TargetProfile,
+    pub cut: Option<SourceCut>,
+    pub speed: Option<f64>,
+    pub volume: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SourceCut {
+    pub start_seconds: f64,
+    pub duration_seconds: f64,
 }
 
 impl Default for TranscodeTarget {
@@ -49,6 +59,9 @@ impl Default for TranscodeTarget {
             audio_codec: AudioCodec::Aac,
             scale_mode: ScaleMode::PadToFit,
             profile: TargetProfile::default(),
+            cut: None,
+            speed: None,
+            volume: None,
         }
     }
 }
@@ -57,6 +70,10 @@ impl Default for TranscodeTarget {
 pub enum TranscodeError {
     #[error("unsupported audio channel count {channels}")]
     UnsupportedChannelCount { channels: u32 },
+}
+
+fn factor_arg(value: f64) -> String {
+    format!("{value:?}")
 }
 
 pub fn build_transcode_args(
@@ -72,13 +89,33 @@ pub fn build_transcode_args(
         (Some((width, height)), ScaleMode::Stretch) => Scaling::Stretch(width, height),
     };
 
-    let mut args: Vec<String> = ["-y", "-nostdin", "-hide_banner", "-i", input, "-vf"]
+    let mut args: Vec<String> = ["-y", "-nostdin", "-hide_banner"]
         .into_iter()
         .map(str::to_string)
         .collect();
-    args.push(video_filter(&scaling, target.profile.fps));
+    if let Some(cut) = target.cut {
+        args.push("-ss".to_string());
+        args.push(seconds_arg(cut.start_seconds));
+        args.push("-t".to_string());
+        args.push(seconds_arg(cut.duration_seconds));
+    }
+    args.push("-i".to_string());
+    args.push(input.to_string());
+    args.push("-vf".to_string());
+    let mut video = video_filter(&scaling, target.profile.fps);
+    if let Some(speed) = target.speed {
+        video = format!("setpts=PTS/{},{}", factor_arg(speed), video);
+    }
+    args.push(video);
     args.push("-af".to_string());
-    args.push(audio_filter(target.profile.audio_sample_rate_hz, layout));
+    let mut audio = audio_filter(target.profile.audio_sample_rate_hz, layout);
+    if let Some(speed) = target.speed {
+        audio.push_str(&format!(",atempo={}", factor_arg(speed)));
+    }
+    if let Some(volume) = target.volume {
+        audio.push_str(&format!(",volume={}", factor_arg(volume)));
+    }
+    args.push(audio);
     args.extend(encode_args(
         &target.profile,
         target.video_codec.encoder(),

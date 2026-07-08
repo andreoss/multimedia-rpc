@@ -282,9 +282,10 @@ async fn one_job_is_traced_across_the_server_and_the_worker_and_its_series_are_s
     let mut request = tonic::Request::new(v1::CreateJobRequest {
         user_id: "owner-1".to_string(),
         idempotency_key: Uuid::now_v7().to_string(),
-        spec: Some(v1::OpSpec::from(&OpSpec::Probe(ProbeSpec::new(
-            MediaRef::object_uri(&uri).expect("valid ref"),
-        )))),
+        spec: Some(v1::OpSpec::from(&OpSpec::Probe(
+            ProbeSpec::new(MediaRef::object_uri(&uri).expect("valid ref"))
+                .expect("a bare reference cuts nothing"),
+        ))),
         callback: None,
     });
     request
@@ -382,9 +383,10 @@ async fn the_scaler_inputs_are_both_nonzero_under_a_synthetic_backlog() {
             .create_job(v1::CreateJobRequest {
                 user_id: "owner-1".to_string(),
                 idempotency_key: Uuid::now_v7().to_string(),
-                spec: Some(v1::OpSpec::from(&OpSpec::Probe(ProbeSpec::new(
-                    MediaRef::object_uri(&uri).expect("valid ref"),
-                )))),
+                spec: Some(v1::OpSpec::from(&OpSpec::Probe(
+                    ProbeSpec::new(MediaRef::object_uri(&uri).expect("valid ref"))
+                        .expect("a bare reference cuts nothing"),
+                ))),
                 callback: None,
             })
             .await

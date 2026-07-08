@@ -5,27 +5,27 @@ package mmrpc.v1;
 import "mmrpc/v1/media.proto";
 
 message ConcatSpec {
-  repeated MediaRef inputs = 1;
+  repeated InputSource inputs = 1;
   OutputProfile profile = 2;
 }
 
 message ProbeSpec {
-  MediaRef input = 1;
+  InputSource input = 1;
 }
 
 message TranscodeSpec {
-  MediaRef input = 1;
+  InputSource input = 1;
   OutputProfile profile = 2;
 }
 
 message TrimSpec {
-  MediaRef input = 1;
+  InputSource input = 1;
   double start_seconds = 2;
   double duration_seconds = 3;
 }
 
 message ThumbnailSpec {
-  MediaRef input = 1;
+  InputSource input = 1;
   repeated double offsets_seconds = 2;
   uint32 width = 3;
   uint32 height = 4;
@@ -52,7 +52,7 @@ enum ResizeMode {
 }
 
 message ImageSpec {
-  repeated MediaRef inputs = 1;
+  repeated InputSource inputs = 1;
   ImageOp op = 2;
   uint32 width = 3;
   uint32 height = 4;
@@ -61,7 +61,7 @@ message ImageSpec {
 }
 
 message PackageSpec {
-  MediaRef input = 1;
+  InputSource input = 1;
   double segment_seconds = 2;
 }
 

@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::source::{InputSource, SourceError};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRef {
     bucket: String,
@@ -228,10 +230,32 @@ pub enum OpSpecError {
     },
     #[error("convert needs an output format")]
     MissingImageFormat,
+    #[error("{op} cannot apply {field} to its input")]
+    InputCut {
+        op: &'static str,
+        field: &'static str,
+    },
     #[error(transparent)]
     MediaRef(#[from] MediaRefError),
     #[error(transparent)]
     Profile(#[from] OutputProfileError),
+    #[error(transparent)]
+    Source(#[from] SourceError),
+}
+
+fn reject_cuts(op: &'static str, inputs: &[InputSource]) -> Result<(), OpSpecError> {
+    match inputs.iter().find_map(InputSource::cuts) {
+        Some(field) => Err(OpSpecError::InputCut { op, field }),
+        None => Ok(()),
+    }
+}
+
+fn sources<I: Into<InputSource>>(inputs: Vec<I>) -> Vec<InputSource> {
+    inputs.into_iter().map(Into::into).collect()
+}
+
+fn source<I: Into<InputSource>>(input: I) -> InputSource {
+    input.into()
 }
 
 fn parse_nonnegative(value: f64, error: fn(f64) -> OpSpecError) -> Result<f64, OpSpecError> {
@@ -259,12 +283,16 @@ fn parse_profile(profile: Option<OutputProfile>) -> Result<Option<OutputProfile>
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConcatSpec {
-    inputs: Vec<MediaRef>,
+    inputs: Vec<InputSource>,
     profile: Option<OutputProfile>,
 }
 
 impl ConcatSpec {
-    pub fn new(inputs: Vec<MediaRef>, profile: Option<OutputProfile>) -> Result<Self, OpSpecError> {
+    pub fn new<I: Into<InputSource>>(
+        inputs: Vec<I>,
+        profile: Option<OutputProfile>,
+    ) -> Result<Self, OpSpecError> {
+        let inputs = sources(inputs);
         if inputs.is_empty() {
             return Err(OpSpecError::EmptyInputs);
         }
@@ -273,13 +301,14 @@ impl ConcatSpec {
                 count: inputs.len(),
             });
         }
+        reject_cuts("concat", &inputs)?;
         Ok(Self {
             inputs,
             profile: parse_profile(profile)?,
         })
     }
 
-    pub fn inputs(&self) -> &[MediaRef] {
+    pub fn inputs(&self) -> &[InputSource] {
         &self.inputs
     }
 
@@ -290,34 +319,42 @@ impl ConcatSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProbeSpec {
-    input: MediaRef,
+    input: InputSource,
 }
 
 impl ProbeSpec {
-    pub fn new(input: MediaRef) -> Self {
-        Self { input }
+    pub fn new<I: Into<InputSource>>(input: I) -> Result<Self, OpSpecError> {
+        let input = source(input);
+        reject_cuts("probe", std::slice::from_ref(&input))?;
+        Ok(Self { input })
     }
 
-    pub fn input(&self) -> &MediaRef {
+    pub fn input(&self) -> &InputSource {
         &self.input
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeSpec {
-    input: MediaRef,
+    input: InputSource,
     profile: OutputProfile,
 }
 
 impl TranscodeSpec {
-    pub fn new(input: MediaRef, profile: OutputProfile) -> Result<Self, OpSpecError> {
+    pub fn new<I: Into<InputSource>>(
+        input: I,
+        profile: OutputProfile,
+    ) -> Result<Self, OpSpecError> {
         if profile.is_empty() {
             return Err(OpSpecError::EmptyProfile);
         }
-        Ok(Self { input, profile })
+        Ok(Self {
+            input: source(input),
+            profile,
+        })
     }
 
-    pub fn input(&self) -> &MediaRef {
+    pub fn input(&self) -> &InputSource {
         &self.input
     }
 
@@ -328,17 +365,19 @@ impl TranscodeSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimSpec {
-    input: MediaRef,
+    input: InputSource,
     start_seconds: f64,
     duration_seconds: f64,
 }
 
 impl TrimSpec {
-    pub fn new(
-        input: MediaRef,
+    pub fn new<I: Into<InputSource>>(
+        input: I,
         start_seconds: f64,
         duration_seconds: f64,
     ) -> Result<Self, OpSpecError> {
+        let input = source(input);
+        reject_cuts("trim", std::slice::from_ref(&input))?;
         Ok(Self {
             input,
             start_seconds: parse_nonnegative(start_seconds, |value| OpSpecError::InvalidStart {
@@ -348,7 +387,7 @@ impl TrimSpec {
         })
     }
 
-    pub fn input(&self) -> &MediaRef {
+    pub fn input(&self) -> &InputSource {
         &self.input
     }
 
@@ -363,19 +402,21 @@ impl TrimSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThumbnailSpec {
-    input: MediaRef,
+    input: InputSource,
     offsets_seconds: Vec<f64>,
     width: u32,
     height: u32,
 }
 
 impl ThumbnailSpec {
-    pub fn new(
-        input: MediaRef,
+    pub fn new<I: Into<InputSource>>(
+        input: I,
         offsets_seconds: Vec<f64>,
         width: u32,
         height: u32,
     ) -> Result<Self, OpSpecError> {
+        let input = source(input);
+        reject_cuts("thumbnail", std::slice::from_ref(&input))?;
         if offsets_seconds.is_empty() {
             return Err(OpSpecError::EmptyOffsets);
         }
@@ -398,7 +439,7 @@ impl ThumbnailSpec {
         })
     }
 
-    pub fn input(&self) -> &MediaRef {
+    pub fn input(&self) -> &InputSource {
         &self.input
     }
 
@@ -474,7 +515,7 @@ impl ImageFormat {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageSpec {
-    inputs: Vec<MediaRef>,
+    inputs: Vec<InputSource>,
     op: ImageOp,
     width: u32,
     height: u32,
@@ -483,14 +524,16 @@ pub struct ImageSpec {
 }
 
 impl ImageSpec {
-    pub fn new(
-        inputs: Vec<MediaRef>,
+    pub fn new<I: Into<InputSource>>(
+        inputs: Vec<I>,
         op: ImageOp,
         width: u32,
         height: u32,
         mode: ResizeMode,
         format: Option<ImageFormat>,
     ) -> Result<Self, OpSpecError> {
+        let inputs = sources(inputs);
+        reject_cuts(op.to_string().leak(), &inputs)?;
         if inputs.len() != op.input_count() {
             return Err(OpSpecError::WrongInputCount {
                 op: op.to_string().leak(),
@@ -516,7 +559,7 @@ impl ImageSpec {
         })
     }
 
-    pub fn inputs(&self) -> &[MediaRef] {
+    pub fn inputs(&self) -> &[InputSource] {
         &self.inputs
     }
 
@@ -547,12 +590,14 @@ impl ImageSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageSpec {
-    input: MediaRef,
+    input: InputSource,
     segment_seconds: f64,
 }
 
 impl PackageSpec {
-    pub fn new(input: MediaRef, segment_seconds: f64) -> Result<Self, OpSpecError> {
+    pub fn new<I: Into<InputSource>>(input: I, segment_seconds: f64) -> Result<Self, OpSpecError> {
+        let input = source(input);
+        reject_cuts("package", std::slice::from_ref(&input))?;
         if !segment_seconds.is_finite() || segment_seconds <= 0.0 {
             return Err(OpSpecError::InvalidSegmentLength {
                 value: segment_seconds,
@@ -564,7 +609,7 @@ impl PackageSpec {
         })
     }
 
-    pub fn input(&self) -> &MediaRef {
+    pub fn input(&self) -> &InputSource {
         &self.input
     }
 
@@ -620,6 +665,12 @@ pub struct UnsupportedOp {
     pub kind: OpKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("input references node {node}, which has no producer yet")]
+pub struct UnsupportedInput {
+    pub node: String,
+}
+
 impl OpKind {
     pub fn ensure_executable(self) -> Result<(), UnsupportedOp> {
         match self {
@@ -646,6 +697,27 @@ impl OpSpec {
             OpSpec::Thumbnail(_) => OpKind::Thumbnail,
             OpSpec::Image(spec) => spec.op.kind(),
             OpSpec::Package(_) => OpKind::Package,
+        }
+    }
+
+    pub fn inputs(&self) -> Vec<&InputSource> {
+        match self {
+            OpSpec::Concat(concat) => concat.inputs().iter().collect(),
+            OpSpec::Probe(probe) => vec![probe.input()],
+            OpSpec::Transcode(transcode) => vec![transcode.input()],
+            OpSpec::Trim(trim) => vec![trim.input()],
+            OpSpec::Thumbnail(thumbnail) => vec![thumbnail.input()],
+            OpSpec::Image(image) => image.inputs().iter().collect(),
+            OpSpec::Package(package) => vec![package.input()],
+        }
+    }
+
+    pub fn ensure_resolvable(&self) -> Result<(), UnsupportedInput> {
+        match self.inputs().into_iter().find_map(InputSource::node) {
+            Some(node) => Err(UnsupportedInput {
+                node: node.id().as_str().to_string(),
+            }),
+            None => Ok(()),
         }
     }
 }

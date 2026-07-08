@@ -8,9 +8,10 @@ use mm_domain::{
 };
 
 fn sample_spec() -> OpSpec {
-    OpSpec::Probe(ProbeSpec::new(
-        MediaRef::object_uri("s3://bucket/key").expect("valid media ref"),
-    ))
+    OpSpec::Probe(
+        ProbeSpec::new(MediaRef::object_uri("s3://bucket/key").expect("valid media ref"))
+            .expect("a bare reference cuts nothing"),
+    )
 }
 
 #[test]

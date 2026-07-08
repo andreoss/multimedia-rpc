@@ -194,9 +194,10 @@ async fn announced_address(daemon: &mut Daemon) -> SocketAddr {
 }
 
 fn probe_spec(uri: &str) -> v1::OpSpec {
-    v1::OpSpec::from(&OpSpec::Probe(ProbeSpec::new(
-        MediaRef::object_uri(uri).expect("valid ref"),
-    )))
+    v1::OpSpec::from(&OpSpec::Probe(
+        ProbeSpec::new(MediaRef::object_uri(uri).expect("valid ref"))
+            .expect("a bare reference cuts nothing"),
+    ))
 }
 
 fn live_token(issuer: &Issuer, subject: &str) -> String {

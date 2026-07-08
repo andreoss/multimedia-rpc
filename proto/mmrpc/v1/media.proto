@@ -38,6 +38,11 @@ message InputSource {
   }
 }
 
+message OutputRange {
+  double start_seconds = 1;
+  double duration_seconds = 2;
+}
+
 message OutputProfile {
   double frame_rate = 1;
   uint32 video_max_bitrate = 2;
@@ -46,6 +51,8 @@ message OutputProfile {
   uint32 audio_sample_rate = 5;
   uint32 width = 6;
   uint32 height = 7;
+  optional double poster_seconds = 8;
+  OutputRange range = 9;
 }
 
 message FileError {

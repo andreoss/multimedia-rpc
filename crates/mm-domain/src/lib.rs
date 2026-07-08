@@ -24,10 +24,10 @@ pub use op::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
     HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec, MAX_BATCH_STEPS, MAX_GRAPH_NODES,
     MAX_NESTING_DEPTH, MAX_TREE_STEPS, MediaRef, MediaRefError, NodeOutcome, ObjectRef, OpKind,
-    OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, PackageResult,
-    PackageSpec, ProbeResult, ProbeSpec, ResizeMode, StepOutcome, StepState, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput,
-    UnsupportedOp, VideoStreamInfo,
+    OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, OutputRange,
+    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode, StepOutcome, StepState,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    UnsupportedInput, UnsupportedOp, VideoStreamInfo,
 };
 pub use resolve::{ResolveError, resolve_media_ref};
 

@@ -218,3 +218,15 @@ fn a_cut_a_speed_and_a_volume_travel_on_one_command() {
     assert!(argument_after(&args, "-vf").starts_with("setpts=PTS/2.0,"));
     assert!(argument_after(&args, "-af").ends_with(",atempo=2.0,volume=1.5"));
 }
+
+#[test]
+fn a_range_bounds_the_output_after_the_input() {
+    let mut target = target(None, ScaleMode::PadToFit);
+    target.range = Some((1.0, 2.0));
+    let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
+    let input_position = args.iter().position(|arg| arg == "-i").unwrap();
+    assert_eq!(
+        &args[input_position + 2..input_position + 6],
+        &["-ss", "1.000", "-t", "2.000"]
+    );
+}

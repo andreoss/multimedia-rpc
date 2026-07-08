@@ -2,9 +2,9 @@ use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
     ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, JobFailure, MediaRef, MediaRefError,
     MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError,
-    OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode, SourceError,
-    StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
-    TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
+    OutputProfile, OutputRange, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode,
+    SourceError, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
 };
 use mm_proto::v1;
 use proptest::prelude::*;
@@ -262,6 +262,7 @@ proptest! {
                 offsets_seconds: vec![1.0],
                 width,
                 height,
+                sprite_columns: 0,
             })),
         };
         let rejected = matches!(
@@ -790,5 +791,21 @@ fn a_graph_result_round_trips_a_node_and_its_failure() {
     assert_eq!(
         v1::OpResult::from(&OpResult::try_from(wire).unwrap()),
         v1::OpResult::from(&result)
+    );
+}
+
+#[test]
+fn a_profile_with_a_poster_and_a_range_round_trips() {
+    let profile = OutputProfile::from_raw(24.0, 0, 0, 0, 0, 640, 360)
+        .unwrap()
+        .with_poster(1.5)
+        .unwrap()
+        .with_range(OutputRange::new(0.5, 2.0).unwrap());
+    let wire = v1::OutputProfile::from(&profile);
+    let decoded = OutputProfile::try_from(wire).unwrap();
+    assert_eq!(decoded, profile);
+    assert_eq!(
+        v1::OutputProfile::from(&decoded),
+        v1::OutputProfile::from(&profile)
     );
 }

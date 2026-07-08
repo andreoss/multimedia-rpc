@@ -42,6 +42,7 @@ pub struct TranscodeTarget {
     pub scale_mode: ScaleMode,
     pub profile: TargetProfile,
     pub cut: Option<SourceCut>,
+    pub range: Option<(f64, f64)>,
     pub speed: Option<f64>,
     pub volume: Option<f64>,
 }
@@ -60,6 +61,7 @@ impl Default for TranscodeTarget {
             scale_mode: ScaleMode::PadToFit,
             profile: TargetProfile::default(),
             cut: None,
+            range: None,
             speed: None,
             volume: None,
         }
@@ -101,6 +103,12 @@ pub fn build_transcode_args(
     }
     args.push("-i".to_string());
     args.push(input.to_string());
+    if let Some((start, duration)) = target.range {
+        args.push("-ss".to_string());
+        args.push(seconds_arg(start));
+        args.push("-t".to_string());
+        args.push(seconds_arg(duration));
+    }
     args.push("-vf".to_string());
     let mut video = video_filter(&scaling, target.profile.fps);
     if let Some(speed) = target.speed {

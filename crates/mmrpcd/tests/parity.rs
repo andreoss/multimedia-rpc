@@ -485,7 +485,7 @@ async fn await_terminal(
     }
 }
 
-async fn one_outcome(publisher: &SqsCallbackPublisher, queue: &QueueUrl) -> v1::JobOutcome {
+async fn one_callback(publisher: &SqsCallbackPublisher, queue: &QueueUrl) -> v1::JobCallback {
     let settle = Instant::now() + mm_testkit::budget::QUEUE_SETTLE;
     let bodies = loop {
         let received = tokio::time::timeout(
@@ -512,7 +512,7 @@ async fn one_outcome(publisher: &SqsCallbackPublisher, queue: &QueueUrl) -> v1::
     let decoded = BASE64_STANDARD
         .decode(&bodies[0])
         .expect("message is base64");
-    v1::JobOutcome::decode(decoded.as_slice()).expect("message is a job outcome")
+    v1::JobCallback::decode(decoded.as_slice()).expect("message is a job callback")
 }
 
 fn concat_output_key(job: &v1::Job) -> String {
@@ -1268,7 +1268,11 @@ async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
     )
     .await;
 
-    let outcome = one_outcome(&publisher, &queue).await;
+    let callback = one_callback(&publisher, &queue).await;
+    let outcome = callback.outcome.expect("the callback carries the outcome");
+    let stitch = callback
+        .stitch
+        .expect("the callback carries the reference half");
     assert_eq!(outcome.job_id, created.job_id);
     assert_eq!(outcome.request_id, "req-cb-ok");
     assert_eq!(outcome.state, v1::JobState::Succeeded as i32);
@@ -1283,6 +1287,15 @@ async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
     };
     assert_eq!(object.key(), format!("jobs/{}/output.mp4", created.job_id));
     assert!(store.head(&object).await.expect("output exists") > 0);
+    assert_eq!(stitch.request_id, "req-cb-ok");
+    assert_eq!(stitch.status, v1::StitchStatus::Completed as i32);
+    assert_eq!(stitch.error_code, None);
+    assert!(stitch.file_errors.is_empty());
+    assert_eq!(
+        stitch.r2_uri.as_deref(),
+        Some(format!("s3://{BUCKET}/jobs/{}/output.mp4", created.job_id).as_str()),
+        "the reference half names the object the job landed"
+    );
 
     println!(
         "parity p09 callback-success: pass (one outcome, request req-cb-ok, result key {})",
@@ -1322,7 +1335,11 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
     )
     .await;
 
-    let outcome = one_outcome(&publisher, &queue).await;
+    let callback = one_callback(&publisher, &queue).await;
+    let outcome = callback.outcome.expect("the callback carries the outcome");
+    let stitch = callback
+        .stitch
+        .expect("the callback carries the reference half");
     assert_eq!(outcome.job_id, created.job_id);
     assert_eq!(outcome.request_id, "req-cb-block");
     assert_eq!(outcome.state, v1::JobState::Failed as i32);
@@ -1337,11 +1354,23 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
         outcome.file_errors[0].media_ref,
         Some(object_ref(&inputs[0]))
     );
+    assert_eq!(stitch.request_id, "req-cb-block");
+    assert_eq!(stitch.status, v1::StitchStatus::Failed as i32);
+    assert_eq!(
+        stitch.error_code.as_deref(),
+        Some("ERROR_UNSUPPORTED_CONTAINER"),
+        "the reference half names the failure the way a reference consumer reads it"
+    );
+    assert_eq!(stitch.r2_uri, None);
+    assert_eq!(
+        stitch.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER",
+        "the reference half carries the same file errors"
+    );
 
     println!(
         "parity p10 callback-block: pass (one outcome, \
          error_code=ERROR_UNSUPPORTED_CONTAINER, \
-         file_errors[0]=ERROR_UNSUPPORTED_CONTAINER)"
+         file_errors[0]=ERROR_UNSUPPORTED_CONTAINER, stitch FAILED)"
     );
     publisher.delete_queue(&queue).await.expect("queue removed");
     drop(daemon);
@@ -1415,12 +1444,20 @@ async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
         "a pending cancel lands immediately"
     );
 
-    let outcome = one_outcome(&publisher, &queue).await;
+    let callback = one_callback(&publisher, &queue).await;
+    let outcome = callback.outcome.expect("the callback carries the outcome");
+    let stitch = callback
+        .stitch
+        .expect("the callback carries the reference half");
     assert_eq!(outcome.job_id, parked.job_id);
     assert_eq!(outcome.request_id, "req-parked");
     assert_eq!(outcome.state, v1::JobState::Cancelled as i32);
     assert_eq!(outcome.error_code, "");
     assert!(outcome.result.is_none());
+    assert_eq!(stitch.status, v1::StitchStatus::Cancelled as i32);
+    assert_eq!(stitch.request_id, "req-parked");
+    assert_eq!(stitch.error_code, None);
+    assert_eq!(stitch.r2_uri, None);
 
     println!(
         "parity p11 pending-cancel-callback: pass (job {} cancelled before any worker \
@@ -1506,12 +1543,18 @@ async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
         "the reaper fails an overdue pending job"
     );
 
-    let outcome = one_outcome(&publisher, &queue).await;
+    let callback = one_callback(&publisher, &queue).await;
+    let outcome = callback.outcome.expect("the callback carries the outcome");
+    let stitch = callback
+        .stitch
+        .expect("the callback carries the reference half");
     assert_eq!(outcome.job_id, parked.job_id);
     assert_eq!(outcome.request_id, "req-reaped");
     assert_eq!(outcome.state, v1::JobState::Failed as i32);
     assert_eq!(outcome.error_code, "ERROR_JOB_TIMEOUT");
     assert!(outcome.result.is_none());
+    assert_eq!(stitch.status, v1::StitchStatus::Failed as i32);
+    assert_eq!(stitch.error_code.as_deref(), Some("ERROR_JOB_TIMEOUT"));
 
     println!(
         "parity p12 reaped-callback: pass (job {} reaped while pending; one FAILED/timeout \

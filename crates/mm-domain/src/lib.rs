@@ -19,9 +19,10 @@ pub use jobs::{
     PageCursor, ProgressError, ProgressPercent,
 };
 pub use op::{
-    BatchResult, BatchSpec, ConcatSpec, HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec,
-    MAX_BATCH_STEPS, MAX_NESTING_DEPTH, MAX_TREE_STEPS, MediaRef, MediaRefError, ObjectRef, OpKind,
-    OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, PackageResult,
+    BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec, HttpRef, ImageFormat,
+    ImageOp, ImageResult, ImageSpec, MAX_BATCH_STEPS, MAX_GRAPH_NODES, MAX_NESTING_DEPTH,
+    MAX_TREE_STEPS, MediaRef, MediaRefError, NodeOutcome, ObjectRef, OpKind, OpResult,
+    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, PackageResult,
     PackageSpec, ProbeResult, ProbeSpec, ResizeMode, StepOutcome, StepState, ThumbnailResult,
     ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput,
     UnsupportedOp,

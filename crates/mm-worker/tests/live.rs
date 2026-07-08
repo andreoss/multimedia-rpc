@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    BatchSpec, CallbackError, CallbackPublisher, ConcatSpec, ImageFormat, ImageOp, ImageSpec,
-    InputSource, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob, NodeRef, ObjectBody,
-    ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec,
-    ProbeSpec, QueueUrl, RequestId, ResizeMode, StepState, ThumbnailSpec, TranscodeSpec, TrimSpec,
-    UserId, WorkerId, collect_body,
+    BatchSpec, CallbackError, CallbackPublisher, ConcatSpec, GraphNode, GraphSpec, ImageFormat,
+    ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob,
+    NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec, OutputProfile,
+    PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, StepState, ThumbnailSpec,
+    TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -2034,5 +2034,116 @@ async fn a_continued_batch_reports_what_succeeded() {
         StepState::Result(OpResult::Trim(_))
     ));
     assert!(matches!(batch.steps()[1].state(), StepState::Failure(_)));
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diamond_graph_lands_all_four_results() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("graph-diamond-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/graph-diamond-4s.mp4").await;
+    let profile = OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).unwrap();
+    let trim = OpSpec::Trim(TrimSpec::new(input, 0.0, 2.0).unwrap());
+    let left = batch_step_reading("source", 0);
+    let right = batch_step_reading("source", 0);
+    let join = OpSpec::Concat(
+        ConcatSpec::new(
+            vec![
+                InputSource::from(NodeRef::new("left", 0).unwrap()),
+                InputSource::from(NodeRef::new("right", 0).unwrap()),
+            ],
+            Some(profile),
+        )
+        .unwrap(),
+    );
+    let spec = OpSpec::Graph(
+        GraphSpec::new(vec![
+            GraphNode::new("source", trim).unwrap(),
+            GraphNode::new("left", left).unwrap(),
+            GraphNode::new("right", right).unwrap(),
+            GraphNode::new("join", join).unwrap(),
+        ])
+        .unwrap(),
+    );
+
+    let repository = db.repository();
+    let job = repository.create(single_input_job(spec)).await.unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-graph"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(240)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Graph(graph) = record.result.expect("result recorded") else {
+        panic!("expected a graph result");
+    };
+    assert_eq!(graph.nodes().len(), 4);
+    let join = graph
+        .nodes()
+        .iter()
+        .find(|node| node.id().as_str() == "join")
+        .expect("the join node is present");
+    let StepState::Result(OpResult::Concat(timed)) = join.state() else {
+        panic!("expected the join result");
+    };
+    assert!(
+        (timed.duration_seconds() - 4.0).abs() < 0.8,
+        "the join duration is {}",
+        timed.duration_seconds()
+    );
+    let MediaRef::Object(object) = timed.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(
+        object.key(),
+        format!("jobs/{}/nodes/join/output.mp4", job.id)
+    );
+
+    let body = store.get(&object).await.expect("output fetches");
+    let bytes = collect_body(body).await.expect("output body collects");
+    let local = scratch_dir("verify").join(format!("{}-join.mp4", job.id));
+    tokio::fs::write(&local, &bytes).await.unwrap();
+    let info = mm_ffmpeg::Prober::default()
+        .probe(&local.to_string_lossy(), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(info.video[0].width, 640);
+    assert_eq!(info.video[0].height, 360);
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_graph_failure_leaves_no_key_under_the_job_prefix() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("graph-fail-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/graph-fail-4s.mp4").await;
+    let trim = OpSpec::Trim(TrimSpec::new(input, 0.0, 2.0).unwrap());
+    let bad = batch_step_reading("source", 9);
+    let spec = OpSpec::Graph(
+        GraphSpec::new(vec![
+            GraphNode::new("source", trim).unwrap(),
+            GraphNode::new("bad", bad).unwrap(),
+        ])
+        .unwrap(),
+    );
+
+    let repository = db.repository();
+    let job = repository.create(single_input_job(spec)).await.unwrap();
+    let mut config = base_config(&db, store.clone(), "worker-graph-fail");
+    config.retry.max_attempts = 1;
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, Duration::from_secs(180)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed);
+    let object =
+        ObjectRef::new(BUCKET, &format!("jobs/{}/nodes/source/output.mp4", job.id)).unwrap();
+    assert!(
+        store.head(&object).await.is_err(),
+        "a graph failure left a key under the job prefix"
+    );
     db.dispose().await;
 }

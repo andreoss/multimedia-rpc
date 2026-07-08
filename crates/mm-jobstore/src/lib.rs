@@ -4,10 +4,10 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use mm_domain::{
-    CancelNotifications, InputFailure, JobEventNotifications, JobFailure, JobId, JobNotifications,
-    JobPage, JobRecord, JobRepository, JobState, JobStoreError, NewJob, OpResult, OpSpec,
-    PageCursor, ParameterDeclaration, ProgressPercent, QueueUrl, RequestId, Template, TemplateId,
-    UserId, WorkerId,
+    CancelNotifications, InputFailure, InputOrder, JobEventNotifications, JobFailure, JobId,
+    JobNotifications, JobPage, JobRecord, JobRepository, JobRequester, JobState, JobStoreError,
+    NewJob, OpResult, OpSpec, PageCursor, ParameterDeclaration, ProgressPercent, QueueUrl,
+    RequestId, RequesterId, RequesterType, Template, TemplateId, UserId, WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
@@ -180,6 +180,9 @@ struct JobRow {
     callback_queue_url: Option<String>,
     trace_id: Option<String>,
     input_failures: Option<Vec<u8>>,
+    requester_id: Option<String>,
+    requester_type: Option<String>,
+    input_sequence: Option<Vec<u8>>,
 }
 
 fn backend(error: sqlx::Error) -> JobStoreError {
@@ -231,6 +234,33 @@ fn to_template(row: TemplateRow) -> Result<Template, JobStoreError> {
 
 fn encode_result(result: &OpResult) -> Vec<u8> {
     mm_proto::v1::OpResult::from(result).encode_to_vec()
+}
+
+fn encode_input_order(order: &InputOrder) -> Vec<u8> {
+    mm_proto::v1::InputSequence::from(order).encode_to_vec()
+}
+
+fn decode_input_order(id: JobId, bytes: &[u8]) -> Result<InputOrder, JobStoreError> {
+    mm_proto::v1::InputSequence::decode(bytes)
+        .map_err(|error| corrupt(id, error))
+        .and_then(|sequence| {
+            InputOrder::try_from(sequence).map_err(|error| corrupt(id, error.to_string()))
+        })
+}
+
+fn requester(
+    id: JobId,
+    requester_id: Option<String>,
+    requester_type: Option<String>,
+) -> Result<Option<JobRequester>, JobStoreError> {
+    match (requester_id, requester_type) {
+        (Some(who), Some(kind)) => Ok(Some(JobRequester::new(
+            RequesterId::parse(&who).map_err(|error| corrupt(id, error))?,
+            RequesterType::parse(&kind).map_err(|error| corrupt(id, error))?,
+        ))),
+        (None, None) => Ok(None),
+        _ => Err(corrupt(id, "a requester carries a type or neither")),
+    }
 }
 
 fn encode_input_failures(inputs: &[InputFailure]) -> Vec<u8> {
@@ -320,6 +350,12 @@ fn to_record(row: JobRow) -> Result<JobRecord, JobStoreError> {
             .map(str::parse)
             .transpose()
             .map_err(|error| corrupt(id, error))?,
+        requester: requester(id, row.requester_id, row.requester_type)?,
+        input_order: row
+            .input_sequence
+            .as_deref()
+            .map(|bytes| decode_input_order(id, bytes))
+            .transpose()?,
     })
 }
 
@@ -366,14 +402,14 @@ impl JobRepository for PgJobRepository {
         let inserted = sqlx::query_as!(
             JobRow,
             "INSERT INTO jobs (id, user_id, request_id, spec, deadline_at, \
-             callback_queue_url, trace_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             callback_queue_url, trace_id, requester_id, requester_type, input_sequence) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (request_id) DO NOTHING \
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures",
+             input_failures, requester_id, requester_type, input_sequence",
             job.id().as_uuid(),
             job.owner().as_str(),
             job.request().as_str(),
@@ -381,6 +417,9 @@ impl JobRepository for PgJobRepository {
             job.deadline_at().map(to_offset),
             job.callback().map(QueueUrl::as_str),
             job.trace_id().map(|trace| trace.to_string()),
+            job.requester().map(|who| who.id().as_str().to_string()),
+            job.requester().map(|who| who.kind().as_str()),
+            job.input_order().map(encode_input_order),
         )
         .fetch_optional(&self.pool)
         .await
@@ -410,7 +449,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures \
+             input_failures, requester_id, requester_type, input_sequence \
              FROM jobs WHERE id = $1",
             id.as_uuid()
         )
@@ -432,7 +471,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures \
+             input_failures, requester_id, requester_type, input_sequence \
              FROM jobs WHERE id = $1 AND user_id = $2",
             id.as_uuid(),
             owner.as_str()
@@ -461,7 +500,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures \
+             input_failures, requester_id, requester_type, input_sequence \
              FROM jobs \
              WHERE user_id = $1 \
                AND ($2::timestamptz IS NULL \
@@ -518,7 +557,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures",
+             input_failures, requester_id, requester_type, input_sequence",
             worker.as_str(),
             lease.as_secs_f64(),
             i64::from(limit.get())
@@ -689,7 +728,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures",
+             input_failures, requester_id, requester_type, input_sequence",
             id.as_uuid(),
             worker.as_str(),
             encode_result(&result)
@@ -722,7 +761,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures",
+             input_failures, requester_id, requester_type, input_sequence",
             id.as_uuid(),
             worker.as_str(),
             failure.code(),
@@ -751,7 +790,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures",
+             input_failures, requester_id, requester_type, input_sequence",
             id.as_uuid()
         )
         .fetch_optional(&self.pool)
@@ -789,7 +828,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures \
+             input_failures, requester_id, requester_type, input_sequence \
              FROM jobs \
              WHERE state IN ('SUCCEEDED', 'FAILED', 'CANCELLED') \
                AND callback_queue_url IS NOT NULL \

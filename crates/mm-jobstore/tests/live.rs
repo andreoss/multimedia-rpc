@@ -5,9 +5,10 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use mm_domain::{
-    CancelNotifications, ConcatSpec, JobEventNotifications, JobFailure, JobId, JobNotifications,
-    JobRepository, JobState, JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProbeSpec,
-    ProgressPercent, QueueUrl, RequestId, Template, TimedOutput, TraceId, UserId, WorkerId,
+    CancelNotifications, ConcatSpec, InputOrder, JobEventNotifications, JobFailure, JobId,
+    JobNotifications, JobRepository, JobRequester, JobState, JobStoreError, MediaRef, NewJob,
+    OpResult, OpSpec, ProbeSpec, ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType,
+    Template, TimedOutput, TraceId, UserId, WorkerId,
 };
 use mm_jobstore::{
     MIGRATOR, PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository,
@@ -126,6 +127,10 @@ fn concat_spec() -> OpSpec {
         )
         .expect("valid concat spec"),
     )
+}
+
+fn requester(value: &str) -> RequesterId {
+    RequesterId::parse(value).expect("a valid requester id")
 }
 
 fn new_job(owner_id: &str, request_id: &str) -> NewJob {
@@ -1493,4 +1498,85 @@ async fn a_template_round_trips_and_is_owner_scoped() {
             .is_none()
     );
     db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_job_carries_its_requester_and_its_inputs_sequence_order() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let job = repo
+        .create(
+            new_job("owner-1", "req-requester")
+                .with_requester(requester("msg-4711"), RequesterType::ChatMessage)
+                .with_input_order(InputOrder::new(vec![30, 10, 20]).expect("valid order")),
+        )
+        .await
+        .expect("create succeeds");
+
+    let stored = repo
+        .get(job.id)
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(
+        stored.requester.as_ref().map(|who| who.id().clone()),
+        Some(requester("msg-4711"))
+    );
+    assert_eq!(
+        stored.requester.as_ref().map(JobRequester::kind),
+        Some(RequesterType::ChatMessage)
+    );
+    assert_eq!(
+        stored
+            .input_order
+            .as_ref()
+            .map(InputOrder::sequence)
+            .unwrap_or_default(),
+        vec![30, 10, 20],
+        "the order the caller asked for survives the row"
+    );
+
+    let foreign = repo
+        .get_owned(&owner("owner-2"), job.id)
+        .await
+        .expect("get owned succeeds");
+    assert!(foreign.is_none(), "another owner reads nothing");
+
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_job_without_a_requester_reads_back_without_one() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let job = repo
+        .create(new_job("owner-1", "req-no-requester"))
+        .await
+        .expect("create succeeds");
+
+    let stored = repo
+        .get(job.id)
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(stored.requester, None);
+    assert_eq!(stored.input_order, None);
+
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_duplicate_sequence_order_is_refused() {
+    assert!(InputOrder::new(vec![1, 1]).is_err());
+    assert!(InputOrder::new(vec![0, 0, 1]).is_err());
+    assert!(InputOrder::new(vec![1, 0]).is_ok());
+}
+
+#[tokio::test]
+async fn an_input_order_that_does_not_match_the_spec_is_refused() {
+    let spec = concat_spec();
+    let inputs = spec.inputs().len();
+    assert!(InputOrder::for_inputs(&spec, (0..inputs as i32).collect()).is_ok());
+    assert!(InputOrder::for_inputs(&spec, (0..=inputs as i32).collect()).is_err());
+    assert!(InputOrder::for_inputs(&spec, Vec::new()).is_err());
 }

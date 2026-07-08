@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use mm_domain::{
     InputFailure, InputFailureError, JobFailure, JobFailureError, JobId, JobState, JobStoreError,
     MediaRef, NewJob, NodeId, OpSpec, PageCursor, ProbeSpec, ProgressError, ProgressPercent,
-    RequestId, TextIdError, TraceId, UserId, WorkerId,
+    RequestId, RequesterId, RequesterType, TextIdError, TraceId, UserId, WorkerId,
 };
 
 fn sample_spec() -> OpSpec {
@@ -216,4 +216,51 @@ fn a_new_job_carries_the_trace_it_was_created_under() {
     assert_eq!(job.trace_id(), None);
     let job = job.with_trace_id(trace);
     assert_eq!(job.trace_id(), Some(trace));
+}
+
+#[test]
+fn a_requester_type_round_trips_through_its_wire_spelling() {
+    for kind in [
+        RequesterType::ChatMessage,
+        RequesterType::CanvasExecutionTask,
+        RequesterType::SeriesEpisode,
+        RequesterType::Studio,
+    ] {
+        assert_eq!(RequesterType::parse(kind.as_str()).expect("known"), kind);
+    }
+}
+
+#[test]
+fn a_requester_type_this_service_does_not_know_is_refused() {
+    assert!(RequesterType::parse("SERIES_EPISODE_V2").is_err());
+    assert!(RequesterType::parse("").is_err());
+    assert!(RequesterType::parse("chat_message").is_err());
+}
+
+#[test]
+fn a_requester_id_is_a_typed_id() {
+    assert!(RequesterId::parse("msg-4711").is_ok());
+    assert!(RequesterId::parse("").is_err());
+    assert!(RequesterId::parse(&"x".repeat(RequesterId::MAX_LENGTH + 1)).is_err());
+}
+
+#[test]
+fn a_job_built_with_a_requester_answers_it() {
+    let job = NewJob::new(
+        JobId::generate(),
+        UserId::from_str("owner-1").expect("owner"),
+        RequestId::from_str("req-1").expect("request"),
+        sample_spec(),
+        None,
+    )
+    .with_requester(
+        RequesterId::parse("msg-4711").expect("requester"),
+        RequesterType::ChatMessage,
+    );
+
+    assert_eq!(
+        job.requester().map(|who| who.kind()),
+        Some(RequesterType::ChatMessage)
+    );
+    assert_eq!(job.input_order(), None);
 }

@@ -172,6 +172,8 @@ pub struct NewJob {
     deadline_at: Option<SystemTime>,
     callback: Option<QueueUrl>,
     trace_id: Option<TraceId>,
+    requester: Option<JobRequester>,
+    input_order: Option<InputOrder>,
 }
 
 impl NewJob {
@@ -190,7 +192,27 @@ impl NewJob {
             deadline_at,
             callback: None,
             trace_id: None,
+            requester: None,
+            input_order: None,
         }
+    }
+
+    pub fn with_requester(mut self, id: RequesterId, kind: RequesterType) -> Self {
+        self.requester = Some(JobRequester::new(id, kind));
+        self
+    }
+
+    pub fn with_input_order(mut self, order: InputOrder) -> Self {
+        self.input_order = Some(order);
+        self
+    }
+
+    pub fn requester(&self) -> Option<&JobRequester> {
+        self.requester.as_ref()
+    }
+
+    pub fn input_order(&self) -> Option<&InputOrder> {
+        self.input_order.as_ref()
     }
 
     pub fn with_callback(mut self, callback: QueueUrl) -> Self {
@@ -253,6 +275,8 @@ pub struct JobRecord {
     pub cancel_requested: bool,
     pub callback: Option<QueueUrl>,
     pub trace_id: Option<TraceId>,
+    pub requester: Option<JobRequester>,
+    pub input_order: Option<InputOrder>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,4 +408,133 @@ pub trait JobRepository: Send + Sync {
     ) -> Result<Option<Template>, JobStoreError>;
     async fn list_templates(&self, owner: &UserId) -> Result<Vec<Template>, JobStoreError>;
     async fn delete_template(&self, owner: &UserId, id: TemplateId) -> Result<bool, JobStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequesterType {
+    ChatMessage,
+    CanvasExecutionTask,
+    SeriesEpisode,
+    Studio,
+}
+
+impl RequesterType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequesterType::ChatMessage => "CHAT_MESSAGE",
+            RequesterType::CanvasExecutionTask => "CANVAS_EXECUTION_TASK",
+            RequesterType::SeriesEpisode => "SERIES_EPISODE",
+            RequesterType::Studio => "STUDIO",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, RequesterTypeError> {
+        match value {
+            "CHAT_MESSAGE" => Ok(RequesterType::ChatMessage),
+            "CANVAS_EXECUTION_TASK" => Ok(RequesterType::CanvasExecutionTask),
+            "SERIES_EPISODE" => Ok(RequesterType::SeriesEpisode),
+            "STUDIO" => Ok(RequesterType::Studio),
+            other => Err(RequesterTypeError {
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("requester type {value:?} is not one this service knows")]
+pub struct RequesterTypeError {
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RequesterId(String);
+
+impl RequesterId {
+    pub const MAX_LENGTH: usize = 128;
+
+    pub fn parse(value: &str) -> Result<Self, TextIdError> {
+        Ok(Self(parse_text_id(value, Self::MAX_LENGTH)?))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRequester {
+    id: RequesterId,
+    kind: RequesterType,
+}
+
+impl JobRequester {
+    pub fn new(id: RequesterId, kind: RequesterType) -> Self {
+        Self { id, kind }
+    }
+
+    pub fn id(&self) -> &RequesterId {
+        &self.id
+    }
+
+    pub fn kind(&self) -> RequesterType {
+        self.kind
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum InputOrderError {
+    #[error("an input order is empty")]
+    Empty,
+    #[error("the input order names {position} twice")]
+    Duplicate { position: i32 },
+    #[error("the input order names {count} inputs and the spec has {expected}")]
+    CountMismatch { count: usize, expected: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputOrder {
+    sequence: Vec<i32>,
+}
+
+impl InputOrder {
+    pub fn new(sequence: Vec<i32>) -> Result<Self, InputOrderError> {
+        if sequence.is_empty() {
+            return Err(InputOrderError::Empty);
+        }
+        let mut seen: Vec<i32> = sequence.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        if seen.len() != sequence.len() {
+            let repeated = sequence
+                .iter()
+                .find(|position| {
+                    sequence
+                        .iter()
+                        .filter(|other| **other == **position)
+                        .count()
+                        > 1
+                })
+                .copied()
+                .unwrap_or_default();
+            return Err(InputOrderError::Duplicate { position: repeated });
+        }
+        Ok(Self { sequence })
+    }
+
+    pub fn for_inputs(spec: &OpSpec, sequence: Vec<i32>) -> Result<Self, InputOrderError> {
+        let order = Self::new(sequence)?;
+        let expected = spec.inputs().len();
+        if order.sequence.len() != expected {
+            return Err(InputOrderError::CountMismatch {
+                count: order.sequence.len(),
+                expected,
+            });
+        }
+        Ok(order)
+    }
+
+    pub fn sequence(&self) -> Vec<i32> {
+        self.sequence.clone()
+    }
 }

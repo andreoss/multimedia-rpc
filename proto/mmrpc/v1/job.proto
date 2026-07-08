@@ -42,3 +42,7 @@ message JobOutcome {
   string error_message = 6;
   repeated FileError file_errors = 7;
 }
+
+message InputSequence {
+  repeated int32 sequence = 1;
+}

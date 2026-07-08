@@ -41,6 +41,8 @@ fn record(state: JobState, failure: Option<JobFailure>, result: Option<OpResult>
         cancel_requested: false,
         callback: Some(QueueUrl::new("http://127.0.0.1:9324/queue/results").expect("queue url")),
         trace_id: Some(TraceId::generate()),
+        requester: None,
+        input_order: None,
     }
 }
 

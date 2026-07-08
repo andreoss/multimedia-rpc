@@ -126,6 +126,14 @@ impl MediaJobService for Recorder {
         self.record("render_template", &request);
         Ok(Response::new(v1::RenderTemplateResponse::default()))
     }
+
+    async fn create_upload_target(
+        &self,
+        request: Request<v1::CreateUploadTargetRequest>,
+    ) -> Result<Response<v1::CreateUploadTargetResponse>, Status> {
+        self.record("create_upload_target", &request);
+        Ok(Response::new(v1::CreateUploadTargetResponse::default()))
+    }
 }
 
 fn with_token<T>(message: T, token: Option<&str>) -> Request<T> {

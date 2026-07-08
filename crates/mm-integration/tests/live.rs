@@ -1,5 +1,6 @@
 #![allow(deprecated)]
 use std::env;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -2211,6 +2212,149 @@ async fn a_package_job_reaches_success_through_server_and_worker() {
         .await
         .expect("the init plus its first segment probes");
     assert_eq!(info.video.len(), 1);
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}
+
+fn http_put(url: &str, body: &[u8]) -> u16 {
+    let without_scheme = url.strip_prefix("http://").expect("plain http");
+    let authority = without_scheme.split('/').next().expect("authority");
+    let path = &without_scheme[authority.len()..];
+    let address = authority
+        .to_socket_addrs()
+        .expect("authority resolves")
+        .next()
+        .expect("authority resolves");
+    let mut stream =
+        TcpStream::connect_timeout(&address, Duration::from_secs(10)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let request = format!(
+        "PUT {path} HTTP/1.0\r\nHost: {authority}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).expect("write head");
+    stream.write_all(body).expect("write body");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    let head_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("headers end");
+    String::from_utf8_lossy(&response[..head_end])
+        .lines()
+        .next()
+        .expect("status line")
+        .split_whitespace()
+        .nth(1)
+        .expect("status code")
+        .parse()
+        .expect("status code parses")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_target_lands_bytes_a_job_reads_back() {
+    let _slot = mm_testkit::stack_slot();
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let target = client
+        .create_upload_target(mm_proto::v1::CreateUploadTargetRequest {
+            user_id: "owner-upload".to_string(),
+            expires_seconds: 120,
+        })
+        .await
+        .expect("upload target")
+        .into_inner();
+    assert!(target.upload_url.contains("X-Amz-Signature="));
+    assert!(target.media_id.starts_with("s3://"), "{}", target.media_id);
+
+    let source = fixture("upload-4s.mp4", 4, 30, "mp4");
+    let bytes = std::fs::read(&source).expect("fixture readable");
+    assert_eq!(http_put(&target.upload_url, &bytes), 200);
+
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Probe(
+        mm_domain::ProbeSpec::new(MediaRef::object_uri(&target.media_id).expect("valid media id"))
+            .expect("probe"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-upload".to_string(),
+            idempotency_key: "req-upload".to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create job")
+        .into_inner();
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-upload-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-upload-e2e").unwrap(),
+        staging,
+    );
+    worker_config.reconcile_interval = Duration::from_secs(30);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+
+    let final_job = loop {
+        let job = client
+            .get_job(mm_proto::v1::GetJobRequest {
+                user_id: "owner-upload".to_string(),
+                job_id: created.job_id.clone(),
+            })
+            .await
+            .expect("get succeeds")
+            .into_inner()
+            .job
+            .expect("job present");
+        if job.state() == mm_proto::v1::JobState::Succeeded
+            || job.state() == mm_proto::v1::JobState::Failed
+            || job.state() == mm_proto::v1::JobState::Cancelled
+        {
+            break job;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        final_job.state(),
+        mm_proto::v1::JobState::Succeeded,
+        "the job did not read the uploaded object"
+    );
+    let result = mm_domain::OpResult::try_from(final_job.result.expect("result present"))
+        .expect("result decodes");
+    assert!(matches!(result, mm_domain::OpResult::Probe(_)));
 
     worker.shutdown().await;
     server.shutdown().await;

@@ -264,3 +264,63 @@ async fn wrong_credentials_are_rejected() {
     let result = impostor.ensure_bucket(&fresh_bucket()).await;
     assert!(matches!(result, Err(ObjectStoreError::Backend { .. })));
 }
+
+fn http_put_once(url: &str, body: &[u8], timeout: Duration) -> u16 {
+    let without_scheme = url.strip_prefix("http://").expect("plain http");
+    let authority = without_scheme.split('/').next().expect("authority");
+    let path = &without_scheme[authority.len()..];
+    let address = authority
+        .to_socket_addrs()
+        .expect("authority resolves")
+        .next()
+        .expect("authority resolves");
+    let mut stream = TcpStream::connect_timeout(&address, timeout).expect("connect");
+    stream
+        .set_read_timeout(Some(timeout))
+        .expect("read timeout");
+    let request = format!(
+        "PUT {path} HTTP/1.0\r\nHost: {authority}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).expect("write head");
+    stream.write_all(body).expect("write body");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    let head_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("headers end");
+    let head = String::from_utf8_lossy(&response[..head_end]);
+    head.lines()
+        .next()
+        .expect("status line")
+        .split_whitespace()
+        .nth(1)
+        .expect("status code")
+        .parse()
+        .expect("status code parses")
+}
+
+#[tokio::test]
+async fn a_presigned_put_accepts_a_client_body_without_the_service() {
+    let store = test_store().await;
+    let bucket = shared_bucket(&store).await;
+
+    let key = OutputKey::new(&JobId::generate(), "upload.bin").unwrap();
+    let target = key.clone().into_object(&bucket).unwrap();
+    let payload = deterministic_payload(64 * 1024);
+
+    let url = store
+        .presign_put(&target, Duration::from_secs(120))
+        .await
+        .unwrap();
+    assert!(url.contains("X-Amz-Signature="), "the put is not signed");
+
+    assert_eq!(http_put_once(&url, &payload, Duration::from_secs(10)), 200);
+
+    let read = collect_body(store.get(&target).await.unwrap())
+        .await
+        .unwrap();
+    assert!(read == payload, "the object does not hold the put body");
+    store.delete(&target).await.unwrap();
+}

@@ -121,8 +121,8 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
     let (reporter, health_service) = tonic_health::server::health_reporter();
     let dependencies = Dependencies::new(
         config.repository.clone(),
-        config.store,
-        config.store_probe,
+        config.store.clone(),
+        config.store_probe.clone(),
         config.prober,
         config.check_timeout,
     );
@@ -138,7 +138,12 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
             .add_service(health_service)
             .add_service(MediaJobServiceServer::new(Interceptor::new(
                 config.auth,
-                MediaJobs::new(config.repository, watch),
+                MediaJobs::new(
+                    config.repository,
+                    watch,
+                    config.store,
+                    config.store_probe.bucket().to_string(),
+                ),
             )));
     let server = tokio::spawn(router.serve_with_incoming_shutdown(
         TcpListenerStream::new(listener),

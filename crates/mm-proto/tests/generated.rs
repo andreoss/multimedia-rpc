@@ -95,6 +95,13 @@ impl v1::media_job_service_server::MediaJobService for DummyService {
     ) -> Result<tonic::Response<v1::RenderTemplateResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(""))
     }
+
+    async fn create_upload_target(
+        &self,
+        _request: tonic::Request<v1::CreateUploadTargetRequest>,
+    ) -> Result<tonic::Response<v1::CreateUploadTargetResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
 }
 
 #[test]

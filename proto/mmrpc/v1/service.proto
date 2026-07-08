@@ -18,6 +18,7 @@ service MediaJobService {
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
   rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
   rpc RenderTemplate(RenderTemplateRequest) returns (RenderTemplateResponse);
+  rpc CreateUploadTarget(CreateUploadTargetRequest) returns (CreateUploadTargetResponse);
 }
 
 message CreateJobRequest {
@@ -122,4 +123,14 @@ message RenderTemplateResponse {
   string job_id = 1;
   string request_id = 2;
   bool created = 3;
+}
+
+message CreateUploadTargetRequest {
+  string user_id = 1 [deprecated = true];
+  uint32 expires_seconds = 2;
+}
+
+message CreateUploadTargetResponse {
+  string upload_url = 1;
+  string media_id = 2;
 }

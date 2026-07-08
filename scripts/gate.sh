@@ -3,7 +3,7 @@ set -eu
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-if [ -z "${MM_GATE_SHELL:-}" ]; then
+if [ -z "${MM_GATE_SHELL:-}" ] && [ "${IN_NIX_SHELL:-}" != impure ]; then
     MM_GATE_SHELL=1
     export MM_GATE_SHELL
     exec nix --extra-experimental-features 'nix-command flakes' develop \

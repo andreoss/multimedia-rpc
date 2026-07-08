@@ -1,13 +1,13 @@
 use crate::v1;
 use mm_domain::{
-    BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec, ImageFormat, ImageOp,
-    ImageResult, ImageSpec, InputFailure, InputFailureError, InputSource, JobFailure,
-    JobFailureError, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeId,
+    AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
+    ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputSource,
+    JobFailure, JobFailureError, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeId,
     NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
     OutputProfileError, PackageResult, PackageSpec, ParameterDeclaration, ParameterName,
     ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl, ResizeMode, SourceError,
     StepOutcome, StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
+    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -435,12 +435,41 @@ impl TryFrom<v1::OpResult> for OpResult {
                 required_ref(concat.output)?,
                 concat.duration_seconds,
             )?)),
-            v1::op_result::Op::Probe(probe) => Ok(OpResult::Probe(ProbeResult::new(
-                probe.duration_seconds,
-                probe.video_streams,
-                probe.audio_streams,
-                probe.container,
-            )?)),
+            v1::op_result::Op::Probe(probe) => {
+                let video = probe
+                    .video
+                    .iter()
+                    .map(|stream| {
+                        VideoStreamInfo::new(
+                            stream.codec.clone(),
+                            stream.width,
+                            stream.height,
+                            stream.frame_rate,
+                            stream.rotation,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let audio = probe
+                    .audio
+                    .iter()
+                    .map(|stream| {
+                        AudioStreamInfo::new(
+                            stream.codec.clone(),
+                            stream.sample_rate,
+                            stream.channels,
+                        )
+                    })
+                    .collect();
+                Ok(OpResult::Probe(
+                    ProbeResult::new(
+                        probe.duration_seconds,
+                        probe.video_streams,
+                        probe.audio_streams,
+                        probe.container,
+                    )?
+                    .with_streams(video, audio),
+                ))
+            }
             v1::op_result::Op::Transcode(transcode) => Ok(OpResult::Transcode(
                 TranscodeResult::new(required_ref(transcode.output)?),
             )),
@@ -738,6 +767,26 @@ impl From<&OpResult> for v1::OpResult {
                 video_streams: probe.video_streams(),
                 audio_streams: probe.audio_streams(),
                 container: probe.container().to_string(),
+                video: probe
+                    .video()
+                    .iter()
+                    .map(|stream| v1::VideoStreamInfo {
+                        codec: stream.codec().to_string(),
+                        width: stream.width(),
+                        height: stream.height(),
+                        frame_rate: stream.frame_rate(),
+                        rotation: stream.rotation(),
+                    })
+                    .collect(),
+                audio: probe
+                    .audio()
+                    .iter()
+                    .map(|stream| v1::AudioStreamInfo {
+                        codec: stream.codec().to_string(),
+                        sample_rate: stream.sample_rate(),
+                        channels: stream.channels(),
+                    })
+                    .collect(),
             }),
             OpResult::Transcode(transcode) => v1::op_result::Op::Transcode(v1::TranscodeResult {
                 output: Some(v1::MediaRef::from(transcode.output())),

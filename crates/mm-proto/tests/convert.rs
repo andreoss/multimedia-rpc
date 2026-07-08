@@ -1,10 +1,10 @@
 use mm_domain::{
-    BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec, ImageFormat, ImageOp,
-    ImageResult, ImageSpec, InputSource, JobFailure, MediaRef, MediaRefError, MediaSource, NodeId,
-    NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode, SourceError, StepOutcome,
-    StepState, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec,
-    TrimRange, TrimSpec,
+    AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
+    ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, JobFailure, MediaRef, MediaRefError,
+    MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError,
+    OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode, SourceError,
+    StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
+    TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
 };
 use mm_proto::v1;
 use proptest::prelude::*;
@@ -600,6 +600,24 @@ fn a_cut_an_op_cannot_apply_is_refused_naming_the_op_and_the_field() {
             }
         ),
         "{error}"
+    );
+}
+
+#[test]
+fn a_probe_result_carries_its_streams() {
+    let result = OpResult::Probe(
+        ProbeResult::new(4.0, 1, 1, "mp4".to_string())
+            .unwrap()
+            .with_streams(
+                vec![VideoStreamInfo::new("h264".to_string(), 1280, 720, 30.0, 90).unwrap()],
+                vec![AudioStreamInfo::new("aac".to_string(), 48_000, 2)],
+            ),
+    );
+    let wire = v1::OpResult::from(&result);
+    assert_eq!(OpResult::try_from(wire.clone()).unwrap(), result);
+    assert_eq!(
+        v1::OpResult::from(&OpResult::try_from(wire).unwrap()),
+        v1::OpResult::from(&result)
     );
 }
 

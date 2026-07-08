@@ -150,6 +150,21 @@ fn block_matrix() {
             expected: (None, BlockCode::TooFewInputs),
         },
         Case {
+            name: "resolution mismatch",
+            inputs: vec![
+                input(),
+                InputReport {
+                    video: vec![VideoReport {
+                        width: 1920,
+                        height: 1080,
+                        ..video()
+                    }],
+                    ..input()
+                },
+            ],
+            expected: (None, BlockCode::ResolutionMismatch),
+        },
+        Case {
             name: "total duration too long",
             inputs: vec![
                 InputReport {
@@ -184,28 +199,12 @@ fn warn_matrix() {
     }
     let cases = vec![
         Case {
-            name: "resolution drift",
-            inputs: vec![
-                input(),
-                InputReport {
-                    video: vec![VideoReport {
-                        width: 1920,
-                        height: 1080,
-                        ..video()
-                    }],
-                    ..input()
-                },
-            ],
-            expected: (None, WarnCode::ResolutionDrift),
-        },
-        Case {
             name: "aspect drift",
             inputs: vec![
                 input(),
                 InputReport {
                     video: vec![VideoReport {
-                        width: 1280,
-                        height: 960,
+                        sample_aspect_ratio: Some((4, 3)),
                         ..video()
                     }],
                     ..input()

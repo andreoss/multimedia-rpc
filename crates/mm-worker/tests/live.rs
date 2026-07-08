@@ -380,6 +380,22 @@ async fn a_probe_job_succeeds_with_stream_metadata() {
         "container {}",
         probe.container()
     );
+    let video = probe.video();
+    assert_eq!(video.len(), 1);
+    assert_eq!(video[0].codec(), "h264");
+    assert_eq!(video[0].width(), 1280);
+    assert_eq!(video[0].height(), 720);
+    assert!(
+        (video[0].frame_rate() - 30.0).abs() < 0.5,
+        "frame rate {}",
+        video[0].frame_rate()
+    );
+    assert_eq!(video[0].rotation(), 0);
+    let audio = probe.audio();
+    assert_eq!(audio.len(), 1);
+    assert_eq!(audio[0].codec(), "aac");
+    assert_eq!(audio[0].channels(), 1);
+    assert_eq!(audio[0].sample_rate(), 44_100);
     db.dispose().await;
 }
 

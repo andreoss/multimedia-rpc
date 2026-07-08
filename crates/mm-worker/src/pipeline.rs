@@ -8,13 +8,14 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
-    BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec, ImageFormat as DomainImageFormat,
-    ImageOp, ImageResult, ImageSpec, InputFailure, InputReport, InputSource, JobFailure, JobId,
-    JobRecord, JobRepository, JobState, JobStoreError, MediaRef, NodeOutcome, NodeRef, ObjectBody,
-    ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult,
-    PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode,
-    StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
-    TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
+    AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec,
+    ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputReport,
+    InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError, MediaRef,
+    NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult,
+    OpSpec, OutputKey, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
+    ResizeMode as DomainResizeMode, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
+    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, VideoStreamInfo, WorkerId,
+    resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -1332,13 +1333,39 @@ async fn probe_pipeline(
     check(signal)?;
     let info = probe_input(ctx, &url, 0).await?;
     check(signal)?;
+    let video = info
+        .video
+        .iter()
+        .map(|stream| {
+            VideoStreamInfo::new(
+                stream.codec.clone(),
+                stream.width,
+                stream.height,
+                stream.avg_fps.or(stream.real_fps).unwrap_or(0.0),
+                stream.rotation,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| failed(codes::PROBE_FAILED, error))?;
+    let audio = info
+        .audio
+        .iter()
+        .map(|stream| {
+            AudioStreamInfo::new(
+                stream.codec.clone(),
+                stream.sample_rate.unwrap_or(0),
+                stream.channels,
+            )
+        })
+        .collect();
     let result = ProbeResult::new(
         info.duration.as_secs_f64(),
         stream_count(info.video.len()),
         stream_count(info.audio.len()),
         info.container.clone(),
     )
-    .map_err(|error| failed(codes::PROBE_FAILED, error))?;
+    .map_err(|error| failed(codes::PROBE_FAILED, error))?
+    .with_streams(video, audio);
     Ok(OpResult::Probe(result))
 }
 

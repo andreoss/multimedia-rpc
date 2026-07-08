@@ -2,9 +2,9 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use mm_domain::{
-    JobFailure, JobFailureError, JobId, JobState, JobStoreError, MediaRef, NewJob, OpSpec,
-    PageCursor, ProbeSpec, ProgressError, ProgressPercent, RequestId, TextIdError, TraceId, UserId,
-    WorkerId,
+    InputFailure, InputFailureError, JobFailure, JobFailureError, JobId, JobState, JobStoreError,
+    MediaRef, NewJob, NodeId, OpSpec, PageCursor, ProbeSpec, ProgressError, ProgressPercent,
+    RequestId, TextIdError, TraceId, UserId, WorkerId,
 };
 
 fn sample_spec() -> OpSpec {
@@ -77,6 +77,57 @@ fn job_failure_rejects_bad_code() {
         Err(JobFailureError::Code(TextIdError::ForbiddenCharacter {
             character: ' '
         }))
+    ));
+}
+
+#[test]
+fn a_failure_without_input_failures_carries_none() {
+    let failure = JobFailure::new("merge_failed", "exit status 1").expect("valid failure");
+    assert!(failure.inputs().is_empty());
+}
+
+#[test]
+fn a_job_failure_carries_its_input_failures() {
+    let failure = JobFailure::new("validation_blocked", "input 0: UnsupportedContainer")
+        .expect("valid failure")
+        .with_inputs(vec![
+            InputFailure::new(Some(1), Some("join"), Some(0), "UnsupportedContainer")
+                .expect("valid input failure"),
+            InputFailure::new(None, None, None, "TooFewInputs").expect("valid input failure"),
+        ]);
+
+    assert_eq!(failure.inputs().len(), 2);
+    assert_eq!(failure.inputs()[0].step(), Some(1));
+    assert_eq!(failure.inputs()[0].node().map(NodeId::as_str), Some("join"));
+    assert_eq!(failure.inputs()[0].input(), Some(0));
+    assert_eq!(failure.inputs()[0].code(), "UnsupportedContainer");
+    assert_eq!(failure.inputs()[1].step(), None);
+    assert_eq!(failure.inputs()[1].node(), None);
+    assert_eq!(failure.inputs()[1].input(), None);
+    assert_eq!(failure.inputs()[1].code(), "TooFewInputs");
+}
+
+#[test]
+fn an_input_failure_refuses_a_node_or_code_that_is_not_a_text_id() {
+    assert!(matches!(
+        InputFailure::new(None, Some("join step"), None, "TooFewInputs"),
+        Err(InputFailureError::Node(TextIdError::ForbiddenCharacter {
+            character: ' '
+        }))
+    ));
+    assert!(matches!(
+        InputFailure::new(None, Some(""), None, "TooFewInputs"),
+        Err(InputFailureError::Node(TextIdError::Empty))
+    ));
+    assert!(matches!(
+        InputFailure::new(None, None, None, "two words"),
+        Err(InputFailureError::Code(TextIdError::ForbiddenCharacter {
+            character: ' '
+        }))
+    ));
+    assert!(matches!(
+        InputFailure::new(None, None, None, ""),
+        Err(InputFailureError::Code(TextIdError::Empty))
     ));
 }
 

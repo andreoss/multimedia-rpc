@@ -6,12 +6,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
-    ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputReport,
-    JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError, MediaRef, ObjectBody,
-    ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult,
-    PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    WorkerId, resolve_media_ref, validate_inputs,
+    ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure,
+    InputReport, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError, MediaRef,
+    ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey,
+    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
+    ResizeMode as DomainResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
+    TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, StillInfo, ThumbnailTarget,
@@ -867,10 +867,10 @@ fn gate_verdicts(id: JobId, kind: OpKind, reports: &[InputReport]) -> Result<(),
     let verdicts = validate_inputs(kind, reports);
     let blocking = blocks(&verdicts);
     if !blocking.is_empty() {
-        return Err(failed(
-            codes::VALIDATION_BLOCKED,
-            render_verdicts(&blocking),
-        ));
+        let failure = JobFailure::new(codes::VALIDATION_BLOCKED, &render_verdicts(&blocking))
+            .expect("worker failure codes are valid")
+            .with_inputs(blocking.iter().map(InputFailure::from).collect());
+        return Err(Finish::Failed(failure));
     }
     let warned = warnings(&verdicts);
     if !warned.is_empty() {

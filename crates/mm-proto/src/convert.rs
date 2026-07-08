@@ -1,9 +1,10 @@
 use crate::v1;
 use mm_domain::{
-    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, JobRecord, JobState, MediaRef,
-    MediaRefError, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError,
-    PackageResult, PackageSpec, ProbeResult, ProbeSpec, QueueUrl, ResizeMode, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, parse_rendered_verdicts,
+    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError,
+    JobRecord, JobState, MediaRef, MediaRefError, OpResult, OpResultError, OpSpec, OpSpecError,
+    OutputProfile, OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
+    QueueUrl, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
+    TranscodeSpec, TrimSpec,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -217,20 +218,66 @@ fn spec_inputs(spec: &OpSpec) -> Vec<&MediaRef> {
     }
 }
 
+fn position(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
+}
+
+fn input_failure(failure: &InputFailure) -> v1::FileError {
+    v1::FileError {
+        media_ref: None,
+        code: failure.code().to_string(),
+        step_index: failure.step().map(position),
+        node_id: failure.node().map(|node| node.as_str().to_string()),
+        input_index: failure.input().map(position),
+    }
+}
+
 fn file_errors(record: &JobRecord) -> Vec<v1::FileError> {
     let Some(failure) = &record.failure else {
         return Vec::new();
     };
     let inputs = spec_inputs(&record.spec);
-    parse_rendered_verdicts(failure.message())
-        .into_iter()
-        .map(|(index, code)| v1::FileError {
-            media_ref: index
+    failure
+        .inputs()
+        .iter()
+        .map(|failure| {
+            let mut proto = input_failure(failure);
+            proto.media_ref = failure
+                .input()
                 .and_then(|position| inputs.get(position))
-                .map(|input| v1::MediaRef::from(*input)),
-            code,
+                .map(|input| v1::MediaRef::from(*input));
+            proto
         })
         .collect()
+}
+
+impl TryFrom<&v1::FileError> for InputFailure {
+    type Error = InputFailureError;
+
+    fn try_from(value: &v1::FileError) -> Result<Self, Self::Error> {
+        InputFailure::at_index(
+            value.step_index,
+            value.node_id.as_deref(),
+            value.input_index,
+            &value.code,
+        )
+    }
+}
+
+impl From<&[InputFailure]> for v1::InputFailureList {
+    fn from(value: &[InputFailure]) -> Self {
+        Self {
+            failures: value.iter().map(input_failure).collect(),
+        }
+    }
+}
+
+impl TryFrom<v1::InputFailureList> for Vec<InputFailure> {
+    type Error = InputFailureError;
+
+    fn try_from(value: v1::InputFailureList) -> Result<Self, Self::Error> {
+        value.failures.iter().map(InputFailure::try_from).collect()
+    }
 }
 
 impl From<&JobRecord> for v1::Job {

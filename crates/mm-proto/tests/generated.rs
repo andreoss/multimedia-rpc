@@ -185,7 +185,13 @@ fn file_error_pairs_ref_and_code() {
             r#ref: Some(v1::media_ref::Ref::ObjectUri("s3://b/k".to_string())),
         }),
         code: "NO_VIDEO".to_string(),
+        step_index: Some(1),
+        node_id: Some("join".to_string()),
+        input_index: Some(0),
     };
     let decoded = v1::FileError::decode(error.encode_to_vec().as_slice()).unwrap();
     assert_eq!(decoded.code, "NO_VIDEO");
+    assert_eq!(decoded.step_index, Some(1));
+    assert_eq!(decoded.node_id.as_deref(), Some("join"));
+    assert_eq!(decoded.input_index, Some(0));
 }

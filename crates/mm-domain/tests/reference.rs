@@ -1,4 +1,6 @@
-use mm_domain::{BlockCode, VerdictCode, WarnCode, verdict_code};
+use mm_domain::{
+    BlockCode, InputFailure, JobFailure, VerdictCode, WarnCode, failure_code, verdict_code,
+};
 
 fn all_block_codes() -> Vec<BlockCode> {
     vec![
@@ -93,5 +95,80 @@ fn mapping_a_verdict_twice_changes_nothing() {
         let name = VerdictCode::Block(code).name();
         let once = verdict_code(name.as_str());
         assert_eq!(verdict_code(once), once);
+    }
+}
+
+fn failure(code: &str, inputs: Vec<InputFailure>) -> JobFailure {
+    JobFailure::new(code, "message")
+        .expect("valid failure")
+        .with_inputs(inputs)
+}
+
+fn input(code: &str) -> InputFailure {
+    InputFailure::new(None, None, Some(0), code).expect("valid input failure")
+}
+
+#[test]
+fn every_worker_failure_code_carries_the_reference_vocabulary() {
+    let expected = [
+        ("unsupported_operation", "ERROR_UNSUPPORTED_OPERATION"),
+        ("input_unresolvable", "ERROR_INVALID_MEDIA_ID"),
+        ("probe_failed", "ERROR_FILE_UNREADABLE"),
+        ("validation_blocked", "ERROR_VALIDATION_FAILED"),
+        ("timeout", "ERROR_JOB_TIMEOUT"),
+        ("merge_launch_failed", "ERROR_MEDIACONVERT_SUBMIT_FAILED"),
+        ("merge_failed", "ERROR_MEDIACONVERT_FAILED"),
+        ("output_invalid", "ERROR_FINALIZE_OUTPUT_MISSING"),
+        ("output_upload_failed", "ERROR_ASSET_REGISTRATION_FAILED"),
+        ("image_launch_failed", "ERROR_IMAGE_LAUNCH_FAILED"),
+        ("image_failed", "ERROR_IMAGE_FAILED"),
+        ("package_launch_failed", "ERROR_PACKAGE_LAUNCH_FAILED"),
+        ("package_failed", "ERROR_PACKAGE_FAILED"),
+    ];
+    for (code, reference) in expected {
+        assert_eq!(failure_code(&failure(code, Vec::new())), reference);
+    }
+}
+
+#[test]
+fn a_blocked_validation_carries_the_first_block_of_its_own_inputs() {
+    let blocked = failure(
+        "validation_blocked",
+        vec![input("UnsupportedContainer"), input("TooFewInputs")],
+    );
+    assert_eq!(failure_code(&blocked), "ERROR_UNSUPPORTED_CONTAINER");
+}
+
+#[test]
+fn a_blocked_validation_whose_input_carries_the_reference_code_keeps_it() {
+    let blocked = failure("validation_blocked", vec![input("ERROR_FILE_TOO_LARGE")]);
+    assert_eq!(failure_code(&blocked), "ERROR_FILE_TOO_LARGE");
+}
+
+#[test]
+fn a_code_the_reference_does_not_expose_is_left_alone() {
+    assert_eq!(
+        failure_code(&failure("ERROR_INTERNAL", Vec::new())),
+        "ERROR_INTERNAL"
+    );
+}
+
+#[test]
+fn a_failure_code_nothing_maps_answers_the_reference_catch_all() {
+    assert_eq!(
+        failure_code(&failure("no_such_failure", Vec::new())),
+        "ERROR_INTERNAL"
+    );
+}
+
+#[test]
+fn a_reference_failure_code_fits_the_failure_code_bound() {
+    for code in [
+        "ERROR_UNSUPPORTED_CONTAINER",
+        "ERROR_TOTAL_DURATION_EXCEEDED",
+        "ERROR_MEDIACONVERT_SUBMIT_FAILED",
+        "ERROR_ASSET_REGISTRATION_FAILED",
+    ] {
+        assert!(JobFailure::new(code, "message").is_ok(), "code {code}");
     }
 }

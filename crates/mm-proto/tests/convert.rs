@@ -735,11 +735,26 @@ fn a_batch_result_round_trips_a_success_and_a_failure() {
         ])
         .unwrap(),
     );
+    let read_back = OpResult::Batch(
+        BatchResult::new(vec![
+            StepOutcome::new(
+                0,
+                StepState::Result(OpResult::Probe(
+                    ProbeResult::new(1.0, 1, 1, "mp4".to_string()).unwrap(),
+                )),
+            ),
+            StepOutcome::new(
+                1,
+                StepState::Failure(JobFailure::new("ERROR_FILE_UNREADABLE", "boom").unwrap()),
+            ),
+        ])
+        .unwrap(),
+    );
     let wire = v1::OpResult::from(&result);
-    assert_eq!(OpResult::try_from(wire.clone()).unwrap(), result);
+    assert_eq!(OpResult::try_from(wire.clone()).unwrap(), read_back);
     assert_eq!(
         v1::OpResult::from(&OpResult::try_from(wire).unwrap()),
-        v1::OpResult::from(&result)
+        v1::OpResult::from(&read_back)
     );
 }
 
@@ -786,11 +801,26 @@ fn a_graph_result_round_trips_a_node_and_its_failure() {
         ])
         .unwrap(),
     );
+    let read_back = OpResult::Graph(
+        GraphResult::new(vec![
+            NodeOutcome::new(
+                "source".parse::<NodeId>().unwrap(),
+                StepState::Result(OpResult::Probe(
+                    ProbeResult::new(1.0, 1, 1, "mp4".to_string()).unwrap(),
+                )),
+            ),
+            NodeOutcome::new(
+                "read".parse::<NodeId>().unwrap(),
+                StepState::Failure(JobFailure::new("ERROR_FILE_UNREADABLE", "boom").unwrap()),
+            ),
+        ])
+        .unwrap(),
+    );
     let wire = v1::OpResult::from(&result);
-    assert_eq!(OpResult::try_from(wire.clone()).unwrap(), result);
+    assert_eq!(OpResult::try_from(wire.clone()).unwrap(), read_back);
     assert_eq!(
         v1::OpResult::from(&OpResult::try_from(wire).unwrap()),
-        v1::OpResult::from(&result)
+        v1::OpResult::from(&read_back)
     );
 }
 

@@ -56,6 +56,22 @@ pub mod codes {
     pub const IMAGE_FAILED: &str = "image_failed";
     pub const PACKAGE_LAUNCH_FAILED: &str = "package_launch_failed";
     pub const PACKAGE_FAILED: &str = "package_failed";
+
+    pub const ALL: [&str; 13] = [
+        UNSUPPORTED_OPERATION,
+        INPUT_UNRESOLVABLE,
+        PROBE_FAILED,
+        VALIDATION_BLOCKED,
+        TIMEOUT,
+        MERGE_LAUNCH_FAILED,
+        MERGE_FAILED,
+        OUTPUT_INVALID,
+        OUTPUT_UPLOAD_FAILED,
+        IMAGE_LAUNCH_FAILED,
+        IMAGE_FAILED,
+        PACKAGE_LAUNCH_FAILED,
+        PACKAGE_FAILED,
+    ];
 }
 
 const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;

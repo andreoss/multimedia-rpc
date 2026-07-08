@@ -1297,7 +1297,10 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
     assert_eq!(outcome.job_id, job.id.to_string());
     assert_eq!(outcome.request_id, job.request.to_string());
     assert_eq!(outcome.state, mm_proto::v1::JobState::Failed as i32);
-    assert_eq!(outcome.error_code, codes::VALIDATION_BLOCKED);
+    assert_eq!(
+        outcome.error_code, "ERROR_UNSUPPORTED_CONTAINER",
+        "the published outcome carries the reference vocabulary while the row keeps the worker's code"
+    );
     assert!(outcome.result.is_none());
     assert!(!outcome.file_errors.is_empty());
     assert_eq!(outcome.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER");
@@ -1883,7 +1886,7 @@ async fn a_deadline_reaped_job_still_delivers_one_callback() {
     assert_eq!(record.state, JobState::Failed);
     assert_eq!(outcome.job_id, job.id.to_string());
     assert_eq!(outcome.state, mm_proto::v1::JobState::Failed as i32);
-    assert_eq!(outcome.error_code, codes::TIMEOUT);
+    assert_eq!(outcome.error_code, "ERROR_JOB_TIMEOUT");
     publisher.delete_queue(&queue).await.expect("queue removed");
     db.dispose().await;
 }

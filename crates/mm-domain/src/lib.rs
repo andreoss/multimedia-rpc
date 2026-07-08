@@ -30,7 +30,7 @@ pub use op::{
     ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
     UnsupportedInput, UnsupportedOp, VideoStreamInfo,
 };
-pub use reference::verdict_code;
+pub use reference::{failure_code, verdict_code};
 pub use resolve::{ResolveError, resolve_media_ref};
 
 pub use store::{

@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use mm_domain::{
     CancelNotifications, InputFailure, JobEventNotifications, JobFailure, JobId, JobNotifications,
     JobPage, JobRecord, JobRepository, JobState, JobStoreError, NewJob, OpResult, OpSpec,
-    PageCursor, ProgressPercent, QueueUrl, RequestId, UserId, WorkerId,
+    PageCursor, ParameterDeclaration, ProgressPercent, QueueUrl, RequestId, Template, TemplateId,
+    UserId, WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
@@ -194,6 +195,38 @@ fn corrupt(id: JobId, detail: impl ToString) -> JobStoreError {
 
 fn encode_spec(spec: &OpSpec) -> Vec<u8> {
     mm_proto::v1::OpSpec::from(spec).encode_to_vec()
+}
+
+fn encode_parameters(parameters: &[ParameterDeclaration]) -> Vec<u8> {
+    mm_proto::v1::ParameterDeclarations::from(parameters).encode_to_vec()
+}
+
+#[derive(Debug)]
+struct TemplateRow {
+    id: Uuid,
+    user_id: String,
+    name: String,
+    spec: Vec<u8>,
+    parameters: Vec<u8>,
+}
+
+fn to_template(row: TemplateRow) -> Result<Template, JobStoreError> {
+    let spec = mm_proto::v1::OpSpec::decode(&row.spec[..])
+        .map_err(|error| JobStoreError::Backend(error.to_string()))?;
+    let spec = OpSpec::try_from(spec).map_err(|error| JobStoreError::Backend(error.to_string()))?;
+    let declarations = mm_proto::v1::ParameterDeclarations::decode(&row.parameters[..])
+        .map_err(|error| JobStoreError::Backend(error.to_string()))?;
+    let parameters = Vec::<ParameterDeclaration>::try_from(declarations)
+        .map_err(|error| JobStoreError::Backend(error.to_string()))?;
+    Template::from_parts(
+        TemplateId::from_uuid(row.id).map_err(|error| JobStoreError::Backend(error.to_string()))?,
+        UserId::from_str(&row.user_id)
+            .map_err(|error| JobStoreError::Backend(error.to_string()))?,
+        &row.name,
+        spec,
+        parameters,
+    )
+    .map_err(|error| JobStoreError::Backend(error.to_string()))
 }
 
 fn encode_result(result: &OpResult) -> Vec<u8> {
@@ -781,6 +814,73 @@ impl JobRepository for PgJobRepository {
                 .map_err(backend)?;
         let count = count.unwrap_or_default();
         u64::try_from(count).map_err(|error| JobStoreError::Backend(error.to_string()))
+    }
+
+    async fn create_template(&self, template: Template) -> Result<Template, JobStoreError> {
+        let row = sqlx::query_as!(
+            TemplateRow,
+            "INSERT INTO templates (id, user_id, name, spec, parameters) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (user_id, name) DO NOTHING \
+             RETURNING id, user_id, name, spec, parameters",
+            template.id().as_uuid(),
+            template.owner().as_str(),
+            template.name().as_str(),
+            encode_spec(template.spec()),
+            encode_parameters(template.parameters())
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        match row {
+            Some(row) => to_template(row),
+            None => Err(JobStoreError::TemplateNameTaken {
+                name: template.name().as_str().to_string(),
+            }),
+        }
+    }
+
+    async fn get_template(
+        &self,
+        owner: &UserId,
+        id: TemplateId,
+    ) -> Result<Option<Template>, JobStoreError> {
+        let row = sqlx::query_as!(
+            TemplateRow,
+            "SELECT id, user_id, name, spec, parameters FROM templates \
+             WHERE id = $1 AND user_id = $2",
+            id.as_uuid(),
+            owner.as_str()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        row.map(to_template).transpose()
+    }
+
+    async fn list_templates(&self, owner: &UserId) -> Result<Vec<Template>, JobStoreError> {
+        let rows = sqlx::query_as!(
+            TemplateRow,
+            "SELECT id, user_id, name, spec, parameters FROM templates \
+             WHERE user_id = $1 ORDER BY created_at, id",
+            owner.as_str()
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.into_iter().map(to_template).collect()
+    }
+
+    async fn delete_template(&self, owner: &UserId, id: TemplateId) -> Result<bool, JobStoreError> {
+        let deleted = sqlx::query!(
+            "DELETE FROM templates WHERE id = $1 AND user_id = $2",
+            id.as_uuid(),
+            owner.as_str()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(deleted.rows_affected() > 0)
     }
 
     async fn request_cancel(&self, id: JobId) -> Result<(), JobStoreError> {

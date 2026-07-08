@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use mm_domain::{
     JobEventNotifications, JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
-    OpSpec, ProgressPercent, QueueUrl, RequestId,
+    OpSpec, ParameterDeclaration, ParameterName, ParameterValue, ProgressPercent, QueueUrl,
+    RequestId, Template, TemplateError, TemplateId, render,
 };
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
@@ -216,6 +217,19 @@ fn parse_job_id(value: &str) -> Result<JobId, Status> {
         .map_err(|error| Status::invalid_argument(format!("job_id is invalid: {error}")))
 }
 
+fn parse_template_id(value: &str) -> Result<TemplateId, Status> {
+    TemplateId::from_str(value)
+        .map_err(|error| Status::invalid_argument(format!("template_id is invalid: {error}")))
+}
+
+fn template_failure(error: TemplateError) -> Status {
+    Status::invalid_argument(format!("template is invalid: {error}"))
+}
+
+fn template_not_found() -> Status {
+    Status::not_found("template does not exist")
+}
+
 fn store_failure(error: JobStoreError) -> Status {
     Status::internal(format!("job store failed: {error}"))
 }
@@ -402,5 +416,145 @@ impl MediaJobService for MediaJobs {
             sink,
         ));
         Ok(Response::new(Box::pin(ReceiverStream::new(events))))
+    }
+
+    async fn create_template(
+        &self,
+        request: Request<v1::CreateTemplateRequest>,
+    ) -> Result<Response<v1::CreateTemplateResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
+        let message = request.into_inner();
+        let spec = parse_spec(message.spec)?;
+        let parameters = message
+            .parameters
+            .into_iter()
+            .map(ParameterDeclaration::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(template_failure)?;
+        let template =
+            Template::new(owner, &message.name, spec, parameters).map_err(template_failure)?;
+        let stored = self
+            .repository
+            .create_template(template)
+            .await
+            .map_err(store_failure)?;
+        Ok(Response::new(v1::CreateTemplateResponse {
+            template: Some(v1::Template::from(&stored)),
+        }))
+    }
+
+    async fn get_template(
+        &self,
+        request: Request<v1::GetTemplateRequest>,
+    ) -> Result<Response<v1::GetTemplateResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
+        let message = request.into_inner();
+        let id = parse_template_id(&message.template_id)?;
+        let template = self
+            .repository
+            .get_template(&owner, id)
+            .await
+            .map_err(store_failure)?
+            .ok_or_else(template_not_found)?;
+        Ok(Response::new(v1::GetTemplateResponse {
+            template: Some(v1::Template::from(&template)),
+        }))
+    }
+
+    async fn list_templates(
+        &self,
+        request: Request<v1::ListTemplatesRequest>,
+    ) -> Result<Response<v1::ListTemplatesResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
+        let templates = self
+            .repository
+            .list_templates(&owner)
+            .await
+            .map_err(store_failure)?;
+        Ok(Response::new(v1::ListTemplatesResponse {
+            templates: templates.iter().map(v1::Template::from).collect(),
+        }))
+    }
+
+    async fn delete_template(
+        &self,
+        request: Request<v1::DeleteTemplateRequest>,
+    ) -> Result<Response<v1::DeleteTemplateResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
+        let message = request.into_inner();
+        let id = parse_template_id(&message.template_id)?;
+        let deleted = self
+            .repository
+            .delete_template(&owner, id)
+            .await
+            .map_err(store_failure)?;
+        if !deleted {
+            return Err(template_not_found());
+        }
+        Ok(Response::new(v1::DeleteTemplateResponse { deleted: true }))
+    }
+
+    async fn render_template(
+        &self,
+        request: Request<v1::RenderTemplateRequest>,
+    ) -> Result<Response<v1::RenderTemplateResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
+        let trace = crate::interceptor::trace_of(&request);
+        let message = request.into_inner();
+        let id = parse_template_id(&message.template_id)?;
+        let template = self
+            .repository
+            .get_template(&owner, id)
+            .await
+            .map_err(store_failure)?
+            .ok_or_else(template_not_found)?;
+        let mut values = Vec::with_capacity(message.values.len());
+        for binding in &message.values {
+            let name = binding.name.parse::<ParameterName>().map_err(|error| {
+                Status::invalid_argument(format!("parameter name is invalid: {error}"))
+            })?;
+            let value = binding
+                .value
+                .clone()
+                .ok_or_else(|| Status::invalid_argument("a parameter binding carries no value"))?;
+            let value = ParameterValue::try_from(value).map_err(|error| {
+                Status::invalid_argument(format!("parameter value is invalid: {error}"))
+            })?;
+            values.push((name, value));
+        }
+        let spec = render(&template, &values).map_err(template_failure)?;
+        let request_id = parse_request_id(&message.idempotency_key)?;
+        let callback = parse_callback(message.callback)?;
+        let mut job = NewJob::new(JobId::generate(), owner.clone(), request_id, spec, None)
+            .with_trace_id(trace);
+        if let Some(queue) = callback {
+            job = job.with_callback(queue);
+        }
+        match self.repository.create(job).await {
+            Ok(record) => Ok(Response::new(v1::RenderTemplateResponse {
+                job_id: record.id.to_string(),
+                request_id: record.request.to_string(),
+                created: true,
+            })),
+            Err(JobStoreError::AlreadyExists { existing }) => {
+                let record = self
+                    .repository
+                    .get(existing)
+                    .await
+                    .map_err(store_failure)?
+                    .ok_or_else(|| Status::internal("replayed job disappeared"))?;
+                if record.owner != owner {
+                    return Err(Status::already_exists(
+                        "idempotency key is already in use by another owner",
+                    ));
+                }
+                Ok(Response::new(v1::RenderTemplateResponse {
+                    job_id: record.id.to_string(),
+                    request_id: record.request.to_string(),
+                    created: false,
+                }))
+            }
+            Err(error) => Err(store_failure(error)),
+        }
     }
 }

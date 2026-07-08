@@ -53,7 +53,12 @@ deprecated_owner!(
     v1::GetJobRequest,
     v1::CancelJobRequest,
     v1::ListJobsRequest,
-    v1::WatchJobRequest
+    v1::WatchJobRequest,
+    v1::CreateTemplateRequest,
+    v1::GetTemplateRequest,
+    v1::ListTemplatesRequest,
+    v1::DeleteTemplateRequest,
+    v1::RenderTemplateRequest
 );
 
 #[derive(Clone)]
@@ -248,6 +253,51 @@ impl<T: MediaJobService> MediaJobService for Interceptor<T> {
     ) -> Result<Response<Self::WatchJobStream>, Status> {
         self.inner
             .watch_job(self.identify(request, "watch_job")?)
+            .await
+    }
+
+    async fn create_template(
+        &self,
+        request: Request<v1::CreateTemplateRequest>,
+    ) -> Result<Response<v1::CreateTemplateResponse>, Status> {
+        self.inner
+            .create_template(self.identify(request, "create_template")?)
+            .await
+    }
+
+    async fn get_template(
+        &self,
+        request: Request<v1::GetTemplateRequest>,
+    ) -> Result<Response<v1::GetTemplateResponse>, Status> {
+        self.inner
+            .get_template(self.identify(request, "get_template")?)
+            .await
+    }
+
+    async fn list_templates(
+        &self,
+        request: Request<v1::ListTemplatesRequest>,
+    ) -> Result<Response<v1::ListTemplatesResponse>, Status> {
+        self.inner
+            .list_templates(self.identify(request, "list_templates")?)
+            .await
+    }
+
+    async fn delete_template(
+        &self,
+        request: Request<v1::DeleteTemplateRequest>,
+    ) -> Result<Response<v1::DeleteTemplateResponse>, Status> {
+        self.inner
+            .delete_template(self.identify(request, "delete_template")?)
+            .await
+    }
+
+    async fn render_template(
+        &self,
+        request: Request<v1::RenderTemplateRequest>,
+    ) -> Result<Response<v1::RenderTemplateResponse>, Status> {
+        self.inner
+            .render_template(self.identify(request, "render_template")?)
             .await
     }
 }

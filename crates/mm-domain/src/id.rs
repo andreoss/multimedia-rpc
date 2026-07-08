@@ -222,3 +222,90 @@ impl fmt::Display for TraceId {
         self.0.fmt(f)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TemplateId(Uuid);
+
+pub type TemplateIdError = JobIdError;
+
+impl TemplateId {
+    pub fn generate() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    pub fn from_uuid(value: Uuid) -> Result<Self, TemplateIdError> {
+        JobId::from_uuid(value).map(|id| Self(id.as_uuid()))
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl FromStr for TemplateId {
+    type Err = TemplateIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        JobId::from_str(value).map(|id| Self(id.as_uuid()))
+    }
+}
+
+impl fmt::Display for TemplateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TemplateName(String);
+
+pub type TemplateNameError = TextIdError;
+
+impl TemplateName {
+    pub const MAX_LENGTH: usize = 128;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for TemplateName {
+    type Err = TemplateNameError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_text_id(value, Self::MAX_LENGTH).map(Self)
+    }
+}
+
+impl fmt::Display for TemplateName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ParameterName(String);
+
+pub type ParameterNameError = TextIdError;
+
+impl ParameterName {
+    pub const MAX_LENGTH: usize = 64;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for ParameterName {
+    type Err = ParameterNameError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_text_id(value, Self::MAX_LENGTH).map(Self)
+    }
+}
+
+impl fmt::Display for ParameterName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}

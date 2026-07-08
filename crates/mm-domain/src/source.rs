@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::id::{NodeId, NodeIdError};
+use crate::id::{NodeId, NodeIdError, ParameterName, ParameterNameError};
 use crate::op::{MediaRef, MediaRefError};
 
 const MIN_SPEED: f64 = 0.5;
@@ -29,6 +29,12 @@ pub enum SourceError {
         value: String,
         #[source]
         source: NodeIdError,
+    },
+    #[error("parameter name {value:?} is not valid: {source}")]
+    InvalidParameterName {
+        value: String,
+        #[source]
+        source: ParameterNameError,
     },
     #[error(transparent)]
     MediaRef(#[from] MediaRefError),
@@ -177,20 +183,28 @@ impl NodeRef {
 pub enum InputSource {
     Media(MediaSource),
     Node(NodeRef),
+    Parameter(ParameterName),
 }
 
 impl InputSource {
     pub fn media(&self) -> Option<&MediaSource> {
         match self {
             Self::Media(source) => Some(source),
-            Self::Node(_) => None,
+            Self::Node(_) | Self::Parameter(_) => None,
         }
     }
 
     pub fn node(&self) -> Option<&NodeRef> {
         match self {
             Self::Node(node) => Some(node),
-            Self::Media(_) => None,
+            Self::Media(_) | Self::Parameter(_) => None,
+        }
+    }
+
+    pub fn parameter(&self) -> Option<&ParameterName> {
+        match self {
+            Self::Parameter(name) => Some(name),
+            Self::Media(_) | Self::Node(_) => None,
         }
     }
 
@@ -214,5 +228,11 @@ impl From<MediaSource> for InputSource {
 impl From<NodeRef> for InputSource {
     fn from(node: NodeRef) -> Self {
         Self::Node(node)
+    }
+}
+
+impl From<ParameterName> for InputSource {
+    fn from(name: ParameterName) -> Self {
+        Self::Parameter(name)
     }
 }

@@ -1,7 +1,10 @@
 use crate::callback::QueueUrl;
-use crate::id::{JobId, NodeId, RequestId, TextIdError, TraceId, UserId, WorkerId, parse_text_id};
+use crate::id::{
+    JobId, NodeId, RequestId, TemplateId, TextIdError, TraceId, UserId, WorkerId, parse_text_id,
+};
 use crate::op::{OpResult, OpSpec};
 use crate::state::JobState;
+use crate::template::Template;
 use crate::validate::Verdict;
 use async_trait::async_trait;
 use std::num::NonZeroU32;
@@ -282,6 +285,10 @@ pub enum JobStoreError {
     CorruptRecord { id: JobId, detail: String },
     #[error("job store backend error: {0}")]
     Backend(String),
+    #[error("a template named {name:?} already exists for this owner")]
+    TemplateNameTaken { name: String },
+    #[error("template {id} does not exist")]
+    TemplateNotFound { id: TemplateId },
 }
 
 #[async_trait]
@@ -369,4 +376,12 @@ pub trait JobRepository: Send + Sync {
         limit: NonZeroU32,
     ) -> Result<Vec<JobRecord>, JobStoreError>;
     async fn pending_count(&self) -> Result<u64, JobStoreError>;
+    async fn create_template(&self, template: Template) -> Result<Template, JobStoreError>;
+    async fn get_template(
+        &self,
+        owner: &UserId,
+        id: TemplateId,
+    ) -> Result<Option<Template>, JobStoreError>;
+    async fn list_templates(&self, owner: &UserId) -> Result<Vec<Template>, JobStoreError>;
+    async fn delete_template(&self, owner: &UserId, id: TemplateId) -> Result<bool, JobStoreError>;
 }

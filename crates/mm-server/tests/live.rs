@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mm_domain::{
-    ConcatSpec, JobId, JobRepository, MediaRef, ObjectBody, ObjectRef, ObjectStore,
-    ObjectStoreError, OpSpec, ProgressPercent, TraceId, WorkerId,
+    ConcatSpec, InputSource, JobId, JobRepository, MediaRef, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpSpec, OutputProfile, ParameterName, ProgressPercent, TraceId,
+    TranscodeSpec, WorkerId,
 };
 use mm_ffmpeg::Prober;
 use mm_jobstore::{MIGRATOR, PgJobEventListener, PgJobRepository};
@@ -1422,6 +1423,146 @@ async fn a_node_reference_is_unimplemented_at_submission() {
         .expect_err("a node reference has no producer yet");
     assert_eq!(status.code(), tonic::Code::Unimplemented);
     assert!(status.message().contains("join"), "{:?}", status.message());
+
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+fn template_value(uri: &str) -> v1::ParameterBinding {
+    let media = MediaRef::object_uri(uri).expect("valid uri");
+    v1::ParameterBinding {
+        name: "source".to_string(),
+        value: Some(v1::ParameterValue {
+            value: Some(v1::parameter_value::Value::Uri(v1::MediaRef::from(&media))),
+        }),
+    }
+}
+
+#[tokio::test]
+async fn a_template_renders_into_jobs_and_stays_owner_scoped() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+
+    let source = ParameterName::from_str("source").expect("valid parameter name");
+    let spec = mm_proto::v1::OpSpec::from(&OpSpec::Transcode(
+        TranscodeSpec::new(
+            InputSource::from(source),
+            OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).expect("valid profile"),
+        )
+        .expect("valid transcode spec"),
+    ));
+    let created = client
+        .create_template(v1::CreateTemplateRequest {
+            user_id: "owner-1".to_string(),
+            name: "recipe".to_string(),
+            spec: Some(spec),
+            parameters: vec![v1::ParameterDeclaration {
+                name: "source".to_string(),
+                r#type: v1::ParameterType::Uri as i32,
+            }],
+        })
+        .await
+        .expect("create template")
+        .into_inner();
+    let template = created.template.expect("template present");
+    let template_id = template.template_id.clone();
+
+    let status = client
+        .get_template(v1::GetTemplateRequest {
+            user_id: "owner-2".to_string(),
+            template_id: template_id.clone(),
+        })
+        .await
+        .expect_err("another owner reads NOT_FOUND");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+
+    let first = client
+        .render_template(v1::RenderTemplateRequest {
+            user_id: "owner-1".to_string(),
+            template_id: template_id.clone(),
+            idempotency_key: "render-1".to_string(),
+            values: vec![template_value("s3://media/one.mp4")],
+            callback: None,
+        })
+        .await
+        .expect("first render")
+        .into_inner();
+    let second = client
+        .render_template(v1::RenderTemplateRequest {
+            user_id: "owner-1".to_string(),
+            template_id: template_id.clone(),
+            idempotency_key: "render-2".to_string(),
+            values: vec![template_value("s3://media/two.mp4")],
+            callback: None,
+        })
+        .await
+        .expect("second render")
+        .into_inner();
+    assert_ne!(first.job_id, second.job_id);
+
+    let replay = client
+        .render_template(v1::RenderTemplateRequest {
+            user_id: "owner-1".to_string(),
+            template_id: template_id.clone(),
+            idempotency_key: "render-1".to_string(),
+            values: vec![template_value("s3://media/one.mp4")],
+            callback: None,
+        })
+        .await
+        .expect("replay")
+        .into_inner();
+    assert_eq!(replay.job_id, first.job_id);
+    assert!(!replay.created);
+
+    let wrong = v1::ParameterBinding {
+        name: "source".to_string(),
+        value: Some(v1::ParameterValue {
+            value: Some(v1::parameter_value::Value::Text("not a uri".to_string())),
+        }),
+    };
+    let status = client
+        .render_template(v1::RenderTemplateRequest {
+            user_id: "owner-1".to_string(),
+            template_id: template_id.clone(),
+            idempotency_key: "render-3".to_string(),
+            values: vec![wrong],
+            callback: None,
+        })
+        .await
+        .expect_err("a wrong type is refused");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("source"),
+        "{:?}",
+        status.message()
+    );
+
+    let listed = client
+        .list_templates(v1::ListTemplatesRequest {
+            user_id: "owner-1".to_string(),
+        })
+        .await
+        .expect("list templates")
+        .into_inner();
+    assert_eq!(listed.templates.len(), 1);
+
+    let deleted = client
+        .delete_template(v1::DeleteTemplateRequest {
+            user_id: "owner-1".to_string(),
+            template_id: template_id.clone(),
+        })
+        .await
+        .expect("delete template")
+        .into_inner();
+    assert!(deleted.deleted);
+    let status = client
+        .delete_template(v1::DeleteTemplateRequest {
+            user_id: "owner-2".to_string(),
+            template_id,
+        })
+        .await
+        .expect_err("another owner deletes NOT_FOUND");
+    assert_eq!(status.code(), tonic::Code::NotFound);
 
     handle.shutdown().await;
     db.dispose().await;

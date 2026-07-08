@@ -1226,10 +1226,15 @@ async fn resolve_input(
 ) -> Result<String, Finish> {
     let media = match input.media() {
         Some(source) => source.media().clone(),
-        None => {
-            let node = input.node().expect("an input is a source or a node");
-            resolve_node(scope, node, index)?
-        }
+        None => match input.node() {
+            Some(node) => resolve_node(scope, node, index)?,
+            None => {
+                return Err(failed(
+                    codes::UNSUPPORTED_OPERATION,
+                    format!("input {index}: an unrendered parameter reached the worker"),
+                ));
+            }
+        },
     };
     resolve_media_ref(ctx.store.as_ref(), &media, deadline_at, SystemTime::now())
         .await

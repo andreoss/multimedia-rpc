@@ -60,6 +60,41 @@ impl v1::media_job_service_server::MediaJobService for DummyService {
     ) -> Result<tonic::Response<Self::WatchJobStream>, tonic::Status> {
         Err(tonic::Status::unimplemented(""))
     }
+
+    async fn create_template(
+        &self,
+        _request: tonic::Request<v1::CreateTemplateRequest>,
+    ) -> Result<tonic::Response<v1::CreateTemplateResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
+
+    async fn get_template(
+        &self,
+        _request: tonic::Request<v1::GetTemplateRequest>,
+    ) -> Result<tonic::Response<v1::GetTemplateResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
+
+    async fn list_templates(
+        &self,
+        _request: tonic::Request<v1::ListTemplatesRequest>,
+    ) -> Result<tonic::Response<v1::ListTemplatesResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
+
+    async fn delete_template(
+        &self,
+        _request: tonic::Request<v1::DeleteTemplateRequest>,
+    ) -> Result<tonic::Response<v1::DeleteTemplateResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
+
+    async fn render_template(
+        &self,
+        _request: tonic::Request<v1::RenderTemplateRequest>,
+    ) -> Result<tonic::Response<v1::RenderTemplateResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(""))
+    }
 }
 
 #[test]

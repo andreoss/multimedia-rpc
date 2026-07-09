@@ -1,5 +1,5 @@
 import { connect } from "node:http2";
-import { randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import http from "node:http";
 
 import {
@@ -119,6 +119,65 @@ function decodeList(body) {
     jobs: (fields.get(1) ?? []).map(decodeJobMessage),
     nextPageToken: fields.get(2)?.[0]?.toString("utf8") ?? "",
   };
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function signingKey(secretKey, dateStamp, region) {
+  const date = createHmac("sha256", `AWS4${secretKey}`).update(dateStamp).digest();
+  const place = createHmac("sha256", date).update(region).digest();
+  const service = createHmac("sha256", place).update("s3").digest();
+  return createHmac("sha256", service).update("aws4_request").digest();
+}
+
+function deleteObject(mediaId) {
+  return new Promise((resolve, reject) => {
+    const endpoint = process.env.MM_OBJECTSTORE_ENDPOINT ?? "http://127.0.0.1:8333";
+    const accessKey = process.env.MM_OBJECTSTORE_ACCESS_KEY ?? "mm-test-access";
+    const secretKey = process.env.MM_OBJECTSTORE_SECRET_KEY ?? "mm-test-secret";
+    const region = process.env.MM_OBJECTSTORE_REGION ?? "us-east-1";
+    const rest = mediaId.replace(/^s3:\/\//, "");
+    const slash = rest.indexOf("/");
+    const path = `/${rest.slice(0, slash)}/${rest.slice(slash + 1)}`;
+    const target = new URL(endpoint);
+    const host = target.host;
+    const payloadHash = sha256("");
+    const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+    const dateStamp = amzDate.slice(0, 8);
+    const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+    const canonicalRequest = `DELETE\n${path}\n\nhost:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n\n${signedHeaders}\n${payloadHash}`;
+    const scope = `${dateStamp}/${region}/s3/aws4_request`;
+    const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
+    const signature = createHmac("sha256", signingKey(secretKey, dateStamp, region))
+      .update(stringToSign)
+      .digest("hex");
+    const request = http.request(
+      {
+        host: target.hostname,
+        port: target.port,
+        path,
+        method: "DELETE",
+        headers: {
+          host,
+          "x-amz-content-sha256": payloadHash,
+          "x-amz-date": amzDate,
+          authorization: `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+          connection: "close",
+        },
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => resolve(response.statusCode));
+      },
+    );
+    request.setTimeout(10000, () => {
+      request.destroy(new Error("the delete did not answer within the read budget"));
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 function missingSibling(mediaId) {
@@ -551,6 +610,43 @@ async function run(address) {
     null,
   );
   check("a cursor that is not one is refused", INVALID_ARGUMENT, badToken.status, badToken.message);
+
+  const replayId = randomUUID();
+  const replayMessage = createRequest(
+    videoMergeJob({
+      requestId: replayId,
+      requester: REQUESTER_CHAT_MESSAGE,
+      owner,
+      inputs: [
+        [0, targets[0]],
+        [1, targets[1]],
+      ],
+    }),
+    replayId,
+  );
+  const replayCreated = await call(client, CREATE_PATH, replayMessage, null);
+  check("a job is created before its input is removed", OK, replayCreated.status, replayCreated.message);
+  const replayJobId = decodeCreate(replayCreated.body).jobId;
+  const removed = await deleteObject(targets[0]);
+  check("the input object is removed from the store", 204, removed);
+  const replayAfterRemoval = await call(client, CREATE_PATH, replayMessage, null);
+  check(
+    "a replay after the object is gone is accepted",
+    OK,
+    replayAfterRemoval.status,
+    replayAfterRemoval.message,
+  );
+  const replayedAfterRemoval = decodeCreate(replayAfterRemoval.body);
+  check(
+    "a replay after the object is gone answers the first job",
+    replayJobId,
+    replayedAfterRemoval.jobId,
+  );
+  check(
+    "a replay after the object is gone is not a new job",
+    false,
+    replayedAfterRemoval.created,
+  );
 
   client.close();
   const failed = results.filter((passed) => !passed).length;

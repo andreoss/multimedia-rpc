@@ -310,8 +310,8 @@ fn create_request(user: &str, key: &str) -> v1::CreateJobRequest {
     }
 }
 
-async fn provision_media() {
-    let store = S3ObjectStore::connect(S3Settings {
+async fn media_store() -> S3ObjectStore {
+    S3ObjectStore::connect(S3Settings {
         endpoint: Some(store_endpoint()),
         region: Some("us-east-1".to_string()),
         force_path_style: true,
@@ -320,7 +320,11 @@ async fn provision_media() {
             secret_access_key: env_or("MM_OBJECTSTORE_SECRET_KEY", DEFAULT_SECRET_KEY),
         },
     })
-    .await;
+    .await
+}
+
+async fn provision_media() {
+    let store = media_store().await;
     store.ensure_bucket("media").await.expect("media bucket");
     for key in ["in/a.mp4", "in/b.mp4"] {
         let object = ObjectRef::new("media", key).expect("valid input ref");
@@ -1722,6 +1726,48 @@ async fn the_reference_facade_replays_a_known_request_id() {
     assert!(first.created);
     assert!(!second.created, "a replay answers created=false");
     assert_eq!(first.job_id, second.job_id);
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_replay_over_a_deleted_object_answers_the_stored_job() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+    let store = media_store().await;
+    let key = format!("in/replay-{}.mp4", Uuid::now_v7().simple());
+    let object = ObjectRef::new("media", &key).expect("valid input ref");
+    store
+        .put(&object, body_from_bytes(vec![0u8; 8]), 8)
+        .await
+        .expect("input object lands");
+    let message = vm::CreateJobRequest {
+        job: Some(merge_job(vec![
+            (0, &format!("s3://media/{key}")),
+            (1, "s3://media/in/b.mp4"),
+        ])),
+        idempotency_key: "req-replay-deleted".to_string(),
+        callback: None,
+    };
+
+    let created = client
+        .create_job(message.clone())
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    assert!(created.created);
+    store.delete(&object).await.expect("input object removed");
+
+    let replayed = client
+        .create_job(message)
+        .await
+        .expect("a replay over a deleted object is a no-op")
+        .into_inner();
+    assert!(!replayed.created, "a replay is not a new job");
+    assert_eq!(
+        replayed.job_id, created.job_id,
+        "a replay answers the job already stored"
+    );
 
     handle.shutdown().await;
 }

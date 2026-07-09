@@ -260,6 +260,37 @@ async fn get_is_owner_scoped_only_in_get_owned() {
 }
 
 #[tokio::test]
+async fn find_by_request_resolves_the_owners_job_only() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let record = repo
+        .create(new_job("owner-1", "req-find"))
+        .await
+        .expect("create succeeds");
+    let found = repo
+        .find_by_request(&owner("owner-1"), &request("req-find"))
+        .await
+        .expect("lookup succeeds")
+        .expect("the owner's job resolves");
+    assert_eq!(found.id, record.id);
+    assert!(
+        repo.find_by_request(&owner("owner-2"), &request("req-find"))
+            .await
+            .expect("lookup succeeds")
+            .is_none(),
+        "another owner resolves nothing"
+    );
+    assert!(
+        repo.find_by_request(&owner("owner-1"), &request("req-absent"))
+            .await
+            .expect("lookup succeeds")
+            .is_none(),
+        "an unknown request id resolves nothing"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test]
 async fn list_pages_newest_first_with_keyset_cursor() {
     let db = fresh_db().await;
     let repo = db.repository();

@@ -339,6 +339,11 @@ pub trait JobRepository: Send + Sync {
         owner: &UserId,
         id: JobId,
     ) -> Result<Option<JobRecord>, JobStoreError>;
+    async fn find_by_request(
+        &self,
+        owner: &UserId,
+        request: &RequestId,
+    ) -> Result<Option<JobRecord>, JobStoreError>;
     async fn list(
         &self,
         owner: &UserId,

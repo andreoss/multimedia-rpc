@@ -362,7 +362,7 @@ impl<T: VideoMergeService> VideoMergeService for Interceptor<T> {
     async fn get_job(
         &self,
         request: Request<vm::GetJobRequest>,
-    ) -> Result<Response<vm::GetJobResponse>, Status> {
+    ) -> Result<Response<vm::VideoMergeJob>, Status> {
         self.inner
             .get_job(self.identify(request, "merge_get_job")?)
             .await

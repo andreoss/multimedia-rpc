@@ -9,7 +9,7 @@ use mm_domain::{
 use mm_proto::merge::{self, MergeJobError};
 use mm_proto::vm::v1::{
     CancelJobRequest, CancelJobResponse, CreateJobRequest, CreateJobResponse, GetJobRequest,
-    GetJobResponse, ListUserJobsRequest, ListUserJobsResponse, Requester,
+    ListUserJobsRequest, ListUserJobsResponse, Requester, VideoMergeJob,
     video_merge_service_server::VideoMergeService,
 };
 use tonic::{Request, Response, Status};
@@ -127,7 +127,7 @@ impl VideoMergeService for MergeJobs {
     async fn get_job(
         &self,
         request: Request<GetJobRequest>,
-    ) -> Result<Response<GetJobResponse>, Status> {
+    ) -> Result<Response<VideoMergeJob>, Status> {
         let owner = crate::interceptor::owner_of(&request)?;
         let message = request.into_inner();
         let record = self.owned(&owner, &message.job_id).await?;

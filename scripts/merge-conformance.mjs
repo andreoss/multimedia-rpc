@@ -296,7 +296,7 @@ async function run(address) {
     null,
   );
   check("the owner reads the job", OK, read.status, read.message);
-  const job1 = decodeJobMessage(readFields(read.body.subarray(5)).get(1)[0]);
+  const job1 = decodeJobMessage(read.body.subarray(5));
   check("the job answers its request id", requestId, job1.requestId);
   check("the job answers the requester it was created with", REQUESTER_CHAT_MESSAGE, job1.requester);
   check("the job answers no status while it is unsettled", null, job1.status);
@@ -548,7 +548,7 @@ async function run(address) {
     check(
       "the job answers the frame rate it was created with",
       30,
-      decodeJobMessage(readFields(profileRead.body.subarray(5)).get(1)[0]).frameRate,
+      decodeJobMessage(profileRead.body.subarray(5)).frameRate,
     );
   }
 

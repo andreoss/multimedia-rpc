@@ -130,6 +130,8 @@ jobs:
         run: nix develop -c sh scripts/composition-conformance.sh
       - name: Reference facade conformance
         run: nix develop -c sh scripts/merge-conformance.sh
+      - name: Reference callback conformance
+        run: nix develop -c sh scripts/duration-conformance.sh
 
   coverage:
     runs-on: ubuntu-latest

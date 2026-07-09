@@ -277,6 +277,7 @@ pub struct JobRecord {
     pub trace_id: Option<TraceId>,
     pub requester: Option<JobRequester>,
     pub input_order: Option<InputOrder>,
+    pub duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

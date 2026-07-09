@@ -73,6 +73,7 @@ cargo fmt --all --check
 sh scripts/parity.sh
 sh scripts/auth-conformance.sh
 sh scripts/merge-conformance.sh
+sh scripts/duration-conformance.sh
 sh scripts/stability.sh
 buf lint && buf breaking --against .git#branch=master
 ----

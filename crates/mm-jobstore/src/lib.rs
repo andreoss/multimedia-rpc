@@ -183,6 +183,7 @@ struct JobRow {
     requester_id: Option<String>,
     requester_type: Option<String>,
     input_sequence: Option<Vec<u8>>,
+    output_duration_ms: Option<i64>,
 }
 
 fn backend(error: sqlx::Error) -> JobStoreError {
@@ -356,6 +357,7 @@ fn to_record(row: JobRow) -> Result<JobRecord, JobStoreError> {
             .as_deref()
             .map(|bytes| decode_input_order(id, bytes))
             .transpose()?,
+        duration_ms: row.output_duration_ms,
     })
 }
 
@@ -409,7 +411,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
             job.id().as_uuid(),
             job.owner().as_str(),
             job.request().as_str(),
@@ -449,7 +451,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
              FROM jobs WHERE id = $1",
             id.as_uuid()
         )
@@ -471,7 +473,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
              FROM jobs WHERE id = $1 AND user_id = $2",
             id.as_uuid(),
             owner.as_str()
@@ -494,7 +496,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
              FROM jobs WHERE user_id = $1 AND request_id = $2",
             owner.as_str(),
             request.as_str()
@@ -525,7 +527,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
              FROM jobs \
              WHERE user_id = $1 \
                AND ($2::timestamptz IS NULL \
@@ -584,7 +586,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
             worker.as_str(),
             lease.as_secs_f64(),
             i64::from(limit.get())
@@ -747,7 +749,7 @@ impl JobRepository for PgJobRepository {
     ) -> Result<JobRecord, JobStoreError> {
         let row = sqlx::query_as!(
             JobRow,
-            "UPDATE jobs SET state = 'SUCCEEDED', result = $3, \
+            "UPDATE jobs SET state = 'SUCCEEDED', result = $3, output_duration_ms = $4, \
              progress_percent = 100, finished_at = now(), lease_expires_at = NULL, \
              error_code = NULL, error_message = NULL, input_failures = NULL \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
@@ -755,10 +757,11 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
             id.as_uuid(),
             worker.as_str(),
-            encode_result(&result)
+            encode_result(&result),
+            result.merged_duration_ms()
         )
         .fetch_optional(&self.pool)
         .await
@@ -788,7 +791,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
             id.as_uuid(),
             worker.as_str(),
             failure.code(),
@@ -817,7 +820,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
             id.as_uuid()
         )
         .fetch_optional(&self.pool)
@@ -855,7 +858,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
              FROM jobs \
              WHERE state IN ('SUCCEEDED', 'FAILED', 'CANCELLED') \
                AND callback_queue_url IS NOT NULL \

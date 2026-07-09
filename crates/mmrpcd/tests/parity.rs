@@ -1296,9 +1296,17 @@ async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
         Some(format!("s3://{BUCKET}/jobs/{}/output.mp4", created.job_id).as_str()),
         "the reference half names the object the job landed"
     );
+    let duration_ms = stitch
+        .duration_ms
+        .expect("the reference half names the merged duration");
+    assert!(
+        (duration_ms - 10_000).abs() < 1_000,
+        "the merged duration {duration_ms}ms is not the 6s+4s sum"
+    );
 
     println!(
-        "parity p09 callback-success: pass (one outcome, request req-cb-ok, result key {})",
+        "parity p09 callback-success: pass (one outcome, request req-cb-ok, result key {}, \
+         duration {duration_ms}ms)",
         object.key()
     );
     publisher.delete_queue(&queue).await.expect("queue removed");
@@ -1362,6 +1370,10 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
         "the reference half names the failure the way a reference consumer reads it"
     );
     assert_eq!(stitch.r2_uri, None);
+    assert_eq!(
+        stitch.duration_ms, None,
+        "a blocked job measured no merged duration"
+    );
     assert_eq!(
         stitch.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER",
         "the reference half carries the same file errors"
@@ -1458,6 +1470,10 @@ async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
     assert_eq!(stitch.request_id, "req-parked");
     assert_eq!(stitch.error_code, None);
     assert_eq!(stitch.r2_uri, None);
+    assert_eq!(
+        stitch.duration_ms, None,
+        "a cancelled job measured no merged duration"
+    );
 
     println!(
         "parity p11 pending-cancel-callback: pass (job {} cancelled before any worker \
@@ -1555,6 +1571,10 @@ async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
     assert!(outcome.result.is_none());
     assert_eq!(stitch.status, v1::StitchStatus::Failed as i32);
     assert_eq!(stitch.error_code.as_deref(), Some("ERROR_JOB_TIMEOUT"));
+    assert_eq!(
+        stitch.duration_ms, None,
+        "a reaped job measured no merged duration"
+    );
 
     println!(
         "parity p12 reaped-callback: pass (job {} reaped while pending; one FAILED/timeout \

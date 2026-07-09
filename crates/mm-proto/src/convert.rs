@@ -792,6 +792,7 @@ impl From<&JobRecord> for v1::VideoStitchResult {
                 .as_ref()
                 .map(|failure| failure_code(failure).to_string()),
             file_errors: file_errors(record),
+            duration_ms: record.duration_ms,
         }
     }
 }

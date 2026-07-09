@@ -43,6 +43,7 @@ fn record(state: JobState, failure: Option<JobFailure>, result: Option<OpResult>
         trace_id: Some(TraceId::generate()),
         requester: None,
         input_order: None,
+        duration_ms: None,
     }
 }
 
@@ -309,4 +310,35 @@ fn a_probe_result_publishes_no_output_location() {
         stitch.r2_uri, None,
         "a probe lands no object, so the reference half names none"
     );
+}
+
+#[test]
+fn the_stitch_half_carries_the_merged_duration_the_row_stored() {
+    let result = OpResult::Concat(
+        TimedOutput::new(
+            MediaRef::object_uri("s3://media/jobs/x/output.mp4").expect("valid ref"),
+            10.0,
+        )
+        .expect("valid result"),
+    );
+    let mut sample = record(JobState::Succeeded, None, Some(result));
+    sample.duration_ms = Some(10_000);
+    let stitch = stitch_of(&sample);
+
+    assert_eq!(stitch.duration_ms, Some(10_000));
+    assert_eq!(
+        sample
+            .result
+            .as_ref()
+            .and_then(OpResult::merged_duration_ms),
+        Some(10_000),
+        "the merged duration is the concat's own"
+    );
+}
+
+#[test]
+fn the_stitch_half_omits_a_duration_nothing_measured() {
+    let stitch = stitch_of(&record(JobState::Failed, Some(blocked()), None));
+
+    assert_eq!(stitch.duration_ms, None);
 }

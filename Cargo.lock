@@ -2020,6 +2020,7 @@ dependencies = [
  "mm-domain",
  "proptest",
  "prost",
+ "thiserror",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

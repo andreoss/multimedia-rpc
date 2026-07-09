@@ -17,10 +17,10 @@ pub use id::{
     TraceId, TraceIdError, UserId, UserIdError, WorkerId, WorkerIdError,
 };
 pub use jobs::{
-    CancelNotifications, InputFailure, InputFailureError, InputOrder, InputOrderError,
-    JobEventNotifications, JobFailure, JobFailureError, JobNotifications, JobPage, JobRecord,
-    JobRepository, JobRequester, JobStoreError, NewJob, PageCursor, ProgressError, ProgressPercent,
-    RequesterId, RequesterType, RequesterTypeError,
+    CancelNotifications, InputFailure, InputFailureError, InputMetadata, InputOrder,
+    InputOrderError, JobEventNotifications, JobFailure, JobFailureError, JobNotifications, JobPage,
+    JobRecord, JobRepository, JobRequester, JobStoreError, NewJob, PageCursor, ProgressError,
+    ProgressPercent, RequesterId, RequesterType, RequesterTypeError,
 };
 pub use op::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,

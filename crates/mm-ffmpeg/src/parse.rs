@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -9,7 +9,7 @@ pub enum MediaKind {
     Image,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaInfo {
     pub container: String,
     pub duration: Duration,
@@ -20,7 +20,7 @@ pub struct MediaInfo {
     pub drm: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoStream {
     pub codec: String,
     pub width: u32,
@@ -33,7 +33,7 @@ pub struct VideoStream {
     pub interlaced: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioStream {
     pub codec: String,
     pub channels: u32,
@@ -165,6 +165,16 @@ fn is_encrypted(stream: &RawStream) -> bool {
         .codec_tag_string
         .as_deref()
         .is_some_and(|tag| ENCRYPTED_CODEC_TAGS.contains(&tag))
+}
+
+impl MediaInfo {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
 }
 
 pub fn parse_media_info(json: &str) -> Result<MediaInfo, ParseError> {

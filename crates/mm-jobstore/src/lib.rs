@@ -4,10 +4,11 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use mm_domain::{
-    CancelNotifications, InputFailure, InputOrder, JobEventNotifications, JobFailure, JobId,
-    JobNotifications, JobPage, JobRecord, JobRepository, JobRequester, JobState, JobStoreError,
-    NewJob, OpResult, OpSpec, PageCursor, ParameterDeclaration, ProgressPercent, QueueUrl,
-    RequestId, RequesterId, RequesterType, Template, TemplateId, UserId, WorkerId,
+    CancelNotifications, InputFailure, InputMetadata, InputOrder, JobEventNotifications,
+    JobFailure, JobId, JobNotifications, JobPage, JobRecord, JobRepository, JobRequester, JobState,
+    JobStoreError, MediaRef, NewJob, OpResult, OpSpec, PageCursor, ParameterDeclaration,
+    ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType, Template, TemplateId, UserId,
+    WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
@@ -966,6 +967,38 @@ impl JobRepository for PgJobRepository {
                 .transition_conflict(id, JobState::Cancelled, None)
                 .await);
         }
+        Ok(())
+    }
+
+    async fn input_metadata(
+        &self,
+        media: &MediaRef,
+    ) -> Result<Option<InputMetadata>, JobStoreError> {
+        let row = sqlx::query!(
+            "SELECT metadata FROM input_metadata WHERE media_id = $1",
+            media.to_uri()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(row.map(|row| InputMetadata::from_bytes(row.metadata)))
+    }
+
+    async fn put_input_metadata(
+        &self,
+        media: &MediaRef,
+        metadata: &InputMetadata,
+    ) -> Result<(), JobStoreError> {
+        sqlx::query!(
+            "INSERT INTO input_metadata (media_id, metadata) VALUES ($1, $2) \
+             ON CONFLICT (media_id) DO UPDATE SET metadata = EXCLUDED.metadata, \
+             probed_at = now()",
+            media.to_uri(),
+            metadata.as_bytes()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
         Ok(())
     }
 }

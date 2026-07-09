@@ -6,6 +6,8 @@ use mm_domain::{TraceId, UserId};
 use mm_observability::{Component, record};
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
+use mm_proto::vm::v1 as vm;
+use mm_proto::vm::v1::video_merge_service_server::VideoMergeService;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
@@ -49,6 +51,9 @@ macro_rules! deprecated_owner {
 }
 
 deprecated_owner!(
+    vm::CancelJobRequest,
+    vm::GetJobRequest,
+    vm::ListUserJobsRequest,
     v1::CreateJobRequest,
     v1::GetJobRequest,
     v1::CancelJobRequest,
@@ -61,6 +66,16 @@ deprecated_owner!(
     v1::RenderTemplateRequest,
     v1::CreateUploadTargetRequest
 );
+
+impl DeprecatedOwner for vm::CreateJobRequest {
+    #[allow(deprecated)]
+    fn deprecated_owner(&self) -> &str {
+        self.job
+            .as_ref()
+            .map(|job| job.user_id.as_str())
+            .unwrap_or_default()
+    }
+}
 
 #[derive(Clone)]
 pub enum Auth {
@@ -321,5 +336,44 @@ impl Auth {
             None => Ok(Auth::Open),
             Some(document) => Ok(Auth::verifying(Verifier::from_jwks(document, settings)?)),
         }
+    }
+}
+
+#[tonic::async_trait]
+impl<T: VideoMergeService> VideoMergeService for Interceptor<T> {
+    async fn create_job(
+        &self,
+        request: Request<vm::CreateJobRequest>,
+    ) -> Result<Response<vm::CreateJobResponse>, Status> {
+        self.inner
+            .create_job(self.identify(request, "merge_create_job")?)
+            .await
+    }
+
+    async fn cancel_job(
+        &self,
+        request: Request<vm::CancelJobRequest>,
+    ) -> Result<Response<vm::CancelJobResponse>, Status> {
+        self.inner
+            .cancel_job(self.identify(request, "merge_cancel_job")?)
+            .await
+    }
+
+    async fn get_job(
+        &self,
+        request: Request<vm::GetJobRequest>,
+    ) -> Result<Response<vm::GetJobResponse>, Status> {
+        self.inner
+            .get_job(self.identify(request, "merge_get_job")?)
+            .await
+    }
+
+    async fn list_user_jobs(
+        &self,
+        request: Request<vm::ListUserJobsRequest>,
+    ) -> Result<Response<vm::ListUserJobsResponse>, Status> {
+        self.inner
+            .list_user_jobs(self.identify(request, "merge_list_user_jobs")?)
+            .await
     }
 }

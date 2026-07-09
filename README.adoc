@@ -18,6 +18,11 @@ typed operations, async workers, object storage.
 |`CancelJob` |Cancel a pending or running job.
 |===
 
+`mmrpc.videomerge.v1.VideoMergeService` serves the merge reference's job
+shape over the same store: `CreateJob`, `GetJob`, `CancelJob`,
+`ListUserJobs`, with a requester, ordered input files and an output
+profile on every job.
+
 Operations (`OpSpec` oneof): `probe` inspect, `transcode`, `trim`,
 `thumbnail`, `concat`, `image` resize/convert/composite, `package` HLS.
 Results are object-storage keys; no media bytes cross the API.
@@ -67,6 +72,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 sh scripts/parity.sh
 sh scripts/auth-conformance.sh
+sh scripts/merge-conformance.sh
 sh scripts/stability.sh
 buf lint && buf breaking --against .git#branch=master
 ----

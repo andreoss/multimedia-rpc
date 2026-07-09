@@ -400,6 +400,44 @@ async fn a_probe_job_succeeds_with_stream_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_second_job_reuses_the_probed_input_metadata() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("probe-cache-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/probe-cache-4s.mp4").await;
+    let repository = db.repository();
+    let cache = Arc::new(mm_worker::ProbeCache::new());
+
+    let mut config = base_config(&db, store.clone(), "worker-probe-cache");
+    config.probe_cache = cache.clone();
+    let handle = start(config);
+
+    let first = repository
+        .create(single_input_job(OpSpec::Probe(
+            ProbeSpec::new(input.clone()).expect("a bare reference cuts nothing"),
+        )))
+        .await
+        .unwrap();
+    let first_record = await_terminal(&repository, first.id, Duration::from_secs(60)).await;
+    assert_eq!(first_record.state, JobState::Succeeded);
+
+    let second = repository
+        .create(single_input_job(OpSpec::Probe(
+            ProbeSpec::new(input).expect("a bare reference cuts nothing"),
+        )))
+        .await
+        .unwrap();
+    let second_record = await_terminal(&repository, second.id, Duration::from_secs(60)).await;
+    handle.shutdown().await;
+
+    assert_eq!(second_record.state, JobState::Succeeded);
+    assert_eq!(cache.misses(), 1, "only the first job probed the input");
+    assert_eq!(cache.hits(), 1, "the second job reused the probed metadata");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_transcode_job_succeeds_with_a_verified_output() {
     let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;

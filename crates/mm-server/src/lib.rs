@@ -1,6 +1,7 @@
 mod cursor;
 mod health;
 mod interceptor;
+mod merge;
 mod service;
 
 use std::net::SocketAddr;
@@ -10,6 +11,7 @@ use std::time::Duration;
 use mm_domain::{JobEventNotifications, JobRepository, MediaRefError, ObjectRef, ObjectStore};
 use mm_ffmpeg::Prober;
 use mm_proto::v1::media_job_service_server::MediaJobServiceServer;
+use mm_proto::vm::v1::video_merge_service_server::VideoMergeServiceServer;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -21,6 +23,7 @@ use tonic::transport::Server;
 use mm_observability::{Metrics, Registry};
 
 use health::Dependencies;
+use merge::MergeJobs;
 use service::{MediaJobs, WatchHub};
 
 pub use interceptor::{Auth, Interceptor, Owner};
@@ -133,18 +136,21 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
     ));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let (watch, watch_feed) = WatchHub::start(config.job_events, config.watch_poll_interval);
-    let router =
-        Server::builder()
-            .add_service(health_service)
-            .add_service(MediaJobServiceServer::new(Interceptor::new(
-                config.auth,
-                MediaJobs::new(
-                    config.repository,
-                    watch,
-                    config.store,
-                    config.store_probe.bucket().to_string(),
-                ),
-            )));
+    let router = Server::builder()
+        .add_service(health_service)
+        .add_service(MediaJobServiceServer::new(Interceptor::new(
+            config.auth.clone(),
+            MediaJobs::new(
+                config.repository.clone(),
+                watch,
+                config.store.clone(),
+                config.store_probe.bucket().to_string(),
+            ),
+        )))
+        .add_service(VideoMergeServiceServer::new(Interceptor::new(
+            config.auth,
+            MergeJobs::new(config.repository, config.store),
+        )));
     let server = tokio::spawn(router.serve_with_incoming_shutdown(
         TcpListenerStream::new(listener),
         async move {

@@ -1,5 +1,6 @@
 mod budget;
 mod pipeline;
+mod probe;
 mod report;
 mod retry;
 
@@ -19,6 +20,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 pub use budget::{DiskBudget, admits};
 pub use pipeline::codes;
+pub use probe::ProbeCache;
 pub use report::{blocks, input_report, render_verdicts, still_report, target_profile, warnings};
 pub use retry::{RetryPolicy, is_transient};
 
@@ -48,6 +50,7 @@ pub struct WorkerConfig {
     pub cancellations: Option<Arc<dyn CancelNotifications>>,
     pub callbacks: Option<Arc<dyn CallbackPublisher>>,
     pub metrics: Metrics,
+    pub probe_cache: Arc<ProbeCache>,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -85,6 +88,7 @@ impl WorkerConfig {
             cancellations: None,
             callbacks: None,
             metrics: Registry::new().1,
+            probe_cache: Arc::new(ProbeCache::new()),
             reserved: std::sync::Mutex::new(0),
         }
     }

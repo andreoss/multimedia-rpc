@@ -1748,3 +1748,199 @@ async fn p15_composition_template_renders_and_runs() {
     drop(daemon);
     db.dispose().await;
 }
+
+async fn merge_client(
+    address: SocketAddr,
+) -> mm_proto::vm::v1::video_merge_service_client::VideoMergeServiceClient<Channel> {
+    let channel = Endpoint::from_shared(format!("http://{address}"))
+        .expect("valid endpoint")
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .connect()
+        .await
+        .expect("dial announced address");
+    mm_proto::vm::v1::video_merge_service_client::VideoMergeServiceClient::new(channel)
+}
+
+fn merge_job(inputs: &[String], owner: &str, request_id: &str) -> mm_proto::vm::v1::VideoMergeJob {
+    mm_proto::vm::v1::VideoMergeJob {
+        job_id: String::new(),
+        request_id: request_id.to_string(),
+        requester: mm_proto::vm::v1::Requester::CanvasExecutionTask as i32,
+        user_id: owner.to_string(),
+        status: None,
+        input_files: inputs
+            .iter()
+            .enumerate()
+            .map(|(position, uri)| mm_proto::vm::v1::InputFile {
+                sequence_order: position as i32,
+                media_id: uri.clone(),
+            })
+            .collect(),
+        created_at_millis: 0,
+        error_code: None,
+        file_errors: Vec::new(),
+        output: None,
+        r2_uri: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p16_reference_facade_answers_the_reference_job_shape() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let first = fixture("merge-facade-a-4s.mp4", 4, 30, "mp4");
+    let second = fixture("merge-facade-b-3s.mp4", 3, 30, "mp4");
+    let inputs = vec![
+        upload_input(&store, &first, "inputs/p16-a.mp4").await,
+        upload_input(&store, &second, "inputs/p16-b.mp4").await,
+    ];
+    let mut daemon = spawn_daemon(&db.url, "parity-p16", &[]);
+    let address = announced_address(&mut daemon).await;
+    let mut client = merge_client(address).await;
+
+    let created = client
+        .create_job(mm_proto::vm::v1::CreateJobRequest {
+            job: Some(merge_job(&inputs, "owner-p16", "req-p16")),
+            idempotency_key: "req-p16".to_string(),
+            callback: None,
+        })
+        .await
+        .expect("the reference create is accepted")
+        .into_inner();
+    assert!(created.created, "the first call inserted the job");
+    assert!(
+        created.created_at_millis > 0,
+        "the reference answers created_at"
+    );
+
+    let settled = await_terminal(
+        &mut unary_client(address).await,
+        "owner-p16",
+        &created.job_id,
+        Duration::from_secs(90),
+    )
+    .await;
+    assert_eq!(settled.state(), v1::JobState::Succeeded);
+
+    let read = client
+        .get_job(mm_proto::vm::v1::GetJobRequest {
+            job_id: created.job_id.clone(),
+            user_id: "owner-p16".to_string(),
+        })
+        .await
+        .expect("get succeeds")
+        .into_inner()
+        .job
+        .expect("the reference answers the job");
+    assert_eq!(read.request_id, "req-p16");
+    assert_eq!(
+        read.requester,
+        mm_proto::vm::v1::Requester::CanvasExecutionTask as i32
+    );
+    assert_eq!(
+        read.status,
+        Some(v1::StitchStatus::Completed as i32),
+        "a settled job answers the reference status"
+    );
+    assert_eq!(
+        read.input_files
+            .iter()
+            .map(|file| file.media_id.as_str())
+            .collect::<Vec<_>>(),
+        inputs,
+        "the inputs read back in the order they were named"
+    );
+    let output = read
+        .r2_uri
+        .expect("a completed merge answers its output location");
+    let (bucket, key) = output
+        .strip_prefix(&format!("s3://{BUCKET}/"))
+        .map(|key| (BUCKET.to_string(), key.to_string()))
+        .unwrap_or_else(|| panic!("the output location names this store: {output}"));
+    let size = store
+        .head(&ObjectRef::new(&bucket, &key).expect("valid object ref"))
+        .await
+        .expect("the named location holds the merge");
+    assert!(size > 0);
+
+    let page = client
+        .list_user_jobs(mm_proto::vm::v1::ListUserJobsRequest {
+            user_id: "owner-p16".to_string(),
+            statuses: vec![v1::StitchStatus::Completed as i32],
+            requester: None,
+            page_size: 10,
+            page_token: String::new(),
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert_eq!(page.jobs.len(), 1);
+    assert_eq!(page.jobs[0].job_id, created.job_id);
+    assert_eq!(page.next_page_token, "");
+
+    let foreign = client
+        .get_job(mm_proto::vm::v1::GetJobRequest {
+            job_id: created.job_id.clone(),
+            user_id: "intruder-p16".to_string(),
+        })
+        .await
+        .expect_err("a foreign job reads as missing");
+    assert_eq!(foreign.code(), Code::NotFound);
+
+    let duplicate = client
+        .create_job(mm_proto::vm::v1::CreateJobRequest {
+            job: Some(mm_proto::vm::v1::VideoMergeJob {
+                input_files: vec![
+                    mm_proto::vm::v1::InputFile {
+                        sequence_order: 0,
+                        media_id: inputs[0].clone(),
+                    },
+                    mm_proto::vm::v1::InputFile {
+                        sequence_order: 0,
+                        media_id: inputs[1].clone(),
+                    },
+                ],
+                ..merge_job(&inputs, "owner-p16", "req-p16-dup")
+            }),
+            idempotency_key: "req-p16-dup".to_string(),
+            callback: None,
+        })
+        .await
+        .expect_err("a repeated sequence order is refused");
+    assert_eq!(duplicate.code(), Code::InvalidArgument);
+
+    let replay = client
+        .create_job(mm_proto::vm::v1::CreateJobRequest {
+            job: Some(merge_job(&inputs, "owner-p16", "req-p16")),
+            idempotency_key: "req-p16".to_string(),
+            callback: None,
+        })
+        .await
+        .expect("the replay is accepted")
+        .into_inner();
+    assert!(!replay.created, "a replay answers created=false");
+    assert_eq!(replay.job_id, created.job_id);
+
+    let cancelled = client
+        .cancel_job(mm_proto::vm::v1::CancelJobRequest {
+            job_id: created.job_id.clone(),
+            user_id: "owner-p16".to_string(),
+        })
+        .await
+        .expect("cancel succeeds")
+        .into_inner();
+    assert_eq!(
+        cancelled.status,
+        v1::StitchStatus::Completed as i32,
+        "a settled job keeps its own status"
+    );
+
+    println!(
+        "parity p16 reference facade: pass (created_at {} requester CANVAS_EXECUTION_TASK status COMPLETED r2_uri {output})",
+        created.created_at_millis
+    );
+    drop(daemon);
+    db.dispose().await;
+}

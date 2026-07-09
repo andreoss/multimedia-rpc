@@ -393,7 +393,7 @@ impl MediaJobService for MediaJobs {
         let cursor = parse_page_token(&message.page_token)?;
         let page = self
             .repository
-            .list(&owner, &states, limit, cursor)
+            .list(&owner, &states, limit, cursor, None)
             .await
             .map_err(store_failure)?;
         Ok(Response::new(v1::ListJobsResponse {

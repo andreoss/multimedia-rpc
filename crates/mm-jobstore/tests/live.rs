@@ -280,7 +280,7 @@ async fn list_pages_newest_first_with_keyset_cursor() {
     let mut cursor = None;
     loop {
         let page = repo
-            .list(&owner("owner-1"), &[], limit(2), cursor)
+            .list(&owner("owner-1"), &[], limit(2), cursor, None)
             .await
             .expect("list succeeds");
         seen.extend(page.jobs.iter().map(|job| job.id));
@@ -311,7 +311,13 @@ async fn list_filters_by_requested_states() {
         .await
         .expect("cancel succeeds");
     let only_cancelled = repo
-        .list(&owner("owner-1"), &[JobState::Cancelled], limit(10), None)
+        .list(
+            &owner("owner-1"),
+            &[JobState::Cancelled],
+            limit(10),
+            None,
+            None,
+        )
         .await
         .expect("list succeeds");
     assert_eq!(
@@ -323,7 +329,13 @@ async fn list_filters_by_requested_states() {
         vec![cancelled]
     );
     let only_pending = repo
-        .list(&owner("owner-1"), &[JobState::Pending], limit(10), None)
+        .list(
+            &owner("owner-1"),
+            &[JobState::Pending],
+            limit(10),
+            None,
+            None,
+        )
         .await
         .expect("list succeeds");
     assert_eq!(only_pending.jobs.len(), 2);
@@ -332,6 +344,7 @@ async fn list_filters_by_requested_states() {
             &owner("owner-1"),
             &[JobState::Pending, JobState::Cancelled],
             limit(10),
+            None,
             None,
         )
         .await
@@ -1374,7 +1387,7 @@ async fn a_job_keeps_the_trace_it_was_created_under() {
         .expect("claim succeeds");
     assert_eq!(claimed[0].trace_id, Some(trace));
     let page = repository
-        .list(&owner("owner-trace"), &[], limit(10), None)
+        .list(&owner("owner-trace"), &[], limit(10), None, None)
         .await
         .expect("list succeeds");
     assert_eq!(page.jobs[0].trace_id, Some(trace));

@@ -345,6 +345,7 @@ pub trait JobRepository: Send + Sync {
         states: &[JobState],
         limit: NonZeroU32,
         cursor: Option<PageCursor>,
+        requester: Option<RequesterType>,
     ) -> Result<JobPage, JobStoreError>;
     async fn claim(
         &self,

@@ -7,18 +7,24 @@ export const LIST_PATH = "/mmrpc.v1.MediaJobService/ListJobs";
 export const OK = 0;
 export const NOT_FOUND = 5;
 export const ALREADY_EXISTS = 6;
+export const FAILED_PRECONDITION = 9;
 export const UNAUTHENTICATED = 16;
+export const INVALID_ARGUMENT = 3;
+export const UNIMPLEMENTED = 12;
 
 export function varint(value) {
   let remaining = BigInt(value);
   const bytes = [];
-  while (remaining > 0n) {
+  for (;;) {
     let byte = Number(remaining & 0x7fn);
     remaining >>= 7n;
     if (remaining > 0n) {
       byte |= 0x80;
     }
     bytes.push(byte);
+    if (remaining === 0n) {
+      break;
+    }
   }
   return Buffer.from(bytes);
 }
@@ -69,6 +75,8 @@ export function readFields(buffer) {
       existing.push(value.value);
       fields.set(field, existing);
       index = value.index;
+    } else if (wire === 1 || wire === 5) {
+      index += wire === 1 ? 8 : 4;
     } else {
       throw new Error(`unsupported wire type ${wire}`);
     }
@@ -76,8 +84,12 @@ export function readFields(buffer) {
   return fields;
 }
 
+export function mediaSource(uri) {
+  return messageField(1, messageField(1, stringField(1, uri)));
+}
+
 export function probeSpec(uri) {
-  return messageField(2, messageField(1, stringField(1, uri)));
+  return messageField(2, messageField(1, mediaSource(uri)));
 }
 
 export function createRequest(bodyOwner, idempotencyKey, uri) {
@@ -151,10 +163,16 @@ export function statusName(status) {
   switch (status) {
     case OK:
       return "OK";
+    case INVALID_ARGUMENT:
+      return "INVALID_ARGUMENT";
     case NOT_FOUND:
       return "NOT_FOUND";
     case ALREADY_EXISTS:
       return "ALREADY_EXISTS";
+    case FAILED_PRECONDITION:
+      return "FAILED_PRECONDITION";
+    case UNIMPLEMENTED:
+      return "UNIMPLEMENTED";
     case UNAUTHENTICATED:
       return "UNAUTHENTICATED";
     default:

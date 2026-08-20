@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 use mm_domain::{
     ConcatSpec, InputSource, JobId, JobRepository, MediaRef, ObjectBody, ObjectRef, ObjectStore,
     ObjectStoreError, OpSpec, OutputProfile, ParameterName, ProgressPercent, TraceId,
-    TranscodeSpec, WorkerId,
+    TranscodeSpec, WorkerId, body_from_bytes,
 };
 use mm_ffmpeg::Prober;
 use mm_jobstore::{MIGRATOR, PgJobEventListener, PgJobRepository};
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_client::MediaJobServiceClient;
+use mm_proto::vm::v1 as vm;
 use mm_server::{ServerConfig, ServerHandle};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use sqlx::PgPool;
@@ -309,8 +310,30 @@ fn create_request(user: &str, key: &str) -> v1::CreateJobRequest {
     }
 }
 
+async fn provision_media() {
+    let store = S3ObjectStore::connect(S3Settings {
+        endpoint: Some(store_endpoint()),
+        region: Some("us-east-1".to_string()),
+        force_path_style: true,
+        credentials: CredentialSource::Static {
+            access_key_id: env_or("MM_OBJECTSTORE_ACCESS_KEY", DEFAULT_ACCESS_KEY),
+            secret_access_key: env_or("MM_OBJECTSTORE_SECRET_KEY", DEFAULT_SECRET_KEY),
+        },
+    })
+    .await;
+    store.ensure_bucket("media").await.expect("media bucket");
+    for key in ["in/a.mp4", "in/b.mp4"] {
+        let object = ObjectRef::new("media", key).expect("valid input ref");
+        store
+            .put(&object, body_from_bytes(vec![0u8; 8]), 8)
+            .await
+            .expect("input object lands");
+    }
+}
+
 async fn healthy_server() -> (TestDb, ServerHandle) {
     let db = fresh_db().await;
+    provision_media().await;
     let store = store_at(&store_endpoint()).await;
     let handle = start_server(test_config(db.repository(), store, Prober::default())).await;
     (db, handle)
@@ -1566,4 +1589,487 @@ async fn a_template_renders_into_jobs_and_stays_owner_scoped() {
 
     handle.shutdown().await;
     db.dispose().await;
+}
+
+async fn merge_client(
+    handle: &ServerHandle,
+) -> mm_proto::vm::v1::video_merge_service_client::VideoMergeServiceClient<tonic::transport::Channel>
+{
+    let channel = Endpoint::from_shared(format!("http://{}", handle.local_addr()))
+        .expect("valid endpoint")
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .connect()
+        .await
+        .expect("dial announced address");
+    mm_proto::vm::v1::video_merge_service_client::VideoMergeServiceClient::new(channel)
+}
+
+fn merge_job(order: Vec<(i32, &str)>) -> vm::VideoMergeJob {
+    vm::VideoMergeJob {
+        job_id: String::new(),
+        request_id: "req-merge-1".to_string(),
+        requester: vm::Requester::ChatMessage as i32,
+        status: None,
+        input_files: order
+            .into_iter()
+            .map(|(sequence_order, media_id)| vm::InputFile {
+                sequence_order,
+                media_id: media_id.to_string(),
+            })
+            .collect(),
+        created_at_millis: 0,
+        error_code: None,
+        file_errors: Vec::new(),
+        output: None,
+        r2_uri: None,
+        user_id: "owner-merge".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn the_reference_facade_creates_reads_and_lists_a_job() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let created = client
+        .create_job(vm::CreateJobRequest {
+            job: Some(merge_job(vec![
+                (1, "s3://media/in/b.mp4"),
+                (0, "s3://media/in/a.mp4"),
+            ])),
+            idempotency_key: "req-merge-1".to_string(),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+
+    assert!(created.created, "the first call inserted the job");
+    assert_eq!(created.request_id, "req-merge-1");
+    assert!(
+        created.created_at_millis > 0,
+        "the reference answers created_at"
+    );
+
+    let read = client
+        .get_job(vm::GetJobRequest {
+            job_id: created.job_id.clone(),
+            user_id: "owner-merge".to_string(),
+        })
+        .await
+        .expect("get succeeds")
+        .into_inner()
+        .job
+        .expect("the reference answers the job");
+
+    assert_eq!(read.request_id, "req-merge-1");
+    assert_eq!(read.requester, vm::Requester::ChatMessage as i32);
+    assert_eq!(
+        read.status, None,
+        "a job that has not settled answers no status"
+    );
+    assert_eq!(
+        read.input_files
+            .iter()
+            .map(|file| file.sequence_order)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "the stored order is the one the caller named"
+    );
+    assert_eq!(read.input_files[0].media_id, "s3://media/in/a.mp4");
+
+    let page = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-merge".to_string(),
+            page_size: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert_eq!(page.jobs.len(), 1);
+    assert_eq!(page.jobs[0].job_id, created.job_id);
+    assert_eq!(page.next_page_token, "");
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_reference_facade_replays_a_known_request_id() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let message = vm::CreateJobRequest {
+        job: Some(merge_job(vec![
+            (0, "s3://media/in/a.mp4"),
+            (1, "s3://media/in/b.mp4"),
+        ])),
+        idempotency_key: "req-merge-replay".to_string(),
+        callback: None,
+    };
+    let first = client
+        .create_job(message.clone())
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let second = client
+        .create_job(message)
+        .await
+        .expect("replay succeeds")
+        .into_inner();
+
+    assert!(first.created);
+    assert!(!second.created, "a replay answers created=false");
+    assert_eq!(first.job_id, second.job_id);
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_missing_object_is_refused_before_the_job_is_accepted() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let answer = client
+        .create_job(vm::CreateJobRequest {
+            job: Some(merge_job(vec![
+                (0, "s3://media/in/a.mp4"),
+                (1, "s3://media/in/missing.mp4"),
+            ])),
+            idempotency_key: "req-merge-missing".to_string(),
+            callback: None,
+        })
+        .await
+        .expect_err("an absent input is refused before the job is accepted");
+
+    assert_eq!(answer.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        answer.message().contains("missing.mp4"),
+        "{}",
+        answer.message()
+    );
+
+    let page = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-merge".to_string(),
+            page_size: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert!(
+        page.jobs.is_empty(),
+        "a job naming an absent input never reaches PENDING"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_repeated_sequence_order_is_refused_by_the_facade() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let answer = client
+        .create_job(vm::CreateJobRequest {
+            job: Some(merge_job(vec![
+                (1, "s3://media/in/a.mp4"),
+                (1, "s3://media/in/b.mp4"),
+            ])),
+            idempotency_key: "req-merge-dup".to_string(),
+            callback: None,
+        })
+        .await
+        .expect_err("a repeated sequence order is refused");
+
+    assert_eq!(answer.code(), tonic::Code::InvalidArgument);
+    assert!(
+        answer.message().contains("sequence order"),
+        "{}",
+        answer.message()
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_foreign_or_absent_job_is_not_found_on_the_facade() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let absent = client
+        .get_job(vm::GetJobRequest {
+            job_id: mm_domain::JobId::generate().to_string(),
+            user_id: "owner-merge".to_string(),
+        })
+        .await
+        .expect_err("an absent job is not found");
+    assert_eq!(absent.code(), tonic::Code::NotFound);
+
+    let created = client
+        .create_job(vm::CreateJobRequest {
+            job: Some(vm::VideoMergeJob {
+                request_id: "req-foreign".to_string(),
+                user_id: "owner-merge".to_string(),
+                ..merge_job(vec![(0, "s3://media/in/a.mp4"), (1, "s3://media/in/b.mp4")])
+            }),
+            idempotency_key: "req-foreign".to_string(),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+
+    let foreign = client
+        .get_job(vm::GetJobRequest {
+            job_id: created.job_id.clone(),
+            user_id: "owner-other".to_string(),
+        })
+        .await
+        .expect_err("another owner's job reads as missing");
+    assert_eq!(
+        foreign.code(),
+        tonic::Code::NotFound,
+        "a foreign job is reported the same way an absent one is"
+    );
+
+    let foreign_list = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-other".to_string(),
+            page_size: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert!(foreign_list.jobs.is_empty(), "another owner lists nothing");
+
+    let cancelled = client
+        .cancel_job(vm::CancelJobRequest {
+            job_id: created.job_id.clone(),
+            user_id: "owner-other".to_string(),
+        })
+        .await
+        .expect_err("another owner's job cannot be cancelled");
+    assert_eq!(cancelled.code(), tonic::Code::NotFound);
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_reference_facade_answers_the_output_profile_it_accepted() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let created = client
+        .create_job(vm::CreateJobRequest {
+            job: Some(vm::VideoMergeJob {
+                request_id: "req-profile".to_string(),
+                output: Some(vm::OutputProfile {
+                    frame_rate: Some(30),
+                    video_max_bitrate: Some(8_000_000),
+                    video_qvbr_quality: None,
+                    audio_bitrate: None,
+                    audio_sample_rate: None,
+                }),
+                ..merge_job(vec![(0, "s3://media/in/a.mp4"), (1, "s3://media/in/b.mp4")])
+            }),
+            idempotency_key: "req-profile".to_string(),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+
+    let read = client
+        .get_job(vm::GetJobRequest {
+            job_id: created.job_id,
+            user_id: "owner-merge".to_string(),
+        })
+        .await
+        .expect("get succeeds")
+        .into_inner()
+        .job
+        .expect("the reference answers the job");
+
+    let output = read
+        .output
+        .expect("the reference answers the output profile");
+    assert_eq!(output.frame_rate, Some(30));
+    assert_eq!(output.video_max_bitrate, Some(8_000_000));
+    assert_eq!(output.audio_bitrate, None, "an unset field stays unset");
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_requester_filter_matches_the_requester_type() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let created = client
+        .create_job(vm::CreateJobRequest {
+            job: Some(vm::VideoMergeJob {
+                job_id: String::new(),
+                request_id: "req-filter".to_string(),
+                requester: vm::Requester::ChatMessage as i32,
+                user_id: "owner-merge".to_string(),
+                status: None,
+                input_files: vec![
+                    vm::InputFile {
+                        sequence_order: 0,
+                        media_id: "s3://media/in/a.mp4".to_string(),
+                    },
+                    vm::InputFile {
+                        sequence_order: 1,
+                        media_id: "s3://media/in/b.mp4".to_string(),
+                    },
+                ],
+                created_at_millis: 0,
+                error_code: Some(String::new()),
+                file_errors: vec![],
+                output: None,
+                r2_uri: None,
+            }),
+            idempotency_key: "idem-filter".to_string(),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    assert!(created.created);
+
+    let filtered = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-merge".to_string(),
+            page_size: 10,
+            requester: Some(vm::Requester::ChatMessage as i32),
+            ..Default::default()
+        })
+        .await
+        .expect("list with matching requester succeeds")
+        .into_inner();
+    assert_eq!(filtered.jobs.len(), 1);
+    assert_eq!(filtered.jobs[0].job_id, created.job_id);
+
+    let not_matching = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-merge".to_string(),
+            page_size: 10,
+            requester: Some(vm::Requester::Studio as i32),
+            ..Default::default()
+        })
+        .await
+        .expect("list with non-matching requester succeeds")
+        .into_inner();
+    assert_eq!(not_matching.jobs.len(), 0);
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_status_filter_the_reference_cannot_express_is_refused() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let answer = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-merge".to_string(),
+            page_size: 10,
+            statuses: vec![v1::StitchStatus::Unspecified as i32],
+            ..Default::default()
+        })
+        .await
+        .expect_err("an unsettled status is not a filter");
+
+    assert_eq!(answer.code(), tonic::Code::InvalidArgument);
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_reference_facade_cancels_a_job_and_answers_its_status() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    let created = client
+        .create_job(vm::CreateJobRequest {
+            job: Some(vm::VideoMergeJob {
+                request_id: "req-cancel".to_string(),
+                ..merge_job(vec![(0, "s3://media/in/a.mp4"), (1, "s3://media/in/b.mp4")])
+            }),
+            idempotency_key: "req-cancel".to_string(),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+
+    let cancelled = client
+        .cancel_job(vm::CancelJobRequest {
+            job_id: created.job_id.clone(),
+            user_id: "owner-merge".to_string(),
+        })
+        .await
+        .expect("cancel succeeds")
+        .into_inner();
+
+    assert!(cancelled.cancellation_accepted);
+    assert_eq!(cancelled.job_id, created.job_id);
+    assert_eq!(
+        cancelled.status,
+        v1::StitchStatus::Unspecified as i32,
+        "a job that has not settled answers no status"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_page_token_from_the_facade_pages_the_list() {
+    let (_db, handle) = healthy_server().await;
+    let mut client = merge_client(&handle).await;
+
+    for index in 0..3 {
+        client
+            .create_job(vm::CreateJobRequest {
+                job: Some(vm::VideoMergeJob {
+                    request_id: format!("req-page-{index}"),
+                    user_id: "owner-merge".to_string(),
+                    ..merge_job(vec![(0, "s3://media/in/a.mp4"), (1, "s3://media/in/b.mp4")])
+                }),
+                idempotency_key: format!("req-page-{index}"),
+                callback: None,
+            })
+            .await
+            .expect("create succeeds");
+    }
+
+    let first = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-merge".to_string(),
+            page_size: 2,
+            ..Default::default()
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert_eq!(first.jobs.len(), 2);
+    assert_ne!(first.next_page_token, "", "a full page answers a token");
+
+    let second = client
+        .list_user_jobs(vm::ListUserJobsRequest {
+            user_id: "owner-merge".to_string(),
+            page_size: 2,
+            page_token: first.next_page_token.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner();
+    assert_eq!(second.jobs.len(), 1, "the second page holds the remainder");
+
+    handle.shutdown().await;
 }

@@ -489,11 +489,13 @@ impl JobRepository for PgJobRepository {
         states: &[JobState],
         limit: NonZeroU32,
         cursor: Option<PageCursor>,
+        requester: Option<RequesterType>,
     ) -> Result<JobPage, JobStoreError> {
         let state_names: Vec<String> = states
             .iter()
             .map(|state| state.name().to_string())
             .collect();
+        let requester_type = requester.map(|r| r.as_str().to_string());
         let rows = sqlx::query_as!(
             JobRow,
             "SELECT id, user_id, request_id, spec, state, progress_percent, \
@@ -506,12 +508,14 @@ impl JobRepository for PgJobRepository {
                AND ($2::timestamptz IS NULL \
                     OR (created_at, id) < ($2::timestamptz, $3::uuid)) \
                AND (cardinality($4::text[]) = 0 OR state = ANY($4::text[])) \
+               AND ($5::text IS NULL OR requester_type = $5) \
              ORDER BY created_at DESC, id DESC \
-             LIMIT $5",
+             LIMIT $6",
             owner.as_str(),
             cursor.map(|cursor| to_offset(cursor.created_at)),
             cursor.map(|cursor| cursor.id.as_uuid()),
             &state_names,
+            requester_type.as_deref(),
             i64::from(limit.get())
         )
         .fetch_all(&self.pool)

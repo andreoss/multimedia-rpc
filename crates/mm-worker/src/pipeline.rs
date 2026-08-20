@@ -832,7 +832,7 @@ async fn package_pipeline(
     check(signal)?;
     let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
-    let info = probe_input(ctx, &url, 0).await?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Package, &[input_report(&info)])?;
 
     let segments_expected = (info.duration.as_secs_f64() / spec.segment_seconds())
@@ -1265,6 +1265,23 @@ async fn probe_input(ctx: &WorkerConfig, url: &str, index: usize) -> Result<Medi
         .map_err(|error| failed(codes::PROBE_FAILED, format!("input {index}: {error}")))
 }
 
+async fn probe_source(
+    ctx: &WorkerConfig,
+    input: &InputSource,
+    url: &str,
+    index: usize,
+) -> Result<MediaInfo, Finish> {
+    let Some(key) = input.media().map(|source| source.media().to_uri()) else {
+        return probe_input(ctx, url, index).await;
+    };
+    if let Some(info) = ctx.probe_cache.get(&key) {
+        return Ok(info);
+    }
+    let info = probe_input(ctx, url, index).await?;
+    ctx.probe_cache.insert(key, info.clone());
+    Ok(info)
+}
+
 async fn probe_still(ctx: &WorkerConfig, url: &str, index: usize) -> Result<StillInfo, Finish> {
     ctx.prober
         .still(url, &ctx.probe_limits)
@@ -1347,7 +1364,7 @@ async fn probe_pipeline(
     check(signal)?;
     let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
-    let info = probe_input(ctx, &url, 0).await?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
     check(signal)?;
     let video = info
         .video
@@ -1396,7 +1413,7 @@ async fn transcode_pipeline(
     check(signal)?;
     let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
-    let info = probe_input(ctx, &url, 0).await?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Transcode, &[input_report(&info)])?;
 
     let inputs = [spec.input().clone()];
@@ -1534,7 +1551,7 @@ async fn concat_pipeline(
     let mut infos: Vec<MediaInfo> = Vec::with_capacity(urls.len());
     for (index, url) in urls.iter().enumerate() {
         check(signal)?;
-        infos.push(probe_input(ctx, url, index).await?);
+        infos.push(probe_source(ctx, &spec.inputs()[index], url, index).await?);
     }
 
     let reports: Vec<_> = infos.iter().map(input_report).collect();
@@ -1586,7 +1603,7 @@ async fn thumbnail_pipeline(
     check(signal)?;
     let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
-    let info = probe_input(ctx, &url, 0).await?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Thumbnail, &[input_report(&info)])?;
 
     let offsets = spec.offsets_seconds();
@@ -1819,7 +1836,7 @@ async fn trim_pipeline(
     check(signal)?;
     let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
-    let info = probe_input(ctx, &url, 0).await?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Trim, &[input_report(&info)])?;
 
     let inputs = [spec.input().clone()];

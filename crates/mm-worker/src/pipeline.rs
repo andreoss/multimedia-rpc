@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
+use futures_util::stream::StreamExt;
 use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec,
     ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
@@ -459,6 +460,15 @@ struct Scope {
 }
 
 impl Scope {
+    fn clone_for_rung(&self) -> Self {
+        Self {
+            prefix: self.prefix.clone(),
+            resolved: self.resolved.clone(),
+            done: self.done.clone(),
+            total: self.total,
+        }
+    }
+
     fn root(spec: &OpSpec) -> Self {
         Self {
             prefix: String::new(),
@@ -940,10 +950,7 @@ async fn upload_package(
     std::fs::write(&playlist_path, playlist)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
 
-    let mut landed = Landed {
-        store: ctx.store.as_ref(),
-        keys: Vec::new(),
-    };
+    let mut landed = Landed::new(ctx.store.clone());
     let outcome = upload_set(ctx, id, prefix, &written, &playlist_path, &mut landed).await;
     let staged: Vec<PathBuf> = std::iter::once(written.init.clone())
         .chain(written.segments.iter().cloned())
@@ -967,7 +974,7 @@ async fn upload_set(
     prefix: &str,
     written: &GstWritten,
     playlist_path: &Path,
-    landed: &mut Landed<'_>,
+    landed: &mut Landed,
 ) -> Result<OpResult, Finish> {
     let init = artifact_object_named(ctx, id, prefix, "init.mp4").await?;
     let playlist = artifact_object_named(ctx, id, prefix, mm_gst::playlist_name()).await?;
@@ -1114,10 +1121,7 @@ async fn run_image(
         ));
     }
 
-    let mut landed = Landed {
-        store: ctx.store.as_ref(),
-        keys: Vec::new(),
-    };
+    let mut landed = Landed::new(ctx.store.clone());
     match upload_image(ctx, id, prefix, staged, format, &mut landed, signal).await {
         Ok(outputs) => Ok(outputs),
         Err(finish) => {
@@ -1133,7 +1137,7 @@ async fn upload_image(
     prefix: &str,
     staged: &Path,
     format: DomainImageFormat,
-    landed: &mut Landed<'_>,
+    landed: &mut Landed,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<Vec<MediaRef>, Finish> {
     let artifact = scoped(prefix, &format!("image.{}", format.extension()));
@@ -1446,7 +1450,7 @@ async fn master_playlist(
     job: JobId,
     prefix: &str,
     renditions: &[RenditionResult],
-    landed: &mut Landed<'_>,
+    landed: &mut Landed,
 ) -> Result<ObjectRef, Finish> {
     let mut variants = Vec::with_capacity(renditions.len());
     for (index, rendition) in renditions.iter().enumerate() {
@@ -1519,7 +1523,7 @@ async fn pack_rung(
     prefix: &str,
     segment_seconds: f64,
     packer: &dyn RungPacker,
-    landed: &mut Landed<'_>,
+    landed: &mut Landed,
 ) -> Result<(ObjectRef, Vec<ObjectRef>), Finish> {
     let staging = ctx
         .staging_dir
@@ -1583,10 +1587,7 @@ async fn ladder_pipeline(
 
     let packer = rung_packer(ctx);
     let source = spec.input().media();
-    let mut landed = Landed {
-        store: ctx.store.as_ref(),
-        keys: Vec::new(),
-    };
+    let landed = Arc::new(tokio::sync::Mutex::new(Landed::new(ctx.store.clone())));
     let mut staged: Vec<PathBuf> = Vec::new();
     let mut renditions = Vec::with_capacity(spec.rungs().len());
     let outcome = encode_rungs(
@@ -1598,7 +1599,7 @@ async fn ladder_pipeline(
         source,
         deadline_at,
         signal,
-        &mut landed,
+        &landed,
         &mut staged,
         &mut renditions,
         spec.segment_seconds(),
@@ -1615,9 +1616,13 @@ async fn ladder_pipeline(
                 extract_poster(ctx, job, scope, &path, poster_seconds, deadline_at, signal).await?;
             }
             let master = match spec.segment_seconds() {
-                Some(_) => Some(
-                    master_playlist(ctx, job.id, &scope.prefix, &renditions, &mut landed).await?,
-                ),
+                Some(_) => {
+                    let mut ledger = landed.lock().await;
+                    Some(
+                        master_playlist(ctx, job.id, &scope.prefix, &renditions, &mut ledger)
+                            .await?,
+                    )
+                }
                 None => None,
             };
             Ok(OpResult::Ladder(
@@ -1626,7 +1631,8 @@ async fn ladder_pipeline(
             ))
         }
         Err(finish) => {
-            landed.discard().await;
+            let ledger = landed.lock().await;
+            ledger.discard().await;
             Err(finish)
         }
     }
@@ -1642,114 +1648,177 @@ async fn encode_rungs(
     source: Option<&MediaSource>,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
-    landed: &mut Landed<'_>,
+    landed: &Arc<tokio::sync::Mutex<Landed>>,
     staged: &mut Vec<PathBuf>,
     renditions: &mut Vec<RenditionResult>,
     segment_seconds: Option<f64>,
     packer: &dyn RungPacker,
 ) -> Result<(), Finish> {
     let total = spec.rungs().len();
+    let aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let concurrency = ctx.ladder_concurrency.max(1);
+    let mut runs: Vec<_> = Vec::with_capacity(total);
     for (index, profile) in spec.rungs().iter().enumerate() {
-        check(signal)?;
-        let target = TranscodeTarget {
-            scale_mode: ScaleMode::PadToFit,
-            profile: target_profile(Some(profile)),
-            cut: source.and_then(|source| {
-                source.trim().map(|trim| SourceCut {
-                    start_seconds: trim.start_seconds(),
-                    duration_seconds: trim.duration_seconds(),
-                })
-            }),
-            speed: source.and_then(|source| source.speed()),
-            volume: source.and_then(|source| source.volume()),
-            ..TranscodeTarget::default()
-        };
-        let prefix = format!("{}renditions/{index}", scope.prefix);
         let output_path = ctx.staging_dir.join(format!("{}-rung{index}.mp4", job.id));
         staged.push(output_path.clone());
-        let args = build_transcode_args(url, &target, &output_path.to_string_lossy())
-            .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
-        let limits = remaining_limits(
-            ctx,
-            Duration::from_secs(u64::from(rung_run_seconds(total))),
+        runs.push(encode_one_rung(
+            ctx.clone(),
+            job.id,
+            *profile,
+            index,
+            total,
+            scope.clone_for_rung(),
+            url.to_string(),
+            source.cloned(),
             deadline_at,
-        )?;
-        check(signal)?;
-        let started = Instant::now();
-        supervise(ctx, job.id, &args, &limits, signal, index, total).await?;
-        let wall_seconds = started.elapsed().as_secs_f64();
-        check(signal)?;
-        let measured = ctx
-            .prober
-            .probe(&output_path.to_string_lossy(), &ctx.probe_limits)
-            .await
-            .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
-        let (width, height) = measured_rendition_shape(&measured)
-            .ok_or_else(|| failed(codes::OUTPUT_INVALID, "the rendition has no video stream"))?;
-        let (asked_width, asked_height) = profile.resolution().unwrap_or((0, 0));
-        if (width, height) != (asked_width, asked_height) {
-            return Err(failed(
-                codes::OUTPUT_INVALID,
-                format!(
-                    "rung {index} asked for {asked_width}x{asked_height} and produced {width}x{height}"
-                ),
-            ));
+            signal.clone(),
+            landed.clone(),
+            output_path,
+            segment_seconds,
+            packer,
+            aborted.clone(),
+        ));
+    }
+    let mut slots: Vec<Option<RenditionResult>> = vec![None; total];
+    let mut ordered = futures_util::stream::iter(runs).buffer_unordered(concurrency);
+    while let Some(outcome) = ordered.next().await {
+        match outcome {
+            Ok((index, rendition)) => {
+                scope.done.fetch_add(1, Ordering::Relaxed);
+                slots[index] = Some(rendition);
+            }
+            Err(finish) => {
+                aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(ordered);
+                return Err(finish);
+            }
         }
-        ctx.metrics
-            .tool_speed
-            .observe(media_seconds(measured.duration.as_secs_f64(), wall_seconds));
-        let media = artifact_object_named(ctx, job.id, &prefix, "output.mp4").await?;
-        let bytes = file_bytes(&output_path).await;
-        let file = tokio::fs::File::open(&output_path)
-            .await
-            .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
-        ctx.store
-            .put_multipart(&media, file_body(file))
-            .await
-            .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
-        landed.record(media.clone());
-        ctx.metrics.output_bytes.add(bytes);
-        scope.done.fetch_add(1, Ordering::Relaxed);
-        let packed = match segment_seconds {
-            Some(seconds) => {
-                Some(pack_rung(ctx, job.id, index, &media, &prefix, seconds, packer, landed).await?)
-            }
-            None => None,
-        };
-        let (playlist, segments) = match packed {
-            Some((playlist, segments)) => (playlist, segments),
+    }
+    for slot in slots {
+        match slot {
+            Some(rendition) => renditions.push(rendition),
             None => {
-                renditions.push(
-                    RenditionResult::new(
-                        *profile,
-                        MediaRef::Object(media),
-                        None,
-                        Vec::new(),
-                        measured.duration.as_secs_f64(),
-                    )
-                    .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
-                    .with_measurement(
-                        width,
-                        height,
-                        rendition_bandwidth(profile, &measured),
-                    ),
-                );
-                continue;
+                return Err(failed(
+                    codes::OUTPUT_INVALID,
+                    "a rung produced no rendition",
+                ));
             }
-        };
-        renditions.push(
-            RenditionResult::new(
-                *profile,
-                MediaRef::Object(media),
-                Some(MediaRef::Object(playlist)),
-                segments.into_iter().map(MediaRef::Object).collect(),
-                measured.duration.as_secs_f64(),
-            )
-            .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
-            .with_measurement(width, height, rendition_bandwidth(profile, &measured)),
-        );
+        }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn encode_one_rung(
+    ctx: Arc<WorkerConfig>,
+    job: JobId,
+    profile: OutputProfile,
+    index: usize,
+    total: usize,
+    scope: Scope,
+    url: String,
+    source: Option<MediaSource>,
+    deadline_at: SystemTime,
+    mut signal: watch::Receiver<Signal>,
+    landed: Arc<tokio::sync::Mutex<Landed>>,
+    output_path: PathBuf,
+    segment_seconds: Option<f64>,
+    packer: &dyn RungPacker,
+    aborted: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(usize, RenditionResult), Finish> {
+    check(&signal)?;
+    if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(Finish::Cancelled);
+    }
+    let target = TranscodeTarget {
+        scale_mode: ScaleMode::PadToFit,
+        profile: target_profile(Some(&profile)),
+        cut: source.as_ref().and_then(|source| {
+            source.trim().map(|trim| SourceCut {
+                start_seconds: trim.start_seconds(),
+                duration_seconds: trim.duration_seconds(),
+            })
+        }),
+        speed: source.as_ref().and_then(|source| source.speed()),
+        volume: source.as_ref().and_then(|source| source.volume()),
+        ..TranscodeTarget::default()
+    };
+    let prefix = format!("{}renditions/{index}", scope.prefix);
+    let args = build_transcode_args(&url, &target, &output_path.to_string_lossy())
+        .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+    let limits = remaining_limits(
+        &ctx,
+        Duration::from_secs(u64::from(rung_run_seconds(total))),
+        deadline_at,
+    )?;
+    check(&signal)?;
+    let started = Instant::now();
+    supervise(&ctx, job, &args, &limits, &mut signal, index, total).await?;
+    let wall_seconds = started.elapsed().as_secs_f64();
+    check(&signal)?;
+    let measured = ctx
+        .prober
+        .probe(&output_path.to_string_lossy(), &ctx.probe_limits)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let (width, height) = measured_rendition_shape(&measured)
+        .ok_or_else(|| failed(codes::OUTPUT_INVALID, "the rendition has no video stream"))?;
+    let (asked_width, asked_height) = profile.resolution().unwrap_or((0, 0));
+    if (width, height) != (asked_width, asked_height) {
+        return Err(failed(
+            codes::OUTPUT_INVALID,
+            format!(
+                "rung {index} asked for {asked_width}x{asked_height} and produced {width}x{height}"
+            ),
+        ));
+    }
+    ctx.metrics
+        .tool_speed
+        .observe(media_seconds(measured.duration.as_secs_f64(), wall_seconds));
+    let media = artifact_object_named(&ctx, job, &prefix, "output.mp4").await?;
+    let bytes = file_bytes(&output_path).await;
+    let file = tokio::fs::File::open(&output_path)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.store
+        .put_multipart(&media, file_body(file))
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    landed.lock().await.record(media.clone());
+    ctx.metrics.output_bytes.add(bytes);
+    let packed = match segment_seconds {
+        Some(seconds) => {
+            let mut ledger = landed.lock().await;
+            Some(
+                pack_rung(
+                    &ctx,
+                    job,
+                    index,
+                    &media,
+                    &prefix,
+                    seconds,
+                    packer,
+                    &mut ledger,
+                )
+                .await?,
+            )
+        }
+        None => None,
+    };
+    let (playlist, segments): (Option<ObjectRef>, Vec<ObjectRef>) = match packed {
+        Some((playlist, segments)) => (Some(playlist), segments),
+        None => (None, Vec::new()),
+    };
+    let rendition = RenditionResult::new(
+        profile,
+        MediaRef::Object(media),
+        playlist.map(MediaRef::Object),
+        segments.into_iter().map(MediaRef::Object).collect(),
+        measured.duration.as_secs_f64(),
+    )
+    .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+    .with_measurement(width, height, rendition_bandwidth(&profile, &measured));
+    Ok((index, rendition))
 }
 
 fn rung_run_seconds(total: usize) -> u32 {
@@ -2080,12 +2149,19 @@ fn staged_frame_bytes(count: usize, width: u32, height: u32) -> u64 {
         .saturating_mul(count as u64)
 }
 
-struct Landed<'a> {
-    store: &'a dyn ObjectStore,
+struct Landed {
+    store: Arc<dyn ObjectStore>,
     keys: Vec<ObjectRef>,
 }
 
-impl Landed<'_> {
+impl Landed {
+    fn new(store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            store,
+            keys: Vec::new(),
+        }
+    }
+
     fn record(&mut self, key: ObjectRef) {
         self.keys.push(key);
     }
@@ -2122,10 +2198,7 @@ async fn run_all_and_upload(
         .await?;
     }
 
-    let mut landed = Landed {
-        store: ctx.store.as_ref(),
-        keys: Vec::with_capacity(runs.len()),
-    };
+    let mut landed = Landed::new(ctx.store.clone());
     let outcome = upload_each(
         ctx,
         id,
@@ -2151,7 +2224,7 @@ async fn upload_each(
     prefix: &str,
     staged: &[PathBuf],
     expected: (u32, u32),
-    landed: &mut Landed<'_>,
+    landed: &mut Landed,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<Vec<MediaRef>, Finish> {
     let mut outputs = Vec::with_capacity(staged.len());

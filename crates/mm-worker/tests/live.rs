@@ -2935,3 +2935,118 @@ async fn two_rungs_of_one_ladder_never_share_a_segment_name() {
     assert_eq!(unique.len(), keys.len(), "two rungs share a key: {keys:?}");
     db.dispose().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ladder_runs_one_rung_at_a_time_by_default() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ladder-serial-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ladder-serial-source.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(master_ladder_job(&input)).await.unwrap();
+
+    let packer = Arc::new(RecordingPacker {
+        calls: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let mut config = base_config(&db, store.clone(), "worker-ladder-serial");
+    config.ladder_packer = Some(packer.clone());
+    assert_eq!(
+        config.ladder_concurrency, 1,
+        "the default is one rung at a time"
+    );
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let calls = packer.calls.lock().await.clone();
+    let order: Vec<usize> = calls.iter().map(|call| call.1).collect();
+    assert_eq!(order, vec![0, 1], "the default count runs rungs in order");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ladder_above_one_rung_encodes_concurrently_and_lands_every_rung() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ladder-parallel-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ladder-parallel-source.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(master_ladder_job(&input)).await.unwrap();
+
+    let packer = Arc::new(RecordingPacker {
+        calls: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let mut config = base_config(&db, store.clone(), "worker-ladder-parallel");
+    config.ladder_packer = Some(packer.clone());
+    config.ladder_concurrency = 2;
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Ladder(result) = record.result.expect("result recorded") else {
+        panic!("expected a ladder result");
+    };
+    assert_eq!(result.renditions().len(), 2);
+    for (index, rendition) in result.renditions().iter().enumerate() {
+        let MediaRef::Object(media) = rendition.media() else {
+            panic!("expected an object rendition");
+        };
+        assert_eq!(
+            media.key(),
+            format!("jobs/{}/renditions/{index}/output.mp4", job.id)
+        );
+        assert!(store.head(media).await.expect("rendition exists") > 0);
+    }
+    let calls = packer.calls.lock().await.clone();
+    let mut rungs: Vec<usize> = calls.iter().map(|call| call.1).collect();
+    rungs.sort();
+    assert_eq!(rungs, vec![0, 1], "both rungs were packed");
+    assert!(result.master_playlist().is_some());
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_rung_above_one_stops_the_others_and_leaves_no_key() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ladder-parallel-fail.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ladder-parallel-fail.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(master_ladder_job(&input)).await.unwrap();
+
+    let packer = Arc::new(FailingPacker {
+        calls: tokio::sync::Mutex::new(0),
+    });
+    let mut config = base_config(&db, store.clone(), "worker-ladder-parallel-fail");
+    config.ladder_packer = Some(packer.clone());
+    config.ladder_concurrency = 2;
+    config.retry = RetryPolicy {
+        max_attempts: 1,
+        base: Duration::from_millis(100),
+        cap: Duration::from_millis(100),
+    };
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
+    assert_eq!(
+        *packer.calls.lock().await,
+        1,
+        "the ladder stopped at the first refusal"
+    );
+    for index in 0..2 {
+        let key = ObjectRef::new(
+            BUCKET,
+            &format!("jobs/{}/renditions/{index}/output.mp4", job.id),
+        )
+        .unwrap();
+        assert!(store.head(&key).await.is_err(), "key {index} survived");
+    }
+    db.dispose().await;
+}

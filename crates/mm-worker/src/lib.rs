@@ -51,6 +51,7 @@ pub struct WorkerConfig {
     pub callbacks: Option<Arc<dyn CallbackPublisher>>,
     pub metrics: Metrics,
     pub ladder_packer: Option<Arc<dyn RungPacker>>,
+    pub ladder_concurrency: usize,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -89,6 +90,7 @@ impl WorkerConfig {
             callbacks: None,
             metrics: Registry::new().1,
             ladder_packer: None,
+            ladder_concurrency: 1,
             reserved: std::sync::Mutex::new(0),
         }
     }

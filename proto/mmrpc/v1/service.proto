@@ -15,7 +15,7 @@ service MediaJobService {
 }
 
 message CreateJobRequest {
-  string user_id = 1;
+  string user_id = 1 [deprecated = true];
   string idempotency_key = 2;
   OpSpec spec = 3;
   Callback callback = 4;
@@ -28,7 +28,7 @@ message CreateJobResponse {
 }
 
 message GetJobRequest {
-  string user_id = 1;
+  string user_id = 1 [deprecated = true];
   string job_id = 2;
 }
 
@@ -37,7 +37,7 @@ message GetJobResponse {
 }
 
 message CancelJobRequest {
-  string user_id = 1;
+  string user_id = 1 [deprecated = true];
   string job_id = 2;
 }
 
@@ -47,7 +47,7 @@ message CancelJobResponse {
 }
 
 message ListJobsRequest {
-  string user_id = 1;
+  string user_id = 1 [deprecated = true];
   repeated JobState statuses = 2;
   uint32 page_size = 3;
   string page_token = 4;
@@ -59,7 +59,7 @@ message ListJobsResponse {
 }
 
 message WatchJobRequest {
-  string user_id = 1;
+  string user_id = 1 [deprecated = true];
   string job_id = 2;
 }
 

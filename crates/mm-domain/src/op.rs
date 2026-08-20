@@ -1247,8 +1247,8 @@ impl OpKind {
             | OpKind::Composite
             | OpKind::Package
             | OpKind::Batch
-            | OpKind::Graph => Ok(()),
-            OpKind::Ladder => Err(UnsupportedOp { kind: self }),
+            | OpKind::Graph
+            | OpKind::Ladder => Ok(()),
         }
     }
 }

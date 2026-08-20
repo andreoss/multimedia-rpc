@@ -1,6 +1,6 @@
 use mm_domain::{
     BatchSpec, LadderResult, LadderSpec, MAX_LADDER_RUNGS, MediaRef, OpKind, OpResultError, OpSpec,
-    OpSpecError, OutputProfile, RenditionResult, UnsupportedOp,
+    OpSpecError, OutputProfile, RenditionResult,
 };
 
 fn input() -> MediaRef {
@@ -297,15 +297,12 @@ fn a_ladder_spec_names_one_input() {
 }
 
 #[test]
-fn a_ladder_is_not_executable_until_the_worker_runs_it() {
+fn a_ladder_is_executable_once_the_worker_runs_it() {
     assert_eq!(
         OpSpec::Ladder(LadderSpec::new(input(), three_rungs()).unwrap())
             .kind()
-            .ensure_executable()
-            .unwrap_err(),
-        UnsupportedOp {
-            kind: OpKind::Ladder
-        }
+            .ensure_executable(),
+        Ok(())
     );
 }
 

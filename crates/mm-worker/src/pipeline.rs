@@ -11,11 +11,12 @@ use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec,
     ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
     InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
-    MediaRef, NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind,
-    OpResult, OpSpec, OutputKey, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
-    ProgressPercent, RenditionResult, ResizeMode as DomainResizeMode, StepOutcome, StepState,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    VideoStreamInfo, WorkerId, resolve_media_ref, validate_inputs,
+    LadderResult, LadderSpec, MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody, ObjectRef,
+    ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
+    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
+    ResizeMode as DomainResizeMode, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
+    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, VideoStreamInfo, WorkerId,
+    resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -502,6 +503,7 @@ fn leaf_count(spec: &OpSpec) -> usize {
             .iter()
             .map(|node| leaf_count(node.spec()))
             .sum(),
+        OpSpec::Ladder(ladder) => ladder.rungs().len(),
         _ => 1,
     }
 }
@@ -662,11 +664,8 @@ async fn run_leaf(
                 "a graph is not executed yet",
             ));
         }
-        OpSpec::Ladder(_) => {
-            return Err(failed(
-                codes::UNSUPPORTED_OPERATION,
-                "a ladder is not executed yet",
-            ));
+        OpSpec::Ladder(ladder) => {
+            ladder_pipeline(ctx, job, ladder, scope, deadline_at, signal).await?
         }
     };
     scope.done.fetch_add(1, Ordering::Relaxed);
@@ -1426,6 +1425,176 @@ async fn probe_pipeline(
     .map_err(|error| failed(codes::PROBE_FAILED, error))?
     .with_streams(video, audio);
     Ok(OpResult::Probe(result))
+}
+
+async fn ladder_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &LadderSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Ladder, &[input_report(&info)])?;
+
+    let inputs = [spec.input().clone()];
+    let infos = [info];
+    let estimate = estimate_bytes(ctx, &inputs, &infos).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+
+    let source = spec.input().media();
+    let mut landed = Landed {
+        store: ctx.store.as_ref(),
+        keys: Vec::new(),
+    };
+    let mut staged: Vec<PathBuf> = Vec::new();
+    let mut renditions = Vec::with_capacity(spec.rungs().len());
+    let outcome = encode_rungs(
+        ctx,
+        job,
+        spec,
+        scope,
+        &url,
+        source,
+        deadline_at,
+        signal,
+        &mut landed,
+        &mut staged,
+        &mut renditions,
+    )
+    .await;
+    let highest = staged.last().cloned();
+    for path in staged {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    match outcome {
+        Ok(()) => {
+            if let (Some(poster_seconds), Some(path)) = (spec.poster_seconds(), highest) {
+                extract_poster(ctx, job, scope, &path, poster_seconds, deadline_at, signal).await?;
+            }
+            Ok(OpResult::Ladder(
+                LadderResult::new(None, renditions)
+                    .map_err(|error| failed(codes::OUTPUT_INVALID, error))?,
+            ))
+        }
+        Err(finish) => {
+            landed.discard().await;
+            Err(finish)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn encode_rungs(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &LadderSpec,
+    scope: &Scope,
+    url: &str,
+    source: Option<&MediaSource>,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+    landed: &mut Landed<'_>,
+    staged: &mut Vec<PathBuf>,
+    renditions: &mut Vec<RenditionResult>,
+) -> Result<(), Finish> {
+    let total = spec.rungs().len();
+    for (index, profile) in spec.rungs().iter().enumerate() {
+        check(signal)?;
+        let target = TranscodeTarget {
+            scale_mode: ScaleMode::PadToFit,
+            profile: target_profile(Some(profile)),
+            cut: source.and_then(|source| {
+                source.trim().map(|trim| SourceCut {
+                    start_seconds: trim.start_seconds(),
+                    duration_seconds: trim.duration_seconds(),
+                })
+            }),
+            speed: source.and_then(|source| source.speed()),
+            volume: source.and_then(|source| source.volume()),
+            ..TranscodeTarget::default()
+        };
+        let prefix = format!("{}renditions/{index}", scope.prefix);
+        let output_path = ctx.staging_dir.join(format!("{}-rung{index}.mp4", job.id));
+        staged.push(output_path.clone());
+        let args = build_transcode_args(url, &target, &output_path.to_string_lossy())
+            .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+        let limits = remaining_limits(
+            ctx,
+            Duration::from_secs(u64::from(rung_run_seconds(total))),
+            deadline_at,
+        )?;
+        check(signal)?;
+        let started = Instant::now();
+        supervise(ctx, job.id, &args, &limits, signal, index, total).await?;
+        let wall_seconds = started.elapsed().as_secs_f64();
+        check(signal)?;
+        let measured = ctx
+            .prober
+            .probe(&output_path.to_string_lossy(), &ctx.probe_limits)
+            .await
+            .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+        let (width, height) = measured_rendition_shape(&measured)
+            .ok_or_else(|| failed(codes::OUTPUT_INVALID, "the rendition has no video stream"))?;
+        let (asked_width, asked_height) = profile.resolution().unwrap_or((0, 0));
+        if (width, height) != (asked_width, asked_height) {
+            return Err(failed(
+                codes::OUTPUT_INVALID,
+                format!(
+                    "rung {index} asked for {asked_width}x{asked_height} and produced {width}x{height}"
+                ),
+            ));
+        }
+        ctx.metrics
+            .tool_speed
+            .observe(media_seconds(measured.duration.as_secs_f64(), wall_seconds));
+        let media = artifact_object_named(ctx, job.id, &prefix, "output.mp4").await?;
+        let bytes = file_bytes(&output_path).await;
+        let file = tokio::fs::File::open(&output_path)
+            .await
+            .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+        ctx.store
+            .put_multipart(&media, file_body(file))
+            .await
+            .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+        landed.record(media.clone());
+        ctx.metrics.output_bytes.add(bytes);
+        scope.done.fetch_add(1, Ordering::Relaxed);
+        renditions.push(
+            RenditionResult::new(
+                *profile,
+                MediaRef::Object(media),
+                None,
+                Vec::new(),
+                measured.duration.as_secs_f64(),
+            )
+            .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+            .with_measurement(width, height, rendition_bandwidth(profile, &measured)),
+        );
+    }
+    Ok(())
+}
+
+fn rung_run_seconds(total: usize) -> u32 {
+    let seconds = u64::from(THUMBNAIL_RUN_SECONDS)
+        .saturating_mul(60)
+        .saturating_add(total as u64 * 60);
+    u32::try_from(seconds).unwrap_or(u32::MAX)
+}
+
+fn measured_rendition_shape(info: &MediaInfo) -> Option<(u32, u32)> {
+    info.video.first().map(|video| (video.width, video.height))
+}
+
+fn rendition_bandwidth(profile: &OutputProfile, measured: &MediaInfo) -> u32 {
+    let asked = u64::from(profile.video_max_bitrate().unwrap_or(0))
+        + u64::from(profile.audio_bitrate().unwrap_or(0));
+    let bits = measured.bit_rate.unwrap_or(asked);
+    u32::try_from(bits).unwrap_or(u32::MAX)
 }
 
 async fn transcode_pipeline(

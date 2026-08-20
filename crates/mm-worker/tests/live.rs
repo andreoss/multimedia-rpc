@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use mm_domain::{
     BatchSpec, CallbackError, CallbackPublisher, ConcatSpec, GraphNode, GraphSpec, ImageFormat,
-    ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob,
-    NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec, OutputProfile,
-    PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, StepState, ThumbnailSpec,
-    TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec,
+    MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult,
+    OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, StepState,
+    ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -2357,5 +2357,156 @@ async fn a_thumbnail_sprite_tiles_the_requested_offsets() {
         .unwrap();
     assert_eq!(info.video[0].width, 320);
     assert_eq!(info.video[0].height, 180);
+    db.dispose().await;
+}
+
+fn ladder_job(source: &MediaRef) -> NewJob {
+    let rungs = vec![
+        OutputProfile::from_raw(24.0, 400_000, 28, 64_000, 48_000, 640, 360).unwrap(),
+        OutputProfile::from_raw(24.0, 900_000, 26, 64_000, 48_000, 1280, 720).unwrap(),
+    ];
+    single_input_job(OpSpec::Ladder(
+        LadderSpec::new(source.clone(), rungs).unwrap(),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ladder_job_lands_one_verified_object_per_rung() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ladder-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ladder-source.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(ladder_job(&input)).await.unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-ladder"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Ladder(result) = record.result.expect("result recorded") else {
+        panic!("expected a ladder result");
+    };
+    assert_eq!(result.renditions().len(), 2);
+    assert_eq!(result.master_playlist(), None);
+    for (index, rendition) in result.renditions().iter().enumerate() {
+        let MediaRef::Object(media) = rendition.media() else {
+            panic!("expected an object rendition");
+        };
+        assert_eq!(
+            media.key(),
+            format!("jobs/{}/renditions/{index}/output.mp4", job.id)
+        );
+        assert!(store.head(media).await.expect("rendition exists") > 0);
+    }
+    assert_eq!(result.renditions()[0].width(), 640);
+    assert_eq!(result.renditions()[0].height(), 360);
+    assert_eq!(result.renditions()[1].width(), 1280);
+    assert_eq!(result.renditions()[1].height(), 720);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ladder_upload_failure_cleans_every_key_it_landed() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ladder-source-fail.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ladder-source-fail.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(ladder_job(&input)).await.unwrap();
+
+    let flaky: Arc<dyn ObjectStore> = Arc::new(FailingNthUpload {
+        inner: store.clone(),
+        fail_on: 2,
+        seen: std::sync::Mutex::new(0),
+    });
+    let mut config = base_config(&db, flaky, "worker-ladder-fail");
+    config.retry = RetryPolicy {
+        max_attempts: 1,
+        base: Duration::from_millis(100),
+        cap: Duration::from_millis(100),
+    };
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::OUTPUT_UPLOAD_FAILED);
+    assert!(record.result.is_none(), "a failed job recorded a result");
+    for index in 0..2 {
+        let key = ObjectRef::new(
+            BUCKET,
+            &format!("jobs/{}/renditions/{index}/output.mp4", job.id),
+        )
+        .unwrap();
+        assert!(
+            store.head(&key).await.is_err(),
+            "key {index} survived the cleanup"
+        );
+        let staged = scratch_dir("staging").join(format!("{}-rung{index}.mp4", job.id));
+        assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_during_a_ladder_leaves_no_key_and_no_staged_file() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ladder-cancel-30s.mp4", 30, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ladder-cancel-30s.mp4").await;
+    let repository = db.repository();
+    let rungs = vec![
+        OutputProfile::from_raw(24.0, 400_000, 28, 64_000, 48_000, 640, 360).unwrap(),
+        OutputProfile::from_raw(24.0, 900_000, 26, 64_000, 48_000, 1280, 720).unwrap(),
+    ];
+    let job = repository
+        .create(single_input_job(OpSpec::Ladder(
+            LadderSpec::new(input, rungs).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let mut config = base_config(&db, store.clone(), "worker-ladder-cancel");
+    config.cancellations = Some(Arc::new(
+        PgCancelListener::connect(db.url())
+            .await
+            .expect("cancel listener connects"),
+    ));
+    let handle = start(config);
+    await_state(
+        &repository,
+        job.id,
+        JobState::Running,
+        Duration::from_secs(60),
+    )
+    .await;
+    repository
+        .request_cancel(job.id)
+        .await
+        .expect("cancel requested");
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::CANCEL).await;
+    handle.shutdown().await;
+
+    if record.state == JobState::Succeeded {
+        return;
+    }
+    assert_eq!(record.state, JobState::Cancelled, "{:?}", record.failure);
+    for index in 0..2 {
+        let key = ObjectRef::new(
+            BUCKET,
+            &format!("jobs/{}/renditions/{index}/output.mp4", job.id),
+        )
+        .unwrap();
+        assert!(
+            store.head(&key).await.is_err(),
+            "key {index} survived the cancel"
+        );
+        let staged = scratch_dir("staging").join(format!("{}-rung{index}.mp4", job.id));
+        assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    }
     db.dispose().await;
 }

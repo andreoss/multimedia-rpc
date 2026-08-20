@@ -218,7 +218,7 @@ fn a_succeeded_outcome_mirrors_the_terminal_record() {
 fn a_failed_outcome_carries_the_error_and_file_errors() {
     let outcome = v1::JobOutcome::from(&record(JobState::Failed, Some(blocked()), None));
     assert_eq!(outcome.state, v1::JobState::Failed as i32);
-    assert_eq!(outcome.error_code, "validation_blocked");
+    assert_eq!(outcome.error_code, "ERROR_UNSUPPORTED_CONTAINER");
     assert_eq!(
         outcome.error_message, "inputs rejected by the validator",
         "the message stays for a human while the file errors come off the row"

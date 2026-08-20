@@ -8,7 +8,7 @@ use mm_domain::{
     ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl, ResizeMode,
     SourceError, StepOutcome, StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec,
     TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
-    verdict_code,
+    failure_code, verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -634,7 +634,7 @@ impl From<&StepOutcome> for v1::StepOutcome {
 impl From<&JobFailure> for v1::StepFailure {
     fn from(value: &JobFailure) -> Self {
         Self {
-            code: value.code().to_string(),
+            code: failure_code(value).to_string(),
             message: value.message().to_string(),
             file_errors: value.inputs().iter().map(input_failure).collect(),
         }
@@ -764,7 +764,7 @@ impl From<&JobRecord> for v1::JobOutcome {
             error_code: record
                 .failure
                 .as_ref()
-                .map(|failure| failure.code().to_string())
+                .map(|failure| failure_code(failure).to_string())
                 .unwrap_or_default(),
             error_message: record
                 .failure

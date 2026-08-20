@@ -1327,8 +1327,8 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
     assert_eq!(outcome.request_id, "req-cb-block");
     assert_eq!(outcome.state, v1::JobState::Failed as i32);
     assert_eq!(
-        outcome.error_code, "validation_blocked",
-        "the outcome carries the job's own failure code"
+        outcome.error_code, "ERROR_UNSUPPORTED_CONTAINER",
+        "the callback carries the reference vocabulary"
     );
     assert!(outcome.result.is_none());
     assert!(!outcome.file_errors.is_empty());
@@ -1339,7 +1339,8 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
     );
 
     println!(
-        "parity p10 callback-block: pass (one outcome, validation_blocked, \
+        "parity p10 callback-block: pass (one outcome, \
+         error_code=ERROR_UNSUPPORTED_CONTAINER, \
          file_errors[0]=ERROR_UNSUPPORTED_CONTAINER)"
     );
     publisher.delete_queue(&queue).await.expect("queue removed");
@@ -1509,7 +1510,7 @@ async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
     assert_eq!(outcome.job_id, parked.job_id);
     assert_eq!(outcome.request_id, "req-reaped");
     assert_eq!(outcome.state, v1::JobState::Failed as i32);
-    assert_eq!(outcome.error_code, "timeout");
+    assert_eq!(outcome.error_code, "ERROR_JOB_TIMEOUT");
     assert!(outcome.result.is_none());
 
     println!(

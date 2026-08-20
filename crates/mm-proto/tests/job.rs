@@ -78,10 +78,10 @@ fn a_validation_failure_maps_file_errors_onto_the_spec_inputs() {
     assert_eq!(
         job.file_errors,
         vec![
-            file_error("UnsupportedContainer", None, None, Some(0)),
+            file_error("ERROR_UNSUPPORTED_CONTAINER", None, None, Some(0)),
             v1::FileError {
                 media_ref: None,
-                code: "TooFewInputs".to_string(),
+                code: "ERROR_TOO_FEW_INPUTS".to_string(),
                 step_index: None,
                 node_id: None,
                 input_index: None,
@@ -105,7 +105,7 @@ fn file_errors_are_read_off_the_row_and_not_back_out_of_the_message() {
     assert_eq!(
         job.file_errors,
         vec![file_error(
-            "UnsupportedContainer",
+            "ERROR_UNSUPPORTED_CONTAINER",
             Some(2),
             Some("join"),
             Some(0)
@@ -117,7 +117,7 @@ fn file_errors_are_read_off_the_row_and_not_back_out_of_the_message() {
 fn a_file_error_reads_back_into_the_input_failure_the_row_carries() {
     let failure = InputFailure::try_from(&v1::FileError {
         media_ref: None,
-        code: "UnsupportedContainer".to_string(),
+        code: "ERROR_UNSUPPORTED_CONTAINER".to_string(),
         step_index: Some(1),
         node_id: Some("join".to_string()),
         input_index: Some(0),
@@ -127,7 +127,23 @@ fn a_file_error_reads_back_into_the_input_failure_the_row_carries() {
     assert_eq!(failure.step(), Some(1));
     assert_eq!(failure.node().map(|node| node.as_str()), Some("join"));
     assert_eq!(failure.input(), Some(0));
-    assert_eq!(failure.code(), "UnsupportedContainer");
+    assert_eq!(failure.code(), "ERROR_UNSUPPORTED_CONTAINER");
+}
+
+#[test]
+fn a_file_error_read_back_and_rendered_again_reads_the_same() {
+    let rendered = v1::FileError {
+        media_ref: None,
+        code: "ERROR_UNSUPPORTED_CONTAINER".to_string(),
+        step_index: Some(1),
+        node_id: Some("join".to_string()),
+        input_index: Some(0),
+    };
+
+    let failure = InputFailure::try_from(&rendered).expect("input failure");
+    let again = v1::InputFailureList::from(&[failure][..]);
+
+    assert_eq!(again.failures, vec![rendered]);
 }
 
 #[test]
@@ -209,5 +225,5 @@ fn a_failed_outcome_carries_the_error_and_file_errors() {
     );
     assert_eq!(outcome.result, None);
     assert_eq!(outcome.file_errors.len(), 2);
-    assert_eq!(outcome.file_errors[1].code, "TooFewInputs");
+    assert_eq!(outcome.file_errors[1].code, "ERROR_TOO_FEW_INPUTS");
 }

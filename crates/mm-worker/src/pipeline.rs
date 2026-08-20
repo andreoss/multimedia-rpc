@@ -1581,8 +1581,11 @@ async fn ladder_pipeline(
     }
 
     let inputs = [spec.input().clone()];
-    let infos = [info];
-    let estimate = estimate_bytes(ctx, &inputs, &infos).await;
+    let estimate = ladder_estimate(
+        spec,
+        &info,
+        estimate_bytes(ctx, &inputs, std::slice::from_ref(&info)).await,
+    );
     let _reservation = admit_or_release(ctx, job.id, estimate).await?;
 
     let packer = rung_packer(ctx);
@@ -1786,6 +1789,7 @@ async fn encode_one_rung(
         .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
     landed.lock().await.record(media.clone());
     ctx.metrics.output_bytes.add(bytes);
+    ctx.metrics.renditions.add(1);
     let packed = match segment_seconds {
         Some(seconds) => {
             let mut ledger = landed.lock().await;
@@ -1820,6 +1824,39 @@ async fn encode_one_rung(
     .with_measurement(width, height, rendition_bandwidth(&profile, &measured));
     Ok((index, rendition))
 }
+
+pub fn ladder_estimate_bytes(
+    rungs: &[OutputProfile],
+    duration_seconds: f64,
+    segment_seconds: Option<f64>,
+    read: u64,
+) -> u64 {
+    let encoded: u64 = rungs
+        .iter()
+        .map(|rung| {
+            let bits = u64::from(rung.video_max_bitrate().unwrap_or(0))
+                + u64::from(rung.audio_bitrate().unwrap_or(0));
+            let mut bytes = (bits as f64 / 8.0) * duration_seconds * ENCODED_HEADROOM;
+            if let Some(segment_seconds) = segment_seconds {
+                let segments = (duration_seconds / segment_seconds).ceil().max(1.0);
+                bytes += segments * SEGMENT_ESTIMATE_BYTES as f64;
+            }
+            bytes as u64
+        })
+        .sum();
+    read.saturating_add(encoded)
+}
+
+fn ladder_estimate(spec: &LadderSpec, info: &MediaInfo, read: u64) -> u64 {
+    ladder_estimate_bytes(
+        spec.rungs(),
+        info.duration.as_secs_f64(),
+        spec.segment_seconds(),
+        read,
+    )
+}
+
+const ENCODED_HEADROOM: f64 = 1.1;
 
 fn rung_run_seconds(total: usize) -> u32 {
     let seconds = u64::from(THUMBNAIL_RUN_SECONDS)

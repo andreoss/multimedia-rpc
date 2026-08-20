@@ -127,6 +127,7 @@ pub struct Metrics {
     pub tool_run: Histogram,
     pub tool_speed: Histogram,
     pub output_bytes: Counter,
+    pub renditions: Counter,
 }
 
 impl Counter {
@@ -242,6 +243,10 @@ impl Registry {
             ),
             output_bytes: registry
                 .counter("mm_output_bytes_total", "bytes written to the object store"),
+            renditions: registry.counter(
+                "mm_renditions_total",
+                "ladder renditions that landed an output object",
+            ),
         };
         (registry, metrics)
     }

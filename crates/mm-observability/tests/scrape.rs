@@ -16,6 +16,7 @@ fn a_fresh_registry_renders_every_series_it_declares() {
         "mm_tool_run_seconds",
         "mm_tool_speed_ratio",
         "mm_output_bytes_total",
+        "mm_renditions_total",
     ] {
         assert!(
             rendered.contains(&format!("# TYPE {name} ")),
@@ -193,4 +194,33 @@ async fn request(address: std::net::SocketAddr, message: &str) -> String {
         .expect("the answer arrives within the read budget")
         .expect("the answer is read");
     String::from_utf8_lossy(&buffer).to_string()
+}
+
+#[test]
+fn the_rendition_counter_is_scraped_beside_the_job_counters() {
+    let (registry, metrics) = Registry::new();
+    metrics.jobs_finished.add(2);
+    metrics.renditions.add(5);
+    let body = registry.render();
+    assert!(body.contains("mm_jobs_finished_total 2"), "{body}");
+    assert!(
+        body.contains("mm_renditions_total 5"),
+        "the rung count is not scrapable: {body}"
+    );
+    assert!(
+        body.contains("ladder renditions that landed"),
+        "the rung counter has no help line: {body}"
+    );
+}
+
+#[test]
+fn a_rendition_count_over_zero_reads_as_a_mean_ladder_width() {
+    let (registry, metrics) = Registry::new();
+    for _ in 0..3 {
+        metrics.jobs_finished.add(1);
+        metrics.renditions.add(4);
+    }
+    let body = registry.render();
+    assert!(body.contains("mm_renditions_total 12"), "{body}");
+    assert!(body.contains("mm_jobs_finished_total 3"), "{body}");
 }

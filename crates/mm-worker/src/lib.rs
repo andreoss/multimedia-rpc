@@ -20,7 +20,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 pub use budget::{DiskBudget, admits};
 pub use packer::{GstRungPacker, LadderPackError, LadderPacked, RungPacker, packer_name};
-pub use pipeline::codes;
+pub use pipeline::{codes, ladder_estimate_bytes};
 pub use report::{blocks, input_report, render_verdicts, still_report, target_profile, warnings};
 pub use retry::{RetryPolicy, is_transient};
 

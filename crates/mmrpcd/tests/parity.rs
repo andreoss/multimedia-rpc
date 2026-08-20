@@ -373,10 +373,16 @@ fn object_ref(uri: &str) -> v1::MediaRef {
     }
 }
 
+fn input_source(uri: &str) -> v1::InputSource {
+    v1::InputSource::from(&mm_domain::InputSource::from(
+        MediaRef::object_uri(uri).expect("valid ref"),
+    ))
+}
+
 fn concat_spec(inputs: &[String]) -> v1::OpSpec {
     v1::OpSpec {
         op: Some(v1::op_spec::Op::Concat(v1::ConcatSpec {
-            inputs: inputs.iter().map(|uri| object_ref(uri)).collect(),
+            inputs: inputs.iter().map(|uri| input_source(uri)).collect(),
             profile: None,
         })),
     }
@@ -385,7 +391,7 @@ fn concat_spec(inputs: &[String]) -> v1::OpSpec {
 fn probe_spec(uri: &str) -> v1::OpSpec {
     v1::OpSpec {
         op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
-            input: Some(object_ref(uri)),
+            input: Some(input_source(uri)),
         })),
     }
 }

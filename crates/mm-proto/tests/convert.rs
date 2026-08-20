@@ -1,11 +1,25 @@
 use mm_domain::{
-    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError, OpResult,
-    OpResultError, OpSpec, OpSpecError, OutputProfile, PackageResult, PackageSpec, ProbeResult,
-    ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
-    TranscodeSpec, TrimSpec,
+    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, MediaRef, MediaRefError,
+    MediaSource, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile, PackageResult,
+    PackageSpec, ProbeResult, ProbeSpec, ResizeMode, SourceError, ThumbnailResult, ThumbnailSpec,
+    TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
 };
 use mm_proto::v1;
 use proptest::prelude::*;
+
+fn media_source(media: &MediaRef) -> v1::InputSource {
+    v1::InputSource::from(&InputSource::from(media.clone()))
+}
+
+fn transcode_spec(input: v1::InputSource) -> v1::op_spec::Op {
+    v1::op_spec::Op::Transcode(v1::TranscodeSpec {
+        input: Some(input),
+        profile: Some(v1::OutputProfile {
+            frame_rate: 24.0,
+            ..Default::default()
+        }),
+    })
+}
 
 fn bucket_strategy() -> impl Strategy<Value = String> {
     "[a-z0-9][a-z0-9.-]{2,20}"
@@ -69,15 +83,19 @@ fn op_spec_strategy() -> impl Strategy<Value = OpSpec> {
             prop::option::of(profile_strategy()),
         )
             .prop_map(|(inputs, profile)| {
-                OpSpec::Concat(ConcatSpec::new(inputs, profile).unwrap())
+                OpSpec::Concat(
+                    ConcatSpec::new(inputs.into_iter().map(InputSource::from).collect(), profile)
+                        .unwrap(),
+                )
             }),
-        media_ref_strategy().prop_map(|input| OpSpec::Probe(ProbeSpec::new(input))),
+        media_ref_strategy()
+            .prop_map(|input| OpSpec::Probe(ProbeSpec::new(InputSource::from(input)).unwrap())),
         (media_ref_strategy(), profile_strategy()).prop_map(|(input, profile)| {
-            OpSpec::Transcode(TranscodeSpec::new(input, profile).unwrap())
+            OpSpec::Transcode(TranscodeSpec::new(InputSource::from(input), profile).unwrap())
         }),
         (media_ref_strategy(), 0.0f64..3600.0, 0.001f64..3600.0).prop_map(
             |(input, start, duration)| {
-                OpSpec::Trim(TrimSpec::new(input, start, duration).unwrap())
+                OpSpec::Trim(TrimSpec::new(InputSource::from(input), start, duration).unwrap())
             }
         ),
         (
@@ -87,7 +105,9 @@ fn op_spec_strategy() -> impl Strategy<Value = OpSpec> {
             1u32..4096,
         )
             .prop_map(|(input, offsets, width, height)| {
-                OpSpec::Thumbnail(ThumbnailSpec::new(input, offsets, width, height).unwrap())
+                OpSpec::Thumbnail(
+                    ThumbnailSpec::new(InputSource::from(input), offsets, width, height).unwrap(),
+                )
             }),
     ]
 }
@@ -114,8 +134,15 @@ fn op_result_strategy() -> impl Strategy<Value = OpResult> {
 fn probe_spec_with_object_uri(uri: String) -> v1::OpSpec {
     v1::OpSpec {
         op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
-            input: Some(v1::MediaRef {
-                r#ref: Some(v1::media_ref::Ref::ObjectUri(uri)),
+            input: Some(v1::InputSource {
+                source: Some(v1::input_source::Source::Media(v1::MediaSource {
+                    media: Some(v1::MediaRef {
+                        r#ref: Some(v1::media_ref::Ref::ObjectUri(uri)),
+                    }),
+                    trim: None,
+                    speed: None,
+                    volume: None,
+                })),
             }),
         })),
     }
@@ -140,7 +167,7 @@ proptest! {
     fn single_input_concat_is_rejected(input in media_ref_strategy()) {
         let proto = v1::OpSpec {
             op: Some(v1::op_spec::Op::Concat(v1::ConcatSpec {
-                inputs: vec![v1::MediaRef::from(&input)],
+                inputs: vec![media_source(&input)],
                 profile: None,
             })),
         };
@@ -157,7 +184,9 @@ proptest! {
         let result = OpSpec::try_from(probe_spec_with_object_uri(uri));
         let rejected = matches!(
             result,
-            Err(OpSpecError::MediaRef(MediaRefError::UnknownScheme { .. }))
+            Err(OpSpecError::Source(SourceError::MediaRef(
+                MediaRefError::UnknownScheme { .. }
+            )))
         );
         prop_assert!(rejected);
     }
@@ -172,7 +201,9 @@ proptest! {
             let result = OpSpec::try_from(probe_spec_with_object_uri(uri));
             let rejected = matches!(
                 result,
-                Err(OpSpecError::MediaRef(MediaRefError::MalformedObjectUri { .. }))
+                Err(OpSpecError::Source(SourceError::MediaRef(
+                    MediaRefError::MalformedObjectUri { .. }
+                )))
             );
             prop_assert!(rejected);
         }
@@ -185,7 +216,7 @@ proptest! {
     ) {
         let proto = v1::OpSpec {
             op: Some(v1::op_spec::Op::Trim(v1::TrimSpec {
-                input: Some(v1::MediaRef::from(&input)),
+                input: Some(media_source(&input)),
                 start_seconds: start,
                 duration_seconds: 1.0,
             })),
@@ -204,7 +235,7 @@ proptest! {
     ) {
         let proto = v1::OpSpec {
             op: Some(v1::op_spec::Op::Trim(v1::TrimSpec {
-                input: Some(v1::MediaRef::from(&input)),
+                input: Some(media_source(&input)),
                 start_seconds: 0.0,
                 duration_seconds: duration,
             })),
@@ -225,7 +256,7 @@ proptest! {
         let (width, height) = if width_is_zero { (0, side) } else { (side, 0) };
         let proto = v1::OpSpec {
             op: Some(v1::op_spec::Op::Thumbnail(v1::ThumbnailSpec {
-                input: Some(v1::MediaRef::from(&input)),
+                input: Some(media_source(&input)),
                 offsets_seconds: vec![1.0],
                 width,
                 height,
@@ -280,7 +311,7 @@ fn missing_input_is_rejected() {
     };
     assert_eq!(
         OpSpec::try_from(proto).unwrap_err(),
-        OpSpecError::MediaRef(MediaRefError::Missing)
+        OpSpecError::Source(SourceError::MissingSource)
     );
 }
 
@@ -302,9 +333,7 @@ fn empty_concat_inputs_are_rejected() {
 fn empty_transcode_profile_is_rejected() {
     let proto = v1::OpSpec {
         op: Some(v1::op_spec::Op::Transcode(v1::TranscodeSpec {
-            input: Some(v1::MediaRef {
-                r#ref: Some(v1::media_ref::Ref::ObjectUri("s3://b/k".to_string())),
-            }),
+            input: Some(media_source(&MediaRef::object_uri("s3://b/k").unwrap())),
             profile: None,
         })),
     };
@@ -431,7 +460,7 @@ fn a_package_spec_and_result_round_trip_through_the_contract() {
 fn a_package_spec_with_a_non_positive_segment_length_is_rejected() {
     let wire = v1::OpSpec {
         op: Some(v1::op_spec::Op::Package(v1::PackageSpec {
-            input: Some(v1::MediaRef::from(
+            input: Some(media_source(
                 &MediaRef::object_uri("s3://media/in/a.mp4").unwrap(),
             )),
             segment_seconds: 0.0,
@@ -442,4 +471,189 @@ fn a_package_spec_with_a_non_positive_segment_length_is_rejected() {
         OpSpec::try_from(wire),
         Err(OpSpecError::InvalidSegmentLength { .. })
     ));
+}
+
+fn wire_source(
+    media: &MediaRef,
+    trim: Option<v1::TrimRange>,
+    speed: Option<f64>,
+    volume: Option<f64>,
+) -> v1::InputSource {
+    v1::InputSource {
+        source: Some(v1::input_source::Source::Media(v1::MediaSource {
+            media: Some(v1::MediaRef::from(media)),
+            trim,
+            speed,
+            volume,
+        })),
+    }
+}
+
+#[test]
+fn a_source_with_cuts_round_trips_in_both_directions() {
+    let media = MediaRef::object_uri("s3://media/in/a.mp4").unwrap();
+    let spec = OpSpec::Transcode(
+        TranscodeSpec::new(
+            InputSource::from(
+                MediaSource::new(
+                    media.clone(),
+                    Some(TrimRange::new(1.5, 4.25).unwrap()),
+                    Some(0.5),
+                    Some(0.75),
+                )
+                .unwrap(),
+            ),
+            OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).unwrap(),
+        )
+        .unwrap(),
+    );
+
+    let wire = v1::OpSpec::from(&spec);
+    assert_eq!(OpSpec::try_from(wire.clone()).unwrap(), spec);
+    assert_eq!(
+        v1::OpSpec::from(&OpSpec::try_from(wire).unwrap()),
+        v1::OpSpec::from(&spec)
+    );
+}
+
+#[test]
+fn an_unset_scalar_arrives_absent_rather_than_zero() {
+    let media = MediaRef::object_uri("s3://media/in/a.mp4").unwrap();
+    let wire = v1::OpSpec {
+        op: Some(transcode_spec(wire_source(&media, None, None, None))),
+    };
+    let OpSpec::Transcode(spec) = OpSpec::try_from(wire).unwrap() else {
+        panic!("expected a transcode spec");
+    };
+    assert_eq!(spec.input().media().unwrap().speed(), None);
+    assert_eq!(spec.input().media().unwrap().volume(), None);
+    assert_eq!(spec.input().media().unwrap().trim(), None);
+}
+
+#[test]
+fn a_speed_of_zero_off_the_wire_is_refused_naming_the_field() {
+    let media = MediaRef::object_uri("s3://media/in/a.mp4").unwrap();
+    let wire = v1::OpSpec {
+        op: Some(transcode_spec(wire_source(&media, None, Some(0.0), None))),
+    };
+    let error = OpSpec::try_from(wire).unwrap_err();
+    assert!(matches!(
+        error,
+        OpSpecError::Source(SourceError::InvalidSpeed { .. })
+    ));
+    assert!(error.to_string().contains("speed"), "{error}");
+}
+
+#[test]
+fn a_negative_trim_start_off_the_wire_is_refused_naming_the_field() {
+    let media = MediaRef::object_uri("s3://media/in/a.mp4").unwrap();
+    let trim = v1::TrimRange {
+        start_seconds: -1.0,
+        duration_seconds: 2.0,
+    };
+    let wire = v1::OpSpec {
+        op: Some(transcode_spec(wire_source(&media, Some(trim), None, None))),
+    };
+    let error = OpSpec::try_from(wire).unwrap_err();
+    assert!(matches!(
+        error,
+        OpSpecError::Source(SourceError::InvalidTrimStart { .. })
+    ));
+    assert!(error.to_string().contains("trim start_seconds"), "{error}");
+}
+
+#[test]
+fn a_negative_volume_off_the_wire_is_refused_naming_the_field() {
+    let media = MediaRef::object_uri("s3://media/in/a.mp4").unwrap();
+    let wire = v1::OpSpec {
+        op: Some(transcode_spec(wire_source(&media, None, None, Some(-0.5)))),
+    };
+    let error = OpSpec::try_from(wire).unwrap_err();
+    assert!(matches!(
+        error,
+        OpSpecError::Source(SourceError::InvalidVolume { .. })
+    ));
+    assert!(error.to_string().contains("volume"), "{error}");
+}
+
+#[test]
+fn a_cut_an_op_cannot_apply_is_refused_naming_the_op_and_the_field() {
+    let media = MediaRef::object_uri("s3://media/in/a.mp4").unwrap();
+    let trim = v1::TrimRange {
+        start_seconds: 0.0,
+        duration_seconds: 1.0,
+    };
+    let wire = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+            input: Some(wire_source(&media, Some(trim), None, None)),
+        })),
+    };
+    let error = OpSpec::try_from(wire).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            OpSpecError::InputCut {
+                op: "probe",
+                field: "trim"
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_source_that_names_no_media_is_refused() {
+    let wire = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+            input: Some(v1::InputSource {
+                source: Some(v1::input_source::Source::Media(v1::MediaSource {
+                    media: None,
+                    trim: None,
+                    speed: None,
+                    volume: None,
+                })),
+            }),
+        })),
+    };
+    assert_eq!(
+        OpSpec::try_from(wire).unwrap_err(),
+        OpSpecError::Source(SourceError::MissingMedia)
+    );
+}
+
+#[test]
+fn a_node_reference_round_trips_and_keeps_its_identity() {
+    let wire = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+            input: Some(v1::InputSource {
+                source: Some(v1::input_source::Source::Node(v1::NodeRef {
+                    id: "join".to_string(),
+                    output: 2,
+                })),
+            }),
+        })),
+    };
+    let OpSpec::Probe(spec) = OpSpec::try_from(wire.clone()).expect("a node parses") else {
+        panic!("expected a probe spec");
+    };
+    let node = spec.input().node().expect("a node input");
+    assert_eq!(node.id().as_str(), "join");
+    assert_eq!(node.output(), 2);
+    assert_eq!(v1::OpSpec::from(&OpSpec::Probe(spec)), wire);
+}
+
+#[test]
+fn a_node_reference_with_an_empty_id_is_refused_by_name() {
+    let wire = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+            input: Some(v1::InputSource {
+                source: Some(v1::input_source::Source::Node(v1::NodeRef {
+                    id: String::new(),
+                    output: 0,
+                })),
+            }),
+        })),
+    };
+    let error = OpSpec::try_from(wire).expect_err("an empty node id is refused");
+    assert!(error.to_string().contains("node id"), "{error}");
 }

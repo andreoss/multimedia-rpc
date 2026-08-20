@@ -69,8 +69,17 @@ fn create_job_request_encodes_and_decodes() {
         idempotency_key: "key-1".to_string(),
         spec: Some(v1::OpSpec {
             op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
-                input: Some(v1::MediaRef {
-                    r#ref: Some(v1::media_ref::Ref::ObjectUri("s3://bucket/key".to_string())),
+                input: Some(v1::InputSource {
+                    source: Some(v1::input_source::Source::Media(v1::MediaSource {
+                        media: Some(v1::MediaRef {
+                            r#ref: Some(v1::media_ref::Ref::ObjectUri(
+                                "s3://bucket/key".to_string(),
+                            )),
+                        }),
+                        trim: None,
+                        speed: None,
+                        volume: None,
+                    })),
                 }),
             })),
         }),
@@ -138,10 +147,17 @@ fn job_state_enum_covers_lifecycle() {
 
 #[test]
 fn op_spec_oneof_has_all_five_arms() {
-    let media = || v1::MediaRef {
-        r#ref: Some(v1::media_ref::Ref::HttpUrl(
-            "https://host/input.mp4".to_string(),
-        )),
+    let media = || v1::InputSource {
+        source: Some(v1::input_source::Source::Media(v1::MediaSource {
+            media: Some(v1::MediaRef {
+                r#ref: Some(v1::media_ref::Ref::HttpUrl(
+                    "https://host/input.mp4".to_string(),
+                )),
+            }),
+            trim: None,
+            speed: None,
+            volume: None,
+        })),
     };
     let arms = [
         v1::op_spec::Op::Concat(v1::ConcatSpec {

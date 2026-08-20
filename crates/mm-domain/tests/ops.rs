@@ -1,7 +1,7 @@
 use mm_domain::{
-    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError, OpKind,
-    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec,
-    ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec, TrimSpec,
+    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, MediaRef, MediaRefError,
+    OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, ProbeResult,
+    ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec, TrimSpec,
     UnsupportedOp,
 };
 
@@ -136,7 +136,7 @@ fn output_profile_rejects_bad_frame_rate() {
 #[test]
 fn concat_requires_at_least_two_inputs() {
     assert_eq!(
-        ConcatSpec::new(vec![], None).unwrap_err(),
+        ConcatSpec::new(Vec::<InputSource>::new(), None).unwrap_err(),
         OpSpecError::EmptyInputs
     );
     assert_eq!(
@@ -158,8 +158,8 @@ fn concat_rejects_empty_profile() {
 
 #[test]
 fn probe_takes_any_valid_ref() {
-    let spec = ProbeSpec::new(http());
-    assert_eq!(spec.input(), &http());
+    let spec = ProbeSpec::new(http()).expect("a bare reference cuts nothing");
+    assert_eq!(spec.input().media().unwrap().media(), &http());
 }
 
 #[test]
@@ -243,7 +243,10 @@ fn specs() -> Vec<(OpSpec, OpKind)> {
             OpSpec::Concat(ConcatSpec::new(vec![object(), http()], None).unwrap()),
             OpKind::Concat,
         ),
-        (OpSpec::Probe(ProbeSpec::new(object())), OpKind::Probe),
+        (
+            OpSpec::Probe(ProbeSpec::new(object()).expect("probe cuts nothing")),
+            OpKind::Probe,
+        ),
         (
             OpSpec::Transcode(TranscodeSpec::new(object(), profile()).unwrap()),
             OpKind::Transcode,

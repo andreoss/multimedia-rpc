@@ -9,6 +9,30 @@ message MediaRef {
   }
 }
 
+message TrimRange {
+  double start_seconds = 1;
+  double duration_seconds = 2;
+}
+
+message MediaSource {
+  MediaRef media = 1;
+  TrimRange trim = 2;
+  optional double speed = 3;
+  optional double volume = 4;
+}
+
+message NodeRef {
+  string id = 1;
+  uint32 output = 2;
+}
+
+message InputSource {
+  oneof source {
+    MediaSource media = 1;
+    NodeRef node = 2;
+  }
+}
+
 message OutputProfile {
   double frame_rate = 1;
   uint32 video_max_bitrate = 2;

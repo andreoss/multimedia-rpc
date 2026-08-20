@@ -264,11 +264,39 @@ fn concat_spec() -> v1::OpSpec {
             vec![
                 MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref"),
                 MediaRef::object_uri("s3://media/in/b.mp4").expect("valid ref"),
-            ],
+            ]
+            .into_iter()
+            .map(mm_domain::InputSource::from)
+            .collect(),
             None,
         )
         .expect("valid concat spec"),
     ))
+}
+
+fn cut_transcode_spec(
+    trim: Option<v1::TrimRange>,
+    speed: Option<f64>,
+    volume: Option<f64>,
+) -> v1::OpSpec {
+    v1::OpSpec {
+        op: Some(v1::op_spec::Op::Transcode(v1::TranscodeSpec {
+            input: Some(v1::InputSource {
+                source: Some(v1::input_source::Source::Media(v1::MediaSource {
+                    media: Some(v1::MediaRef::from(
+                        &MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref"),
+                    )),
+                    trim,
+                    speed,
+                    volume,
+                })),
+            }),
+            profile: Some(v1::OutputProfile {
+                frame_rate: 24.0,
+                ..Default::default()
+            }),
+        })),
+    }
 }
 
 fn create_request(user: &str, key: &str) -> v1::CreateJobRequest {
@@ -433,11 +461,9 @@ async fn an_invalid_spec_is_rejected_with_the_typed_message() {
     let mut request = create_request("owner-1", "req-1");
     request.spec = Some(v1::OpSpec {
         op: Some(v1::op_spec::Op::Concat(v1::ConcatSpec {
-            inputs: vec![v1::MediaRef {
-                r#ref: Some(v1::media_ref::Ref::ObjectUri(
-                    "s3://media/in/only.mp4".to_string(),
-                )),
-            }],
+            inputs: vec![v1::InputSource::from(&mm_domain::InputSource::from(
+                MediaRef::object_uri("s3://media/in/only.mp4").expect("valid ref"),
+            ))],
             profile: None,
         })),
     });
@@ -497,7 +523,9 @@ async fn probe_and_transcode_specs_are_accepted_at_create() {
     let profile =
         mm_domain::OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).expect("valid profile");
     let specs = vec![
-        v1::OpSpec::from(&OpSpec::Probe(mm_domain::ProbeSpec::new(input.clone()))),
+        v1::OpSpec::from(&OpSpec::Probe(
+            mm_domain::ProbeSpec::new(input.clone()).expect("a bare reference cuts nothing"),
+        )),
         v1::OpSpec::from(&OpSpec::Transcode(
             mm_domain::TranscodeSpec::new(input.clone(), profile).expect("valid transcode spec"),
         )),
@@ -1262,6 +1290,139 @@ async fn an_unusable_trace_header_is_replaced_rather_than_refused() {
         record.trace_id,
         TraceId::from_str("00000000-0000-0000-0000-000000000000").ok()
     );
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_rejected_cut_is_invalid_argument_naming_the_field() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+
+    let refused = [
+        (
+            Some(v1::TrimRange {
+                start_seconds: -1.0,
+                duration_seconds: 2.0,
+            }),
+            None,
+            None,
+            "trim start_seconds",
+        ),
+        (
+            Some(v1::TrimRange {
+                start_seconds: 0.0,
+                duration_seconds: 0.0,
+            }),
+            None,
+            None,
+            "trim duration_seconds",
+        ),
+        (None, Some(0.0), None, "speed"),
+        (None, Some(-1.0), None, "speed"),
+        (None, None, Some(-0.5), "volume"),
+    ];
+    for (position, (trim, speed, volume, field)) in refused.into_iter().enumerate() {
+        let mut request = create_request("owner-1", &format!("req-cut-{position}"));
+        request.spec = Some(cut_transcode_spec(trim, speed, volume));
+        let status = client
+            .create_job(request)
+            .await
+            .expect_err("a rejected cut is refused at submission");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{field}");
+        assert!(
+            status.message().contains(field),
+            "{:?} does not name {field}",
+            status.message()
+        );
+    }
+
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_cut_an_op_cannot_apply_is_invalid_argument_naming_the_op_and_the_field() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut request = create_request("owner-1", "req-cut-unsupported");
+    request.spec = Some(v1::OpSpec {
+        op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+            input: Some(v1::InputSource {
+                source: Some(v1::input_source::Source::Media(v1::MediaSource {
+                    media: Some(v1::MediaRef::from(
+                        &MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref"),
+                    )),
+                    trim: Some(v1::TrimRange {
+                        start_seconds: 0.0,
+                        duration_seconds: 1.0,
+                    }),
+                    speed: None,
+                    volume: None,
+                })),
+            }),
+        })),
+    });
+
+    let status = client
+        .create_job(request)
+        .await
+        .expect_err("probe cannot apply a cut");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("probe"), "{:?}", status.message());
+    assert!(status.message().contains("trim"), "{:?}", status.message());
+
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_source_carrying_trim_speed_and_volume_is_accepted() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut request = create_request("owner-1", "req-cut-valid");
+    request.spec = Some(cut_transcode_spec(
+        Some(v1::TrimRange {
+            start_seconds: 1.0,
+            duration_seconds: 2.0,
+        }),
+        Some(0.5),
+        Some(0.5),
+    ));
+
+    let created = client
+        .create_job(request)
+        .await
+        .expect("a well formed source is accepted")
+        .into_inner();
+    assert!(created.created);
+
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_node_reference_is_unimplemented_at_submission() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut request = create_request("owner-1", "req-node-ref");
+    request.spec = Some(v1::OpSpec {
+        op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+            input: Some(v1::InputSource {
+                source: Some(v1::input_source::Source::Node(v1::NodeRef {
+                    id: "join".to_string(),
+                    output: 0,
+                })),
+            }),
+        })),
+    });
+    let status = client
+        .create_job(request)
+        .await
+        .expect_err("a node reference has no producer yet");
+    assert_eq!(status.code(), tonic::Code::Unimplemented);
+    assert!(status.message().contains("join"), "{:?}", status.message());
+
     handle.shutdown().await;
     db.dispose().await;
 }

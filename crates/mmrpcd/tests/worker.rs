@@ -238,9 +238,10 @@ async fn the_combined_daemon_serves_and_works_jobs() {
         .expect("dial announced address");
     let mut client = MediaJobServiceClient::new(channel);
 
-    let spec = v1::OpSpec::from(&OpSpec::Probe(ProbeSpec::new(
-        MediaRef::object_uri(&uri).expect("valid ref"),
-    )));
+    let spec = v1::OpSpec::from(&OpSpec::Probe(
+        ProbeSpec::new(MediaRef::object_uri(&uri).expect("valid ref"))
+            .expect("a bare reference cuts nothing"),
+    ));
     let created = client
         .create_job(v1::CreateJobRequest {
             user_id: "owner-1".to_string(),

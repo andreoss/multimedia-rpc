@@ -19,7 +19,8 @@ pub use progress::{ProgressParser, ProgressUpdate};
 pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner};
 pub use thumbnail::{IMAGE_QUALITY, ImageFormat, ThumbnailTarget, build_thumbnail_args};
 pub use transcode::{
-    AudioCodec, ScaleMode, TranscodeError, TranscodeTarget, VideoCodec, build_transcode_args,
+    AudioCodec, ScaleMode, SourceCut, TranscodeError, TranscodeTarget, VideoCodec,
+    build_transcode_args,
 };
 pub use trim::{
     KEYFRAME_TOLERANCE_SECONDS, TrimError, TrimStrategy, TrimTarget, aligned_to_keyframe,

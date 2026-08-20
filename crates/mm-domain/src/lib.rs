@@ -3,6 +3,7 @@ mod id;
 mod jobs;
 mod op;
 mod resolve;
+mod source;
 mod state;
 mod store;
 mod validate;
@@ -22,7 +23,7 @@ pub use op::{
     ObjectRef, OpKind, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
     OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode,
     ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    UnsupportedOp,
+    UnsupportedInput, UnsupportedOp,
 };
 pub use resolve::{ResolveError, resolve_media_ref};
 
@@ -37,6 +38,7 @@ pub use validate::{
     validate_concat_inputs, validate_inputs,
 };
 
+pub use source::{InputSource, MediaSource, NodeRef, SourceError, TrimRange};
 pub use state::{
     Cancelled, Failed, Job, JobState, Pending, Running, Stage, StateParseError, Succeeded,
     TransitionError,

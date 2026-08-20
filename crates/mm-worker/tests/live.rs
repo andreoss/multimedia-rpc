@@ -4488,3 +4488,79 @@ async fn a_cache_row_whose_source_is_gone_is_removed_and_the_job_runs() {
     assert!(store.head(second_output).await.expect("output exists") > 0);
     db.dispose().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transcode_node_reading_another_node_hits_the_branch_cache() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("cache-branch.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/cache-branch.mp4").await;
+    let repository = db.repository();
+    let profile = OutputProfile::from_raw(24.0, 1200, 23, 128_000, 48_000, 0, 0).unwrap();
+    let first = TranscodeSpec::new(input.clone(), profile).unwrap();
+    let second = TranscodeSpec::new(
+        InputSource::from(NodeRef::new("source", 0).unwrap()),
+        profile,
+    )
+    .unwrap();
+    let graph = GraphSpec::new(vec![
+        GraphNode::new("source", OpSpec::Transcode(first)).unwrap(),
+        GraphNode::new("encode", OpSpec::Transcode(second)).unwrap(),
+    ])
+    .unwrap();
+    let first_job = repository
+        .create(single_input_job(OpSpec::Graph(graph.clone())))
+        .await
+        .unwrap();
+    let config = base_config(&db, store.clone(), "worker-branch-cache");
+    let metrics = config.metrics.clone();
+    let handle = start(config);
+    let first_record = await_terminal(
+        &repository,
+        first_job.id,
+        mm_testkit::budget::MERGE_TERMINAL,
+    )
+    .await;
+    assert_eq!(
+        first_record.state,
+        JobState::Succeeded,
+        "{:?}",
+        first_record.failure
+    );
+    assert_eq!(metrics.cache_hits.value(), 0);
+    assert_eq!(
+        metrics.cache_misses.value(),
+        2,
+        "a node-backed transcode was not cached"
+    );
+
+    let second_job = repository
+        .create(single_input_job(OpSpec::Graph(graph)))
+        .await
+        .unwrap();
+    let second_record = await_terminal(
+        &repository,
+        second_job.id,
+        mm_testkit::budget::MERGE_TERMINAL,
+    )
+    .await;
+    handle.shutdown().await;
+    assert_eq!(
+        second_record.state,
+        JobState::Succeeded,
+        "{:?}",
+        second_record.failure
+    );
+    assert_eq!(
+        metrics.cache_hits.value(),
+        2,
+        "the second graph did not copy both branches"
+    );
+    assert_eq!(
+        metrics.cache_misses.value(),
+        2,
+        "the second graph ran an encoder"
+    );
+    db.dispose().await;
+}

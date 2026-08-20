@@ -1358,21 +1358,23 @@ async fn resolve_input(
     deadline_at: SystemTime,
     index: usize,
 ) -> Result<String, Finish> {
-    let media = match input.media() {
-        Some(source) => source.media().clone(),
-        None => match input.node() {
-            Some(node) => resolve_node(scope, node, index)?,
-            None => {
-                return Err(failed(
-                    codes::UNSUPPORTED_OPERATION,
-                    format!("input {index}: an unrendered parameter reached the worker"),
-                ));
-            }
-        },
-    };
+    let media = resolve_media(input, scope, index)?;
     resolve_media_ref(ctx.store.as_ref(), &media, deadline_at, SystemTime::now())
         .await
         .map_err(|error| failed(codes::INPUT_UNRESOLVABLE, format!("input {index}: {error}")))
+}
+
+fn resolve_media(input: &InputSource, scope: &Scope, index: usize) -> Result<MediaRef, Finish> {
+    match input.media() {
+        Some(source) => Ok(source.media().clone()),
+        None => match input.node() {
+            Some(node) => resolve_node(scope, node, index),
+            None => Err(failed(
+                codes::UNSUPPORTED_OPERATION,
+                format!("input {index}: an unrendered parameter reached the worker"),
+            )),
+        },
+    }
 }
 
 async fn probe_input(ctx: &WorkerConfig, url: &str, index: usize) -> Result<MediaInfo, Finish> {
@@ -2089,16 +2091,13 @@ fn transcode_cache_digest(spec: &OpSpec, identity: &str) -> String {
 async fn transcode_cache_key(
     ctx: &WorkerConfig,
     spec: &OpSpec,
-    input: &InputSource,
+    input: &MediaRef,
 ) -> Option<String> {
-    let MediaRef::Object(object) = input.media().map(|source| source.media())? else {
+    let MediaRef::Object(object) = input else {
         return None;
     };
     let identity = ctx.store.identity(object).await.ok()?;
-    Some(transcode_cache_digest(
-        spec,
-        &format!("{}:{}", object.key(), identity),
-    ))
+    Some(transcode_cache_digest(spec, &identity))
 }
 
 async fn cached_transcode(
@@ -2150,8 +2149,8 @@ async fn transcode_pipeline(
     let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Transcode, &[input_report(&info)])?;
 
-    let cache_digest =
-        transcode_cache_key(ctx, &OpSpec::Transcode(spec.clone()), spec.input()).await;
+    let resolved = resolve_media(spec.input(), scope, 0)?;
+    let cache_digest = transcode_cache_key(ctx, &OpSpec::Transcode(spec.clone()), &resolved).await;
     if let Some(digest) = &cache_digest {
         if let Some(cached) = cached_transcode(ctx, job.id, scope, digest).await? {
             return Ok(cached);

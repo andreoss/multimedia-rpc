@@ -86,6 +86,46 @@ impl MediaJobService for Recorder {
         self.record("watch_job", &request);
         Ok(Response::new(Box::pin(futures_util::stream::empty())))
     }
+
+    async fn create_template(
+        &self,
+        request: Request<v1::CreateTemplateRequest>,
+    ) -> Result<Response<v1::CreateTemplateResponse>, Status> {
+        self.record("create_template", &request);
+        Ok(Response::new(v1::CreateTemplateResponse::default()))
+    }
+
+    async fn get_template(
+        &self,
+        request: Request<v1::GetTemplateRequest>,
+    ) -> Result<Response<v1::GetTemplateResponse>, Status> {
+        self.record("get_template", &request);
+        Ok(Response::new(v1::GetTemplateResponse::default()))
+    }
+
+    async fn list_templates(
+        &self,
+        request: Request<v1::ListTemplatesRequest>,
+    ) -> Result<Response<v1::ListTemplatesResponse>, Status> {
+        self.record("list_templates", &request);
+        Ok(Response::new(v1::ListTemplatesResponse::default()))
+    }
+
+    async fn delete_template(
+        &self,
+        request: Request<v1::DeleteTemplateRequest>,
+    ) -> Result<Response<v1::DeleteTemplateResponse>, Status> {
+        self.record("delete_template", &request);
+        Ok(Response::new(v1::DeleteTemplateResponse::default()))
+    }
+
+    async fn render_template(
+        &self,
+        request: Request<v1::RenderTemplateRequest>,
+    ) -> Result<Response<v1::RenderTemplateResponse>, Status> {
+        self.record("render_template", &request);
+        Ok(Response::new(v1::RenderTemplateResponse::default()))
+    }
 }
 
 fn with_token<T>(message: T, token: Option<&str>) -> Request<T> {

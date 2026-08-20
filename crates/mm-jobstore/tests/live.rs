@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use mm_domain::{
     CancelNotifications, ConcatSpec, JobEventNotifications, JobFailure, JobId, JobNotifications,
-    JobRepository, JobState, JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProgressPercent,
-    QueueUrl, RequestId, TimedOutput, TraceId, UserId, WorkerId,
+    JobRepository, JobState, JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProbeSpec,
+    ProgressPercent, QueueUrl, RequestId, Template, TimedOutput, TraceId, UserId, WorkerId,
 };
 use mm_jobstore::{
     MIGRATOR, PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository,
@@ -1417,5 +1417,80 @@ async fn the_pending_count_is_the_jobs_waiting_to_be_claimed() {
     assert_eq!(repository.pending_count().await.expect("count succeeds"), 0);
     assert_ne!(claimed[0].id, second.id);
     assert_ne!(first.id, second.id);
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_template_round_trips_and_is_owner_scoped() {
+    let db = fresh_db().await;
+    let repository = db.repository();
+    let spec =
+        OpSpec::Probe(ProbeSpec::new(MediaRef::object_uri("s3://bucket/key").unwrap()).unwrap());
+    let template =
+        Template::new(owner("owner-1"), "recipe", spec.clone(), vec![]).expect("a valid template");
+    let stored = repository
+        .create_template(template.clone())
+        .await
+        .expect("template stores");
+    assert_eq!(stored.id(), template.id());
+    assert_eq!(stored.owner(), template.owner());
+    assert_eq!(stored.name().as_str(), "recipe");
+
+    assert!(
+        repository
+            .get_template(&owner("owner-1"), template.id())
+            .await
+            .expect("read succeeds")
+            .is_some()
+    );
+    assert!(
+        repository
+            .get_template(&owner("owner-2"), template.id())
+            .await
+            .expect("read succeeds")
+            .is_none(),
+        "another owner read the template"
+    );
+
+    let clash = Template::new(owner("owner-1"), "recipe", spec, vec![]).unwrap();
+    assert!(matches!(
+        repository.create_template(clash).await.unwrap_err(),
+        JobStoreError::TemplateNameTaken { .. }
+    ));
+
+    assert_eq!(
+        repository
+            .list_templates(&owner("owner-1"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repository
+            .list_templates(&owner("owner-2"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !repository
+            .delete_template(&owner("owner-2"), template.id())
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository
+            .delete_template(&owner("owner-1"), template.id())
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository
+            .get_template(&owner("owner-1"), template.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
     db.dispose().await;
 }

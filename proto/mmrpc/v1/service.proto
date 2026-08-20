@@ -5,6 +5,7 @@ package mmrpc.v1;
 import "mmrpc/v1/job.proto";
 import "mmrpc/v1/media.proto";
 import "mmrpc/v1/ops.proto";
+import "mmrpc/v1/template.proto";
 
 service MediaJobService {
   rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
@@ -12,6 +13,11 @@ service MediaJobService {
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc WatchJob(WatchJobRequest) returns (stream WatchJobResponse);
+  rpc CreateTemplate(CreateTemplateRequest) returns (CreateTemplateResponse);
+  rpc GetTemplate(GetTemplateRequest) returns (GetTemplateResponse);
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  rpc DeleteTemplate(DeleteTemplateRequest) returns (DeleteTemplateResponse);
+  rpc RenderTemplate(RenderTemplateRequest) returns (RenderTemplateResponse);
 }
 
 message CreateJobRequest {
@@ -65,4 +71,55 @@ message WatchJobRequest {
 
 message WatchJobResponse {
   JobEvent event = 1;
+}
+
+message CreateTemplateRequest {
+  string user_id = 1 [deprecated = true];
+  string name = 2;
+  OpSpec spec = 3;
+  repeated ParameterDeclaration parameters = 4;
+}
+
+message CreateTemplateResponse {
+  Template template = 1;
+}
+
+message GetTemplateRequest {
+  string user_id = 1 [deprecated = true];
+  string template_id = 2;
+}
+
+message GetTemplateResponse {
+  Template template = 1;
+}
+
+message ListTemplatesRequest {
+  string user_id = 1 [deprecated = true];
+}
+
+message ListTemplatesResponse {
+  repeated Template templates = 1;
+}
+
+message DeleteTemplateRequest {
+  string user_id = 1 [deprecated = true];
+  string template_id = 2;
+}
+
+message DeleteTemplateResponse {
+  bool deleted = 1;
+}
+
+message RenderTemplateRequest {
+  string user_id = 1 [deprecated = true];
+  string template_id = 2;
+  string idempotency_key = 3;
+  repeated ParameterBinding values = 4;
+  Callback callback = 5;
+}
+
+message RenderTemplateResponse {
+  string job_id = 1;
+  string request_id = 2;
+  bool created = 3;
 }

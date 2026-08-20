@@ -6,12 +6,14 @@ mod resolve;
 mod source;
 mod state;
 mod store;
+mod template;
 mod validate;
 
 pub use callback::{CallbackError, CallbackPublisher, QueueUrl, QueueUrlError};
 pub use id::{
-    JobId, JobIdError, NodeId, NodeIdError, RequestId, RequestIdError, TextIdError, TraceId,
-    TraceIdError, UserId, UserIdError, WorkerId, WorkerIdError,
+    JobId, JobIdError, NodeId, NodeIdError, ParameterName, ParameterNameError, RequestId,
+    RequestIdError, TemplateId, TemplateIdError, TemplateName, TemplateNameError, TextIdError,
+    TraceId, TraceIdError, UserId, UserIdError, WorkerId, WorkerIdError,
 };
 pub use jobs::{
     CancelNotifications, InputFailure, InputFailureError, JobEventNotifications, JobFailure,
@@ -44,4 +46,7 @@ pub use source::{InputSource, MediaSource, NodeRef, SourceError, TrimRange};
 pub use state::{
     Cancelled, Failed, Job, JobState, Pending, Running, Stage, StateParseError, Succeeded,
     TransitionError,
+};
+pub use template::{
+    ParameterDeclaration, ParameterType, ParameterValue, Template, TemplateError, render,
 };

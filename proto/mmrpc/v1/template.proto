@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package mmrpc.v1;
+
+import "mmrpc/v1/media.proto";
+import "mmrpc/v1/ops.proto";
+
+enum ParameterType {
+  PARAMETER_TYPE_UNSPECIFIED = 0;
+  PARAMETER_TYPE_URI = 1;
+  PARAMETER_TYPE_TEXT = 2;
+}
+
+message ParameterDeclaration {
+  string name = 1;
+  ParameterType type = 2;
+}
+
+message ParameterDeclarations {
+  repeated ParameterDeclaration declarations = 1;
+}
+
+message ParameterValue {
+  oneof value {
+    MediaRef uri = 1;
+    string text = 2;
+  }
+}
+
+message ParameterBinding {
+  string name = 1;
+  ParameterValue value = 2;
+}
+
+message Template {
+  string template_id = 1;
+  string name = 2;
+  OpSpec spec = 3;
+  repeated ParameterDeclaration parameters = 4;
+}

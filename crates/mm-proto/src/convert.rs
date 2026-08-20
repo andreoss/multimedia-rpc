@@ -4,8 +4,9 @@ use mm_domain::{
     ImageResult, ImageSpec, InputFailure, InputFailureError, InputSource, JobFailure,
     JobFailureError, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeId,
     NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec, QueueUrl, ResizeMode,
-    SourceError, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    OutputProfileError, PackageResult, PackageSpec, ParameterDeclaration, ParameterName,
+    ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl, ResizeMode, SourceError,
+    StepOutcome, StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec, TimedOutput,
     TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
 };
 
@@ -105,6 +106,14 @@ impl TryFrom<v1::InputSource> for InputSource {
             Some(v1::input_source::Source::Node(node)) => {
                 NodeRef::try_from(node).map(InputSource::from)
             }
+            Some(v1::input_source::Source::Parameter(parameter)) => parameter
+                .name
+                .parse::<ParameterName>()
+                .map(InputSource::from)
+                .map_err(|source| SourceError::InvalidParameterName {
+                    value: parameter.name,
+                    source,
+                }),
             None => Err(SourceError::MissingSource),
         }
     }
@@ -120,6 +129,11 @@ impl From<&InputSource> for v1::InputSource {
             },
             InputSource::Node(node) => v1::InputSource {
                 source: Some(v1::input_source::Source::Node(v1::NodeRef::from(node))),
+            },
+            InputSource::Parameter(name) => v1::InputSource {
+                source: Some(v1::input_source::Source::Parameter(v1::ParameterRef {
+                    name: name.as_str().to_string(),
+                })),
             },
         }
     }
@@ -190,6 +204,99 @@ impl From<&GraphSpec> for v1::GraphSpec {
     fn from(value: &GraphSpec) -> Self {
         Self {
             nodes: value.nodes().iter().map(v1::GraphNode::from).collect(),
+        }
+    }
+}
+
+fn parameter_type_from_raw(value: i32) -> Result<ParameterType, TemplateError> {
+    match value {
+        raw if raw == v1::ParameterType::Uri as i32 => Ok(ParameterType::Uri),
+        raw if raw == v1::ParameterType::Text as i32 => Ok(ParameterType::Text),
+        other => Err(TemplateError::UnknownParameterType { value: other }),
+    }
+}
+
+fn parameter_type_to_raw(value: ParameterType) -> i32 {
+    match value {
+        ParameterType::Uri => v1::ParameterType::Uri as i32,
+        ParameterType::Text => v1::ParameterType::Text as i32,
+    }
+}
+
+impl TryFrom<v1::ParameterDeclaration> for ParameterDeclaration {
+    type Error = TemplateError;
+
+    fn try_from(value: v1::ParameterDeclaration) -> Result<Self, Self::Error> {
+        ParameterDeclaration::new(&value.name, parameter_type_from_raw(value.r#type)?)
+    }
+}
+
+impl From<&ParameterDeclaration> for v1::ParameterDeclaration {
+    fn from(value: &ParameterDeclaration) -> Self {
+        Self {
+            name: value.name().as_str().to_string(),
+            r#type: parameter_type_to_raw(value.kind()),
+        }
+    }
+}
+
+impl From<&[ParameterDeclaration]> for v1::ParameterDeclarations {
+    fn from(value: &[ParameterDeclaration]) -> Self {
+        Self {
+            declarations: value.iter().map(v1::ParameterDeclaration::from).collect(),
+        }
+    }
+}
+
+impl TryFrom<v1::ParameterDeclarations> for Vec<ParameterDeclaration> {
+    type Error = TemplateError;
+
+    fn try_from(value: v1::ParameterDeclarations) -> Result<Self, Self::Error> {
+        value
+            .declarations
+            .into_iter()
+            .map(ParameterDeclaration::try_from)
+            .collect()
+    }
+}
+
+impl TryFrom<v1::ParameterValue> for ParameterValue {
+    type Error = TemplateError;
+
+    fn try_from(value: v1::ParameterValue) -> Result<Self, Self::Error> {
+        match value.value {
+            Some(v1::parameter_value::Value::Uri(media)) => MediaRef::try_from(media)
+                .map(ParameterValue::Uri)
+                .map_err(|error| TemplateError::Spec(OpSpecError::from(error))),
+            Some(v1::parameter_value::Value::Text(text)) => Ok(ParameterValue::Text(text)),
+            None => Err(TemplateError::MissingValue),
+        }
+    }
+}
+
+impl From<&ParameterValue> for v1::ParameterValue {
+    fn from(value: &ParameterValue) -> Self {
+        let value = match value {
+            ParameterValue::Uri(media) => {
+                v1::parameter_value::Value::Uri(v1::MediaRef::from(media))
+            }
+            ParameterValue::Text(text) => v1::parameter_value::Value::Text(text.clone()),
+        };
+        Self { value: Some(value) }
+    }
+}
+
+impl From<&Template> for v1::Template {
+    fn from(value: &Template) -> Self {
+        Self {
+            template_id: value.id().to_string(),
+            name: value.name().as_str().to_string(),
+            spec: Some(v1::OpSpec::from(value.spec())),
+            parameters: value
+                .parameters()
+                .iter()
+                .map(v1::ParameterDeclaration::from)
+                .collect(),
         }
     }
 }

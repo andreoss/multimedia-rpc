@@ -26,10 +26,15 @@ message NodeRef {
   uint32 output = 2;
 }
 
+message ParameterRef {
+  string name = 1;
+}
+
 message InputSource {
   oneof source {
     MediaSource media = 1;
     NodeRef node = 2;
+    ParameterRef parameter = 3;
   }
 }
 

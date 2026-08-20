@@ -380,6 +380,7 @@ impl MediaJobService for MediaJobs {
         let message = request.into_inner();
         let owner = parse_user(&message.user_id)?;
         let id = parse_job_id(&message.job_id)?;
+        let changes = self.watch.subscribe();
         let snapshot = self
             .repository
             .get_owned(&owner, id)
@@ -389,7 +390,7 @@ impl MediaJobService for MediaJobs {
         let (sink, events) = mpsc::channel(WATCH_BUFFER);
         tokio::spawn(follow_job(
             self.repository.clone(),
-            self.watch.subscribe(),
+            changes,
             self.watch.poll,
             snapshot,
             sink,

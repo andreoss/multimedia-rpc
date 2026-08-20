@@ -538,15 +538,25 @@ async fn a_killed_workers_lease_expires_and_another_worker_completes_the_job() {
         Duration::from_secs(15),
     )
     .await;
-    let watched = Instant::now() + Duration::from_secs(60);
+    let first_lease = repository
+        .get(job.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .lease_expires_at
+        .expect("a running job holds a lease");
+    let renewed = Instant::now() + Duration::from_secs(90);
     loop {
         let record = repository.get(job.id).await.unwrap().unwrap();
-        if record.progress.value() > 0 {
+        if record
+            .lease_expires_at
+            .is_some_and(|lease| lease > first_lease)
+        {
             break;
         }
         assert!(
-            Instant::now() < watched,
-            "no progress was persisted while running"
+            Instant::now() < renewed,
+            "the lease was never renewed, so the run never started"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

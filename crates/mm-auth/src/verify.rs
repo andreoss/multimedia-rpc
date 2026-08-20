@@ -26,6 +26,8 @@ pub enum AuthError {
     BadSignature,
     #[error("the token expired")]
     Expired,
+    #[error("the token carries no expiry")]
+    ExpiryMissing,
     #[error("the token is not valid yet")]
     NotYetValid,
     #[error("the token was issued by another issuer")]
@@ -132,9 +134,8 @@ impl Verifier {
             .map(|elapsed| elapsed.as_secs() as i64)
             .unwrap_or_default();
         let leeway = self.leeway.as_secs() as i64;
-        if let Some(expiry) = claims.expires_at
-            && seconds >= expiry + leeway
-        {
+        let expiry = claims.expires_at.ok_or(AuthError::ExpiryMissing)?;
+        if seconds >= expiry + leeway {
             return Err(AuthError::Expired);
         }
         if let Some(not_before) = claims.not_before

@@ -267,3 +267,34 @@ fn the_bearer_scheme_is_required_and_the_scheme_is_read_case_insensitively() {
         token
     );
 }
+
+#[test]
+fn a_token_without_an_expiry_is_refused() {
+    let issuer = Issuer::seeded("key-1", 7);
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the key set loads");
+    let issued = unix(now());
+    let token = issuer.token_with_claims(&format!(
+        "{{\"sub\":\"owner-1\",\"iss\":\"test-issuer\",\"iat\":{issued}}}"
+    ));
+    assert_eq!(
+        verifier
+            .verify(&token, now())
+            .expect_err("a token that never expires verifies"),
+        AuthError::ExpiryMissing
+    );
+}
+
+#[test]
+fn a_token_that_carries_an_expiry_is_still_accepted() {
+    let issuer = Issuer::seeded("key-1", 7);
+    let verifier =
+        Verifier::from_jwks(&issuer.jwks(), Settings::none()).expect("the key set loads");
+    let token = issuer.token("owner-1", now(), Duration::from_secs(300));
+    assert!(verifier.verify(&token, now()).is_ok());
+}
+
+#[test]
+fn an_expiry_error_renders_a_message() {
+    assert!(!AuthError::ExpiryMissing.to_string().is_empty());
+}

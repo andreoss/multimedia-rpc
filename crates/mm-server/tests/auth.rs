@@ -2,7 +2,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use mm_auth::testing::{Issuer, tampered_signature};
+use mm_auth::testing::{Issuer, tampered_signature, unix};
 use mm_auth::{Settings, Verifier};
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
@@ -113,6 +113,10 @@ fn bearer(token: &str) -> String {
 
 fn live_token(issuer: &Issuer, subject: &str) -> String {
     bearer(&issuer.token(subject, SystemTime::now(), Duration::from_secs(300)))
+}
+
+fn live_token_raw(issuer: &Issuer, claims: &str) -> String {
+    bearer(&issuer.token_with_claims(claims))
 }
 
 fn open() -> (Interceptor<Recorder>, Seen) {
@@ -378,6 +382,23 @@ async fn a_token_cannot_be_verified_by_a_server_with_no_published_key() {
         .await
         .expect_err("an unverifiable token reaches a handler");
     assert_eq!(status.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn a_token_that_carries_no_expiry_is_rejected() {
+    let issuer = Issuer::seeded("key-1", 7);
+    let (interceptor, seen) = verifying(&issuer);
+    let issued = unix(SystemTime::now());
+    let token = live_token_raw(
+        &issuer,
+        &format!("{{\"sub\":\"owner-1\",\"iss\":\"test-issuer\",\"iat\":{issued}}}"),
+    );
+    let status = interceptor
+        .get_job(get_request(Some(&token), DEPRECATED_FIELD))
+        .await
+        .expect_err("a token without an end reaches a handler");
+    assert_eq!(status.code(), Code::Unauthenticated);
+    assert_eq!(reached_handlers(&seen), 0);
 }
 
 #[test]

@@ -1520,6 +1520,7 @@ async fn pack_rung(
     job: JobId,
     rung: usize,
     media: &ObjectRef,
+    staged_media: &Path,
     prefix: &str,
     segment_seconds: f64,
     packer: &dyn RungPacker,
@@ -1530,6 +1531,9 @@ async fn pack_rung(
         .join(job.to_string())
         .join(format!("rung{rung}"));
     std::fs::create_dir_all(&staging).map_err(|error| failed(codes::LADDER_PACK_FAILED, error))?;
+    tokio::fs::copy(staged_media, staging.join("media.mp4"))
+        .await
+        .map_err(|error| failed(codes::LADDER_PACK_FAILED, error))?;
     let packed = packer
         .pack(job, rung, media, &staging, segment_seconds)
         .await
@@ -1799,6 +1803,7 @@ async fn encode_one_rung(
                     job,
                     index,
                     &media,
+                    &output_path,
                     &prefix,
                     seconds,
                     packer,

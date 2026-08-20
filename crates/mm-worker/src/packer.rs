@@ -50,17 +50,21 @@ impl RungPacker for GstRungPacker {
     async fn pack(
         &self,
         _job: JobId,
-        rung: usize,
+        _rung: usize,
         _media: &mm_domain::ObjectRef,
         staging_dir: &Path,
         segment_seconds: f64,
     ) -> Result<LadderPacked, LadderPackError> {
-        let dir = staging_dir.join(format!("rung{rung}"));
-        std::fs::create_dir_all(&dir)
+        std::fs::create_dir_all(staging_dir)
             .map_err(|error| LadderPackError::Launch(error.to_string()))?;
-        let source = format!("{}/media.mp4", dir.display());
-        let request = GstRequest::new(source, dir.clone(), dir.join("stream"), segment_seconds);
-        let description = packaging_description(&request);
+        let dir = staging_dir.to_path_buf();
+        let request = GstRequest::new(
+            dir.join("media.mp4").to_string_lossy().into_owned(),
+            dir.clone(),
+            dir.join("stream"),
+            segment_seconds,
+        );
+        let description = rung_packaging_description(&request);
         let outcome = tokio::task::spawn_blocking(move || {
             mm_gst::run_package_pipeline(
                 &description,
@@ -75,10 +79,10 @@ impl RungPacker for GstRungPacker {
     }
 }
 
-pub fn packaging_description(request: &GstRequest) -> GstDescription {
+pub fn rung_packaging_description(request: &GstRequest) -> GstDescription {
     GstDescription::new(
         vec![
-            GstElement::new("souphttpsrc", "source"),
+            GstElement::new("filesrc", "source"),
             GstElement::new("qtdemux", "demux"),
             GstElement::new("mp4mux", "mux")
                 .with("streamable", GstProperty::Flag(true))

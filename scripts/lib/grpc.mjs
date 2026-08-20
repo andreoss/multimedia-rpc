@@ -76,7 +76,7 @@ export function readFields(buffer) {
       fields.set(field, existing);
       index = value.index;
     } else if (wire === 1 || wire === 5) {
-      index += wire === 1 ? 8 : 4;
+      index = key.index + (wire === 1 ? 8 : 4);
     } else {
       throw new Error(`unsupported wire type ${wire}`);
     }

@@ -132,6 +132,8 @@ jobs:
         run: nix develop -c sh scripts/merge-conformance.sh
       - name: Reference callback conformance
         run: nix develop -c sh scripts/duration-conformance.sh
+      - name: Ladder conformance
+        run: nix develop -c sh scripts/ladder-conformance.sh
 
   coverage:
     runs-on: ubuntu-latest

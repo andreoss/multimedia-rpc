@@ -29,7 +29,7 @@ pub use parse::{
 pub use probe::{ProbeError, ProbeLimits, Prober};
 pub use profile::TargetProfile;
 pub use progress::{ProgressParser, ProgressUpdate};
-pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner};
+pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner, parse_encoders};
 pub use subtitle::{
     SubtitleError, build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
 };

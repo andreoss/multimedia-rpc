@@ -18,8 +18,9 @@ use mm_domain::{
     PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
     ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, SubtitleMode,
     SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TitleResult,
-    TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId,
-    collect_body, resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
+    TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoEncoder, VideoStreamInfo,
+    WorkerId, collect_body, resolve_media_ref, validate_inputs, validate_ladder_rungs,
+    verdict_code,
 };
 use mm_ffmpeg::{
     AudioTarget, GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo,
@@ -75,8 +76,9 @@ pub mod codes {
     pub const GRADE_INVALID: &str = "grade_invalid";
     pub const AUDIO_INVALID: &str = "audio_invalid";
     pub const TITLE_FAILED: &str = "title_failed";
+    pub const ENCODER_UNAVAILABLE: &str = "encoder_unavailable";
 
-    pub const ALL: [&str; 20] = [
+    pub const ALL: [&str; 21] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -97,6 +99,7 @@ pub mod codes {
         GRADE_INVALID,
         AUDIO_INVALID,
         TITLE_FAILED,
+        ENCODER_UNAVAILABLE,
     ];
 }
 
@@ -1864,7 +1867,7 @@ async fn encode_one_rung_inner(
     }
     let target = TranscodeTarget {
         scale_mode: ScaleMode::PadToFit,
-        profile: target_profile(Some(&profile)),
+        profile: tool_profile(&ctx, Some(&profile)).await?,
         cut: source.as_ref().and_then(|source| {
             source.trim().map(|trim| SourceCut {
                 start: timestamp(trim.start()),
@@ -2023,6 +2026,32 @@ fn rendition_bandwidth(profile: &OutputProfile, measured: &MediaInfo) -> u32 {
     u32::try_from(bits).unwrap_or(u32::MAX)
 }
 
+async fn tool_profile(
+    ctx: &WorkerConfig,
+    profile: Option<&OutputProfile>,
+) -> Result<mm_ffmpeg::TargetProfile, Finish> {
+    let Some(profile) = profile else {
+        return Ok(mm_ffmpeg::TargetProfile::default());
+    };
+    let mut target = target_profile(Some(profile));
+    let requested = profile.video_encoder();
+    if !requested.is_hardware() {
+        return Ok(target);
+    }
+    let available = ctx.encoders.get().map(Vec::as_slice).unwrap_or(&[]);
+    if available.iter().any(|name| name == requested.name()) {
+        target.video_encoder = requested.name();
+        Ok(target)
+    } else if profile.requires_hardware() {
+        Err(failed(
+            codes::ENCODER_UNAVAILABLE,
+            format!("the host does not offer encoder {}", requested.name()),
+        ))
+    } else {
+        Ok(target)
+    }
+}
+
 async fn transcode_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
@@ -2043,9 +2072,9 @@ async fn transcode_pipeline(
     let _reservation = admit_or_release(ctx, job.id, estimate).await?;
 
     let source = spec.input().media();
-    let target = TranscodeTarget {
+    let mut target = TranscodeTarget {
         scale_mode: ScaleMode::PadToFit,
-        profile: target_profile(Some(spec.profile())),
+        profile: tool_profile(ctx, Some(spec.profile())).await?,
         cut: source.and_then(|source| {
             source.trim().map(|trim| SourceCut {
                 start: timestamp(trim.start()),
@@ -2066,7 +2095,7 @@ async fn transcode_pipeline(
     let limits = remaining_limits(ctx, infos[0].duration, deadline_at)?;
 
     check(signal)?;
-    let transcoded = run_and_upload(
+    let mut transcoded = run_and_upload(
         ctx,
         job.id,
         scope,
@@ -2075,8 +2104,35 @@ async fn transcode_pipeline(
         &output_path,
         signal,
         OutputShape::Transcode,
+        VideoEncoder::parse(target.profile.video_encoder).unwrap_or(VideoEncoder::Libx264),
     )
     .await;
+    if transcoded.is_err() && target.profile.video_encoder != "libx264" {
+        if spec.profile().requires_hardware() {
+            return Err(failed(
+                codes::ENCODER_UNAVAILABLE,
+                format!(
+                    "encoder {} failed on this host",
+                    target.profile.video_encoder
+                ),
+            ));
+        }
+        target.profile.video_encoder = "libx264";
+        let fallback = build_transcode_args(&url, &target, &output_path.to_string_lossy())
+            .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+        transcoded = run_and_upload(
+            ctx,
+            job.id,
+            scope,
+            &fallback,
+            &limits,
+            &output_path,
+            signal,
+            OutputShape::Transcode,
+            VideoEncoder::Libx264,
+        )
+        .await;
+    }
     let outcome = match transcoded {
         Ok(result) => {
             if let Some(poster) = spec.profile().poster() {
@@ -2703,7 +2759,7 @@ async fn concat_pipeline(
         .video
         .first()
         .map(|video| (video.width, video.height));
-    let profile = target_profile(spec.profile());
+    let profile = tool_profile(ctx, spec.profile()).await?;
     let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));
     let args = build_concat_args(
         &urls,
@@ -2724,6 +2780,7 @@ async fn concat_pipeline(
         &output_path,
         signal,
         OutputShape::Concat,
+        VideoEncoder::parse(profile.video_encoder).unwrap_or(VideoEncoder::Libx264),
     )
     .await;
     let _ = tokio::fs::remove_file(&output_path).await;
@@ -3023,6 +3080,7 @@ async fn trim_pipeline(
         &output_path,
         signal,
         OutputShape::Trim,
+        VideoEncoder::Libx264,
     )
     .await;
     let _ = tokio::fs::remove_file(&output_path).await;
@@ -3175,6 +3233,7 @@ async fn run_and_upload(
     output_path: &PathBuf,
     signal: &mut watch::Receiver<Signal>,
     shape: OutputShape,
+    encoder: VideoEncoder,
 ) -> Result<OpResult, Finish> {
     let started = Instant::now();
     supervise(
@@ -3220,9 +3279,9 @@ async fn run_and_upload(
                 .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
             Ok(OpResult::Concat(timed))
         }
-        OutputShape::Transcode => Ok(OpResult::Transcode(TranscodeResult::new(MediaRef::Object(
-            object,
-        )))),
+        OutputShape::Transcode => Ok(OpResult::Transcode(
+            TranscodeResult::new(MediaRef::Object(object)).with_encoder(encoder),
+        )),
         OutputShape::Trim => {
             let timed = TimedOutput::new(MediaRef::Object(object), info.duration.as_secs_f64())
                 .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;

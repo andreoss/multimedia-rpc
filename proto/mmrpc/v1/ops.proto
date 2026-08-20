@@ -206,6 +206,7 @@ message ProbeResult {
 
 message TranscodeResult {
   MediaRef output = 1;
+  VideoEncoder encoder = 2;
 }
 
 message TrimResult {

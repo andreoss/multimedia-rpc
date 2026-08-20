@@ -16,7 +16,7 @@ use mm_domain::{
 use mm_ffmpeg::{ProbeLimits, Prober, Runner};
 use mm_magick::{Tool as ImageTool, ToolLimits as ImageLimits};
 use mm_observability::{Component, Metrics, Registry, record};
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 pub use budget::{DiskBudget, admits};
@@ -54,6 +54,7 @@ pub struct WorkerConfig {
     pub ladder_packer: Option<Arc<dyn RungPacker>>,
     pub ladder_packer_name: String,
     pub ladder_concurrency: usize,
+    pub(crate) encoders: OnceCell<Vec<String>>,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -94,6 +95,7 @@ impl WorkerConfig {
             ladder_packer: None,
             ladder_packer_name: String::from("gst"),
             ladder_concurrency: 1,
+            encoders: OnceCell::new(),
             reserved: std::sync::Mutex::new(0),
         }
     }
@@ -130,6 +132,15 @@ pub fn start(config: WorkerConfig) -> WorkerHandle {
 }
 
 async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
+    let _ = ctx
+        .encoders
+        .get_or_init(|| async {
+            ctx.runner
+                .available_encoders(Duration::from_secs(10))
+                .await
+                .unwrap_or_default()
+        })
+        .await;
     let semaphore = Arc::new(Semaphore::new(ctx.max_concurrent));
     let wake = Arc::new(Notify::new());
     let registry = Arc::new(pipeline::CancelRegistry::new());

@@ -43,6 +43,15 @@ message OutputRange {
   double duration_seconds = 2;
 }
 
+enum VideoEncoder {
+  VIDEO_ENCODER_UNSPECIFIED = 0;
+  VIDEO_ENCODER_LIBX264 = 1;
+  VIDEO_ENCODER_H264_NVENC = 2;
+  VIDEO_ENCODER_H264_VAAPI = 3;
+  VIDEO_ENCODER_H264_QSV = 4;
+  VIDEO_ENCODER_H264_VIDEOTOOLBOX = 5;
+}
+
 message OutputProfile {
   double frame_rate = 1;
   uint32 video_max_bitrate = 2;
@@ -53,6 +62,8 @@ message OutputProfile {
   uint32 height = 7;
   optional double poster_seconds = 8;
   OutputRange range = 9;
+  VideoEncoder video_encoder = 10;
+  bool require_hardware = 11;
 }
 
 message FileError {

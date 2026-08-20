@@ -233,3 +233,27 @@ fn a_range_bounds_the_output_after_the_input() {
         &["-ss", "1.000000", "-t", "2.000000"]
     );
 }
+
+#[test]
+fn every_video_encoder_is_golden_in_the_argv() {
+    for encoder in [
+        "libx264",
+        "h264_nvenc",
+        "h264_vaapi",
+        "h264_qsv",
+        "h264_videotoolbox",
+    ] {
+        let profile = mm_ffmpeg::TargetProfile {
+            video_encoder: encoder,
+            ..mm_ffmpeg::TargetProfile::default()
+        };
+        let target = mm_ffmpeg::TranscodeTarget {
+            profile,
+            ..mm_ffmpeg::TranscodeTarget::default()
+        };
+        let args = mm_ffmpeg::build_transcode_args("http://host/in.mp4", &target, "out.mp4")
+            .expect("the argv builds");
+        let position = args.iter().position(|arg| arg == "-c:v").unwrap();
+        assert_eq!(args[position + 1], encoder);
+    }
+}

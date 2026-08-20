@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetProfile {
+    pub video_encoder: &'static str,
     pub resolution: Option<(u32, u32)>,
     pub fps: u32,
     pub video_crf: u32,
@@ -12,6 +13,7 @@ pub struct TargetProfile {
 impl Default for TargetProfile {
     fn default() -> Self {
         Self {
+            video_encoder: "libx264",
             resolution: None,
             fps: 24,
             video_crf: 23,
@@ -60,32 +62,67 @@ pub(crate) fn audio_filter(sample_rate_hz: u32, layout: &str) -> String {
 
 pub(crate) fn encode_args(
     profile: &TargetProfile,
-    video_encoder: &str,
+    _video_encoder: &str,
     audio_encoder: &str,
 ) -> Vec<String> {
-    [
-        "-c:v",
-        video_encoder,
-        "-crf",
-        &profile.video_crf.to_string(),
-        "-maxrate",
-        &format!("{}k", profile.video_max_bitrate_kbps),
-        "-bufsize",
-        &format!("{}k", profile.video_max_bitrate_kbps * 2),
-        "-c:a",
-        audio_encoder,
-        "-b:a",
-        &format!("{}k", profile.audio_bitrate_kbps),
-        "-ar",
-        &profile.audio_sample_rate_hz.to_string(),
-        "-ac",
-        &profile.audio_channels.to_string(),
-        "-movflags",
-        "+faststart",
-        "-f",
-        "mp4",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    let mut args = vec!["-c:v".to_string(), profile.video_encoder.to_string()];
+    let maxrate = format!("{}k", profile.video_max_bitrate_kbps);
+    let bufsize = format!("{}k", profile.video_max_bitrate_kbps * 2);
+    let quality = profile.video_crf.to_string();
+    match profile.video_encoder {
+        "h264_nvenc" => {
+            args.extend([
+                "-rc".to_string(),
+                "vbr".to_string(),
+                "-cq".to_string(),
+                quality,
+                "-b:v".to_string(),
+                maxrate.clone(),
+                "-maxrate".to_string(),
+                maxrate,
+                "-bufsize".to_string(),
+                bufsize,
+            ]);
+        }
+        "h264_qsv" | "h264_vaapi" => {
+            args.extend([
+                "-global_quality".to_string(),
+                quality,
+                "-b:v".to_string(),
+                maxrate,
+            ]);
+        }
+        "h264_videotoolbox" => {
+            args.extend(["-q:v".to_string(), quality, "-b:v".to_string(), maxrate]);
+        }
+        _ => {
+            args.extend([
+                "-crf".to_string(),
+                quality,
+                "-maxrate".to_string(),
+                maxrate,
+                "-bufsize".to_string(),
+                bufsize,
+            ]);
+        }
+    }
+    args.extend(
+        [
+            "-c:a",
+            audio_encoder,
+            "-b:a",
+            &format!("{}k", profile.audio_bitrate_kbps),
+            "-ar",
+            &profile.audio_sample_rate_hz.to_string(),
+            "-ac",
+            &profile.audio_channels.to_string(),
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    args
 }

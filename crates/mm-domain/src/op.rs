@@ -125,6 +125,43 @@ impl MediaRef {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VideoEncoder {
+    Libx264,
+    H264Nvenc,
+    H264Vaapi,
+    H264Qsv,
+    H264VideoToolbox,
+}
+
+impl VideoEncoder {
+    pub const ALL: [VideoEncoder; 5] = [
+        VideoEncoder::Libx264,
+        VideoEncoder::H264Nvenc,
+        VideoEncoder::H264Vaapi,
+        VideoEncoder::H264Qsv,
+        VideoEncoder::H264VideoToolbox,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            VideoEncoder::Libx264 => "libx264",
+            VideoEncoder::H264Nvenc => "h264_nvenc",
+            VideoEncoder::H264Vaapi => "h264_vaapi",
+            VideoEncoder::H264Qsv => "h264_qsv",
+            VideoEncoder::H264VideoToolbox => "h264_videotoolbox",
+        }
+    }
+
+    pub fn is_hardware(self) -> bool {
+        self != VideoEncoder::Libx264
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|encoder| encoder.name() == name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutputProfile {
     frame_rate: Option<f64>,
@@ -135,6 +172,8 @@ pub struct OutputProfile {
     resolution: Option<(u32, u32)>,
     poster: Option<Ticks>,
     range: Option<OutputRange>,
+    video_encoder: VideoEncoder,
+    require_hardware: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +240,8 @@ pub enum OutputProfileError {
     InvalidRangeStart { value: f64 },
     #[error("range duration {value} is not positive and finite")]
     InvalidRangeDuration { value: f64 },
+    #[error("encoder {} is software but hardware is required", encoder.name())]
+    HardwareRequired { encoder: VideoEncoder },
 }
 
 fn nonzero(value: u32) -> Option<u32> {
@@ -240,6 +281,8 @@ impl OutputProfile {
             resolution,
             poster: None,
             range: None,
+            video_encoder: VideoEncoder::Libx264,
+            require_hardware: false,
         })
     }
 
@@ -260,6 +303,27 @@ impl OutputProfile {
     pub fn with_range(mut self, range: OutputRange) -> Self {
         self.range = Some(range);
         self
+    }
+
+    pub fn with_encoder(
+        mut self,
+        encoder: VideoEncoder,
+        require_hardware: bool,
+    ) -> Result<Self, OutputProfileError> {
+        if require_hardware && !encoder.is_hardware() {
+            return Err(OutputProfileError::HardwareRequired { encoder });
+        }
+        self.video_encoder = encoder;
+        self.require_hardware = require_hardware;
+        Ok(self)
+    }
+
+    pub fn video_encoder(&self) -> VideoEncoder {
+        self.video_encoder
+    }
+
+    pub fn requires_hardware(&self) -> bool {
+        self.require_hardware
     }
 
     pub fn poster(&self) -> Option<Ticks> {
@@ -283,6 +347,8 @@ impl OutputProfile {
             && self.resolution.is_none()
             && self.poster.is_none()
             && self.range.is_none()
+            && self.video_encoder == VideoEncoder::Libx264
+            && !self.require_hardware
     }
 
     pub fn frame_rate(&self) -> Option<f64> {
@@ -2237,15 +2303,28 @@ impl ProbeResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeResult {
     output: MediaRef,
+    encoder: VideoEncoder,
 }
 
 impl TranscodeResult {
     pub fn new(output: MediaRef) -> Self {
-        Self { output }
+        Self {
+            output,
+            encoder: VideoEncoder::Libx264,
+        }
+    }
+
+    pub fn with_encoder(mut self, encoder: VideoEncoder) -> Self {
+        self.encoder = encoder;
+        self
     }
 
     pub fn output(&self) -> &MediaRef {
         &self.output
+    }
+
+    pub fn encoder(&self) -> VideoEncoder {
+        self.encoder
     }
 }
 

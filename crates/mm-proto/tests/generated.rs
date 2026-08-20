@@ -222,6 +222,8 @@ fn op_spec_oneof_carries_every_arm() {
                 height: 720,
                 poster_seconds: None,
                 range: None,
+                video_encoder: v1::VideoEncoder::Libx264 as i32,
+                require_hardware: false,
             }),
         }),
         v1::op_spec::Op::Trim(v1::TrimSpec {

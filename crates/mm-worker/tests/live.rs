@@ -15,7 +15,7 @@ use mm_domain::{
     LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore,
     ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
     ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks, TitleSpec,
-    TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    TranscodeSpec, TrimSpec, UserId, VideoEncoder, WorkerId, collect_body,
 };
 use mm_ffmpeg::{
     ProbeLimits, Prober, RunLimits as ToolLimits, RunOutcome as ToolOutcome, Runner as ToolRunner,
@@ -4072,4 +4072,65 @@ fn magick_format(path: &Path, format: &str) -> String {
         .expect("the image tool must be runnable");
     assert!(output.status.success(), "image inspection failed");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_hardware_encoder_falls_back_and_names_software() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("encoder-fallback.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/encoder-fallback.mp4").await;
+    let repository = db.repository();
+    let profile = OutputProfile::from_raw(30.0, 4000, 23, 128_000, 48_000, 1280, 720)
+        .unwrap()
+        .with_encoder(VideoEncoder::H264Nvenc, false)
+        .unwrap();
+    let spec = TranscodeSpec::new(input, profile).unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Transcode(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-encoder-fallback"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Transcode(result) = record.result.expect("result recorded") else {
+        panic!("expected a transcode result");
+    };
+    assert_eq!(result.encoder(), VideoEncoder::Libx264);
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_required_encoder_the_host_lacks_fails_by_name() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("encoder-required.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/encoder-required.mp4").await;
+    let repository = db.repository();
+    let profile = OutputProfile::from_raw(30.0, 4000, 23, 128_000, 48_000, 1280, 720)
+        .unwrap()
+        .with_encoder(VideoEncoder::H264Qsv, true)
+        .unwrap();
+    let spec = TranscodeSpec::new(input, profile).unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Transcode(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-encoder-required"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.result);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::ENCODER_UNAVAILABLE);
+    assert!(
+        failure.message().contains("h264_qsv"),
+        "{}",
+        failure.message()
+    );
+    db.dispose().await;
 }

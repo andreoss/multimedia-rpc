@@ -90,6 +90,7 @@ fn unknown_first_input_resolution_falls_back_to_full_hd() {
 fn explicit_profile_overrides_replace_every_default() {
     let inputs = urls(2);
     let profile = TargetProfile {
+        video_encoder: "libx264",
         resolution: Some((640, 360)),
         fps: 30,
         video_crf: 20,

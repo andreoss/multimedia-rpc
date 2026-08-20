@@ -25,6 +25,8 @@ pub enum RunError {
     Launch { source: std::io::Error },
     #[error("tool could not be awaited: {source}")]
     Wait { source: std::io::Error },
+    #[error("the encoder list could not be read")]
+    Encoders,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +71,23 @@ impl Runner {
         Self {
             binary: binary.into(),
         }
+    }
+
+    pub async fn available_encoders(&self, timeout: Duration) -> Result<Vec<String>, RunError> {
+        let mut command = Command::new(&self.binary);
+        command
+            .args(["-hide_banner", "-encoders"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| RunError::Encoders)?
+            .map_err(|source| RunError::Launch { source })?;
+        if !output.status.success() {
+            return Err(RunError::Encoders);
+        }
+        Ok(parse_encoders(&String::from_utf8_lossy(&output.stdout)))
     }
 
     pub fn start(&self, args: &[String], limits: &RunLimits) -> Result<MergeRun, RunError> {
@@ -246,4 +265,13 @@ async fn capture_tail(mut stderr: ChildStderr, cap: usize) -> Vec<u8> {
         }
     }
     tail
+}
+
+pub fn parse_encoders(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.starts_with(" V") || line.starts_with(" A"))
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter(|name| *name != "=")
+        .map(str::to_string)
+        .collect()
 }

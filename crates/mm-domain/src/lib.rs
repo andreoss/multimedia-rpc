@@ -37,7 +37,8 @@ pub use op::{
     OutputProfileError, OutputRange, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
     RenditionResult, ResizeMode, StepOutcome, StepState, SubtitleMode, SubtitleResult,
     SubtitleSpec, ThumbnailResult, ThumbnailSpec, TimedOutput, TitleResult, TitleSpec,
-    TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput, UnsupportedOp, VideoStreamInfo,
+    TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput, UnsupportedOp, VideoEncoder,
+    VideoStreamInfo,
 };
 pub use reference::{failure_code, verdict_code};
 pub use resolve::{ResolveError, resolve_media_ref};

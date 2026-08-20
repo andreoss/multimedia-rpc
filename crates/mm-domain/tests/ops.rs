@@ -4,6 +4,7 @@ use mm_domain::{
     LoudnessTarget, MediaRef, MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError,
     OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult,
     ThumbnailSpec, Ticks, TimedOutput, TitleSpec, TranscodeSpec, TrimSpec, UnsupportedOp,
+    VideoEncoder,
 };
 
 fn object() -> MediaRef {
@@ -710,4 +711,22 @@ fn a_title_keeps_its_colours_and_background() {
     assert_eq!(spec.colour().hex(), "#aabbcc");
     assert_eq!(spec.background().unwrap().hex(), "#11223344");
     assert_eq!(OpSpec::Title(spec).kind(), OpKind::Title);
+}
+
+#[test]
+fn a_profile_can_require_a_hardware_encoder() {
+    let profile = OutputProfile::from_raw(30.0, 4_000_000, 23, 128_000, 48_000, 1280, 720)
+        .unwrap()
+        .with_encoder(VideoEncoder::H264Nvenc, true)
+        .unwrap();
+    assert_eq!(profile.video_encoder(), VideoEncoder::H264Nvenc);
+    assert!(profile.requires_hardware());
+    assert!(matches!(
+        OutputProfile::from_raw(30.0, 4_000_000, 23, 128_000, 48_000, 1280, 720)
+            .unwrap()
+            .with_encoder(VideoEncoder::Libx264, true),
+        Err(OutputProfileError::HardwareRequired { .. })
+    ));
+    assert_eq!(VideoEncoder::H264Qsv.name(), "h264_qsv");
+    assert!(VideoEncoder::H264Vaapi.is_hardware());
 }

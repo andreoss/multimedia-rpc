@@ -11,7 +11,7 @@ use mm_domain::{
     QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome,
     StepState, SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
     ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TitleResult, TitleSpec, TranscodeResult,
-    TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo, failure_code, verdict_code,
+    TranscodeSpec, TrimRange, TrimSpec, VideoEncoder, VideoStreamInfo, failure_code, verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -325,6 +325,19 @@ impl TryFrom<v1::OutputProfile> for OutputProfile {
             value.width,
             value.height,
         )?;
+        let profile = match v1::VideoEncoder::try_from(value.video_encoder) {
+            Ok(encoder) => {
+                profile.with_encoder(video_encoder_from_raw(encoder), value.require_hardware)?
+            }
+            Err(_) => {
+                if value.require_hardware {
+                    return Err(OutputProfileError::HardwareRequired {
+                        encoder: VideoEncoder::Libx264,
+                    });
+                }
+                profile
+            }
+        };
         let profile = match value.poster_seconds {
             Some(seconds) => profile.with_poster(seconds)?,
             None => profile,
@@ -351,6 +364,8 @@ impl From<&OutputProfile> for v1::OutputProfile {
             width,
             height,
             poster_seconds: value.poster_seconds(),
+            video_encoder: video_encoder_to_raw(value.video_encoder()),
+            require_hardware: value.requires_hardware(),
             range: value.range().map(|range| v1::OutputRange {
                 start_seconds: range.start_seconds(),
                 duration_seconds: range.duration_seconds(),
@@ -824,7 +839,12 @@ impl TryFrom<v1::OpResult> for OpResult {
                 ))
             }
             v1::op_result::Op::Transcode(transcode) => Ok(OpResult::Transcode(
-                TranscodeResult::new(required_ref(transcode.output)?),
+                TranscodeResult::new(required_ref(transcode.output)?).with_encoder(
+                    video_encoder_from_raw(
+                        v1::VideoEncoder::try_from(transcode.encoder)
+                            .unwrap_or(v1::VideoEncoder::Unspecified),
+                    ),
+                ),
             )),
             v1::op_result::Op::Trim(trim) => Ok(OpResult::Trim(TimedOutput::new(
                 required_ref(trim.output)?,
@@ -1333,6 +1353,7 @@ impl From<&OpResult> for v1::OpResult {
             }),
             OpResult::Transcode(transcode) => v1::op_result::Op::Transcode(v1::TranscodeResult {
                 output: Some(v1::MediaRef::from(transcode.output())),
+                encoder: video_encoder_to_raw(transcode.encoder()),
             }),
             OpResult::Trim(trim) => v1::op_result::Op::Trim(v1::TrimResult {
                 output: Some(v1::MediaRef::from(trim.output())),
@@ -1433,4 +1454,25 @@ impl TryFrom<v1::InputSequence> for InputOrder {
     fn try_from(value: v1::InputSequence) -> Result<Self, Self::Error> {
         InputOrder::new(value.sequence)
     }
+}
+
+fn video_encoder_from_raw(value: v1::VideoEncoder) -> VideoEncoder {
+    match value {
+        v1::VideoEncoder::H264Nvenc => VideoEncoder::H264Nvenc,
+        v1::VideoEncoder::H264Vaapi => VideoEncoder::H264Vaapi,
+        v1::VideoEncoder::H264Qsv => VideoEncoder::H264Qsv,
+        v1::VideoEncoder::H264Videotoolbox => VideoEncoder::H264VideoToolbox,
+        v1::VideoEncoder::Unspecified | v1::VideoEncoder::Libx264 => VideoEncoder::Libx264,
+    }
+}
+
+fn video_encoder_to_raw(value: VideoEncoder) -> i32 {
+    let encoder = match value {
+        VideoEncoder::Libx264 => v1::VideoEncoder::Libx264,
+        VideoEncoder::H264Nvenc => v1::VideoEncoder::H264Nvenc,
+        VideoEncoder::H264Vaapi => v1::VideoEncoder::H264Vaapi,
+        VideoEncoder::H264Qsv => v1::VideoEncoder::H264Qsv,
+        VideoEncoder::H264VideoToolbox => v1::VideoEncoder::H264Videotoolbox,
+    };
+    encoder as i32
 }

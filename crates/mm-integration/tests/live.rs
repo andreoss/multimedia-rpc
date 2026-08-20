@@ -354,6 +354,7 @@ fn to_report(info: &MediaInfo) -> InputReport {
                 codec: audio.codec.clone(),
                 channels: audio.channels,
                 sample_rate: audio.sample_rate,
+                loudness_lufs: None,
             })
             .collect(),
     }

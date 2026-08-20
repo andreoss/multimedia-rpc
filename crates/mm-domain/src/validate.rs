@@ -38,6 +38,7 @@ pub struct AudioReport {
     pub codec: String,
     pub channels: u32,
     pub sample_rate: Option<u32>,
+    pub loudness_lufs: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,8 +59,11 @@ pub enum BlockCode {
 pub enum WarnCode {
     AspectDrift,
     FpsDrift,
+    FrameRateOffTarget,
     AudioChannelDrift,
     SampleRateDrift,
+    LoudnessDrift,
+    NoAudioStream,
     VariableFrameRate,
     Interlaced,
     Rotation,
@@ -95,6 +99,9 @@ const MAX_TOTAL_DURATION: Duration = Duration::from_secs(24 * 3600);
 const MIN_CONCAT_INPUTS: usize = 2;
 const FPS_TOLERANCE: f64 = 0.01;
 const ASPECT_TOLERANCE: f64 = 0.01;
+const TARGET_FPS: f64 = 24.0;
+const TARGET_FPS_TOLERANCE: f64 = 0.05;
+const MAX_LOUDNESS_DELTA_DB: f64 = 6.0;
 
 fn block(input: Option<usize>, code: BlockCode) -> Verdict {
     Verdict {
@@ -182,6 +189,15 @@ fn check_one(
         {
             push_unique(verdicts, warn(input, WarnCode::NonSquarePixels));
         }
+        if video
+            .avg_fps
+            .is_some_and(|fps| (fps - TARGET_FPS).abs() > TARGET_FPS_TOLERANCE)
+        {
+            push_unique(verdicts, warn(input, WarnCode::FrameRateOffTarget));
+        }
+    }
+    if report.audio.is_empty() && !report.video.is_empty() {
+        push_unique(verdicts, warn(input, WarnCode::NoAudioStream));
     }
     for audio in &report.audio {
         if !policy.audio_codecs.contains(&audio.codec.as_str()) {
@@ -234,6 +250,15 @@ fn check_drift(inputs: &[InputReport], verdicts: &mut Vec<Verdict>) {
             .any(|audio| audio.sample_rate != first.sample_rate)
         {
             verdicts.push(warn(None, WarnCode::SampleRateDrift));
+        }
+        if let Some(reference) = first.loudness_lufs
+            && rest.iter().any(|audio| {
+                audio
+                    .loudness_lufs
+                    .is_some_and(|level| (level - reference).abs() > MAX_LOUDNESS_DELTA_DB)
+            })
+        {
+            verdicts.push(warn(None, WarnCode::LoudnessDrift));
         }
     }
 }

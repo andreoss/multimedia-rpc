@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use mm_domain::{
     JobFailure, JobFailureError, JobId, JobState, JobStoreError, MediaRef, NewJob, OpSpec,
-    PageCursor, ProbeSpec, ProgressError, ProgressPercent, RequestId, TextIdError, UserId,
+    PageCursor, ProbeSpec, ProgressError, ProgressPercent, RequestId, TextIdError, TraceId, UserId,
     WorkerId,
 };
 
@@ -152,4 +152,16 @@ fn store_errors_render_context() {
             .to_string()
             .contains("down")
     );
+}
+
+#[test]
+fn a_new_job_carries_the_trace_it_was_created_under() {
+    let id = JobId::generate();
+    let owner = UserId::from_str("owner-1").expect("valid user id");
+    let request = RequestId::from_str("req-1").expect("valid request id");
+    let trace = TraceId::generate();
+    let job = NewJob::new(id, owner, request, sample_spec(), None);
+    assert_eq!(job.trace_id(), None);
+    let job = job.with_trace_id(trace);
+    assert_eq!(job.trace_id(), Some(trace));
 }

@@ -1,5 +1,5 @@
 use crate::callback::QueueUrl;
-use crate::id::{JobId, RequestId, TextIdError, UserId, WorkerId, parse_text_id};
+use crate::id::{JobId, RequestId, TextIdError, TraceId, UserId, WorkerId, parse_text_id};
 use crate::op::{OpResult, OpSpec};
 use crate::state::JobState;
 use async_trait::async_trait;
@@ -71,6 +71,7 @@ pub struct NewJob {
     spec: OpSpec,
     deadline_at: Option<SystemTime>,
     callback: Option<QueueUrl>,
+    trace_id: Option<TraceId>,
 }
 
 impl NewJob {
@@ -88,6 +89,7 @@ impl NewJob {
             spec,
             deadline_at,
             callback: None,
+            trace_id: None,
         }
     }
 
@@ -98,6 +100,15 @@ impl NewJob {
 
     pub fn callback(&self) -> Option<&QueueUrl> {
         self.callback.as_ref()
+    }
+
+    pub fn with_trace_id(mut self, trace_id: TraceId) -> Self {
+        self.trace_id = Some(trace_id);
+        self
+    }
+
+    pub fn trace_id(&self) -> Option<TraceId> {
+        self.trace_id
     }
 
     pub fn id(&self) -> JobId {
@@ -141,6 +152,7 @@ pub struct JobRecord {
     pub lease_expires_at: Option<SystemTime>,
     pub cancel_requested: bool,
     pub callback: Option<QueueUrl>,
+    pub trace_id: Option<TraceId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,4 +270,5 @@ pub trait JobRepository: Send + Sync {
         &self,
         limit: NonZeroU32,
     ) -> Result<Vec<JobRecord>, JobStoreError>;
+    async fn pending_count(&self) -> Result<u64, JobStoreError>;
 }

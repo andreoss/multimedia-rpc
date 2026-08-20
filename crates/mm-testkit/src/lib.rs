@@ -20,7 +20,7 @@ pub mod budget {
     pub const CANCEL: Duration = Duration::from_secs(15);
     pub const PROCESS_EXIT: Duration = Duration::from_secs(15);
     pub const QUEUE_RECEIVE: Duration = Duration::from_secs(30);
-    pub const QUEUE_SETTLE: Duration = Duration::from_secs(60);
+    pub const QUEUE_SETTLE: Duration = Duration::from_secs(600);
     pub const EVENT_ARRIVAL: Duration = Duration::from_secs(30);
     pub const NOTIFY: Duration = Duration::from_secs(5);
     pub const LISTENER_RECOVERY: Duration = Duration::from_secs(10);

@@ -302,7 +302,7 @@ pub(crate) async fn publish_outcome(ctx: &WorkerConfig, record: &JobRecord) {
     }
 }
 
-pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelRegistry) {
+pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelRegistry) -> bool {
     let trace = job.trace_id;
     ctx.metrics.jobs_started.add(1);
     ctx.metrics
@@ -322,6 +322,7 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
         ],
     );
     let outcome = run_job(ctx, &job, registry).await;
+    let terminal = outcome.is_some();
     ctx.metrics.jobs_finished.add(1);
     ctx.metrics
         .job_duration
@@ -345,6 +346,7 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
             ),
         ],
     );
+    terminal
 }
 
 fn seconds_since(at: SystemTime) -> f64 {

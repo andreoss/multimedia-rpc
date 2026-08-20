@@ -485,7 +485,13 @@ async fn await_terminal(
     }
 }
 
-async fn one_callback(publisher: &SqsCallbackPublisher, queue: &QueueUrl) -> v1::JobCallback {
+async fn one_callback(
+    client: &mut MediaJobServiceClient<Channel>,
+    user: &str,
+    job_id: &str,
+    publisher: &SqsCallbackPublisher,
+    queue: &QueueUrl,
+) -> v1::JobCallback {
     let settle = Instant::now() + mm_testkit::budget::QUEUE_SETTLE;
     let bodies = loop {
         let received = tokio::time::timeout(
@@ -498,7 +504,11 @@ async fn one_callback(publisher: &SqsCallbackPublisher, queue: &QueueUrl) -> v1:
         if !received.is_empty() {
             break received;
         }
-        assert!(Instant::now() < settle, "no callback message arrived");
+        let last = get_job(client, user, job_id).await.state();
+        assert!(
+            Instant::now() < settle,
+            "no callback message arrived for job {job_id}; it last read {last:?}"
+        );
     };
     assert_eq!(bodies.len(), 1, "exactly one callback message");
     let leftover = tokio::time::timeout(
@@ -1268,7 +1278,14 @@ async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
     )
     .await;
 
-    let callback = one_callback(&publisher, &queue).await;
+    let callback = one_callback(
+        &mut client,
+        "owner-p09",
+        &created.job_id,
+        &publisher,
+        &queue,
+    )
+    .await;
     let outcome = callback.outcome.expect("the callback carries the outcome");
     let stitch = callback
         .stitch
@@ -1343,7 +1360,14 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
     )
     .await;
 
-    let callback = one_callback(&publisher, &queue).await;
+    let callback = one_callback(
+        &mut client,
+        "owner-p10",
+        &created.job_id,
+        &publisher,
+        &queue,
+    )
+    .await;
     let outcome = callback.outcome.expect("the callback carries the outcome");
     let stitch = callback
         .stitch
@@ -1456,7 +1480,7 @@ async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
         "a pending cancel lands immediately"
     );
 
-    let callback = one_callback(&publisher, &queue).await;
+    let callback = one_callback(&mut client, "owner-p11", &parked.job_id, &publisher, &queue).await;
     let outcome = callback.outcome.expect("the callback carries the outcome");
     let stitch = callback
         .stitch
@@ -1559,7 +1583,7 @@ async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
         "the reaper fails an overdue pending job"
     );
 
-    let callback = one_callback(&publisher, &queue).await;
+    let callback = one_callback(&mut client, "owner-p12", &parked.job_id, &publisher, &queue).await;
     let outcome = callback.outcome.expect("the callback carries the outcome");
     let stitch = callback
         .stitch

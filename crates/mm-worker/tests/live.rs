@@ -3178,3 +3178,89 @@ async fn the_default_packers_are_gst_and_the_configuration_can_name_the_other() 
     assert_eq!(config.ladder_packer_name, "ffmpeg");
     db.dispose().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_terminal_write_keeps_its_row_counted_against_the_bound() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("bound-src-4s.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/bound-src.mp4").await;
+    let repository = db.repository();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(
+            repository
+                .create(concat_job(vec![input.clone(), input.clone()]))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+
+    sqlx::query(
+        "CREATE FUNCTION mm_refuse_terminal() RETURNS trigger AS $$ \
+         BEGIN \
+           IF NEW.state IN ('SUCCEEDED', 'FAILED', 'CANCELLED') \
+              AND OLD.state = 'RUNNING' THEN \
+             RAISE EXCEPTION 'injected terminal write refusal'; \
+           END IF; \
+           RETURN NEW; \
+         END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("the refusal function installs");
+    sqlx::query(
+        "CREATE TRIGGER mm_refuse_terminal BEFORE UPDATE ON jobs \
+         FOR EACH ROW EXECUTE FUNCTION mm_refuse_terminal()",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("the refusal trigger installs");
+
+    let bound = 2usize;
+    let mut config = base_config(&db, store.clone(), "worker-bound-refused");
+    config.max_concurrent = bound;
+    config.claim_batch = NonZeroU32::new(3).unwrap();
+    config.lease = Duration::from_secs(60);
+    config.heartbeat_interval = Duration::from_secs(3600);
+    let handle = start(config);
+
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut max_running = 0usize;
+    let mut reclaimed = false;
+    loop {
+        let mut running = 0usize;
+        for id in &ids {
+            let record = repository.get(*id).await.unwrap().unwrap();
+            if record.state == JobState::Running {
+                running += 1;
+            }
+            if record.attempts >= 2 {
+                reclaimed = true;
+            }
+        }
+        max_running = max_running.max(running);
+        if max_running > bound || reclaimed {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the refused write was never reclaimed"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    sqlx::query("DROP TRIGGER mm_refuse_terminal ON jobs")
+        .execute(&db.pool)
+        .await
+        .expect("the refusal trigger drops");
+    handle.shutdown().await;
+
+    assert!(
+        max_running <= bound,
+        "a refused terminal write put {max_running} rows in Running under a bound of {bound}"
+    );
+    db.dispose().await;
+}

@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mm_domain::{
-    CallbackPublisher, CancelNotifications, JobNotifications, JobRepository, ObjectStore, WorkerId,
+    CallbackPublisher, CancelNotifications, JobId, JobNotifications, JobRepository, JobState,
+    ObjectStore, WorkerId,
 };
 use mm_ffmpeg::{ProbeLimits, Prober, Runner};
 use mm_magick::{Tool as ImageTool, ToolLimits as ImageLimits};
-use mm_observability::{Metrics, Registry};
-use tokio::sync::{Notify, Semaphore, watch};
+use mm_observability::{Component, Metrics, Registry, record};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 pub use budget::{DiskBudget, admits};
@@ -189,6 +190,37 @@ async fn job_ready(notifications: Option<&dyn JobNotifications>) {
     }
 }
 
+/// A permit is held while the row it claimed still says Running, so the
+/// semaphore bounds the rows and not only the tasks. Every terminal write in
+/// the worker is written so that a refused write leaves the row Running, and a
+/// released permit then lets the next claim put one row too many in Running
+/// under a bound of two. The reaper owns such a row from then on, so this waits
+/// for it to leave Running, bounded by twice the lease because that is how long
+/// it can stay Running before the reaper is bound to have taken it.
+async fn wait_while_running(ctx: &Arc<WorkerConfig>, job_id: JobId) {
+    let step = ctx.reconcile_interval.min(Duration::from_millis(250));
+    let limit = ctx.lease * 2;
+    let mut waited = Duration::ZERO;
+    while waited < limit {
+        match ctx.repository.get(job_id).await {
+            Ok(Some(record)) if record.state == JobState::Running => {}
+            _ => return,
+        }
+        tokio::time::sleep(step).await;
+        waited += step;
+    }
+    record(
+        Component::Worker,
+        None,
+        "job.outcome_unwritten",
+        &[
+            ("job", job_id.to_string()),
+            ("worker", ctx.worker_id.as_str().to_string()),
+            ("waited_seconds", format!("{:.3}", waited.as_secs_f64())),
+        ],
+    );
+}
+
 async fn claim_available(
     ctx: &Arc<WorkerConfig>,
     semaphore: &Arc<Semaphore>,
@@ -202,23 +234,38 @@ async fn claim_available(
             return;
         }
         let want = (permits as u32).min(ctx.claim_batch.get());
-        let batch = NonZeroU32::new(want).expect("positive claim size");
+        let mut held: Vec<OwnedSemaphorePermit> = Vec::with_capacity(want as usize);
+        for _ in 0..want {
+            match semaphore.clone().try_acquire_owned() {
+                Ok(permit) => held.push(permit),
+                Err(_) => break,
+            }
+        }
+        if held.is_empty() {
+            return;
+        }
+        let batch = NonZeroU32::new(held.len() as u32).expect("permits held is positive");
         let claimed = match ctx.repository.claim(&ctx.worker_id, batch, ctx.lease).await {
             Ok(claimed) => claimed,
             Err(_) => return,
         };
-        let drained = (claimed.len() as u32) < want;
+        let mut drained = (claimed.len() as u32) < held.len() as u32;
+        let mut held = held.into_iter();
         for job in claimed {
-            let permit = semaphore
-                .clone()
-                .try_acquire_owned()
-                .expect("claim size never exceeds available permits");
+            let Some(permit) = held.next() else {
+                drained = true;
+                break;
+            };
             let ctx = ctx.clone();
             let wake = wake.clone();
             let registry = registry.clone();
+            let job_id = job.id;
             jobs.spawn(async move {
-                let _permit = permit;
-                pipeline::execute(&ctx, job, &registry).await;
+                let terminal = pipeline::execute(&ctx, job, &registry).await;
+                if !terminal {
+                    wait_while_running(&ctx, job_id).await;
+                }
+                drop(permit);
                 wake.notify_one();
             });
         }

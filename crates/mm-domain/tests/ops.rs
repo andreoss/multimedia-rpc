@@ -1,8 +1,8 @@
 use mm_domain::{
-    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, MediaRef, MediaRefError,
-    OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, ProbeResult,
-    ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec, TrimSpec,
-    UnsupportedOp,
+    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, LoudnessResult,
+    LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, OpKind, OpResultError, OpSpec,
+    OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ResizeMode,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec, TrimSpec, UnsupportedOp,
 };
 
 fn object() -> MediaRef {
@@ -472,4 +472,52 @@ fn image_formats_parse_from_their_names() {
     assert_eq!(ImageFormat::parse("png"), Some(ImageFormat::Png));
     assert_eq!(ImageFormat::parse("tiff"), None);
     assert_eq!(ImageFormat::Jpeg.extension(), "jpg");
+}
+
+#[test]
+fn a_loudness_target_is_bounded_by_name() {
+    assert!(LoudnessTarget::new(-16.0, -1.5).is_ok());
+    assert!(matches!(
+        LoudnessTarget::new(-100.0, -1.5),
+        Err(OpSpecError::InvalidLoudnessTarget { .. })
+    ));
+    assert!(matches!(
+        LoudnessTarget::new(-16.0, 1.0),
+        Err(OpSpecError::InvalidTruePeak { .. })
+    ));
+    assert!(matches!(
+        LoudnessTarget::new(f64::NAN, -1.5),
+        Err(OpSpecError::InvalidLoudnessTarget { .. })
+    ));
+}
+
+#[test]
+fn a_loudness_spec_carries_an_optional_target() {
+    let measured = LoudnessSpec::new(object(), None).unwrap();
+    assert!(measured.target().is_none());
+    assert_eq!(OpSpec::Loudness(measured).kind(), OpKind::Loudness);
+    let target = LoudnessTarget::new(-16.0, -1.5).unwrap();
+    let normalize = LoudnessSpec::new(object(), Some(target)).unwrap();
+    assert_eq!(normalize.target(), Some(target));
+    assert_eq!(normalize.target().unwrap().integrated_lufs(), -16.0);
+    assert_eq!(normalize.target().unwrap().true_peak_db(), -1.5);
+}
+
+#[test]
+fn a_loudness_result_holds_negative_measurements_and_an_optional_output() {
+    let result = LoudnessResult::new(None, -23.0, -3.5, 7.0).unwrap();
+    assert!(result.output().is_none());
+    assert_eq!(result.integrated_lufs(), -23.0);
+    assert_eq!(result.true_peak_db(), -3.5);
+    assert_eq!(result.loudness_range_lu(), 7.0);
+    let output = LoudnessResult::new(Some(object()), -16.0, -1.5, 4.0).unwrap();
+    assert!(output.output().is_some());
+    assert!(matches!(
+        LoudnessResult::new(None, -16.0, -1.5, -1.0),
+        Err(OpResultError::InvalidMeasurement { .. })
+    ));
+    assert!(matches!(
+        LoudnessResult::new(None, f64::INFINITY, -1.5, 4.0),
+        Err(OpResultError::InvalidMeasurement { .. })
+    ));
 }

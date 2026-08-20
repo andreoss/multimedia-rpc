@@ -15,6 +15,7 @@ pub fn verdict_code(name: &str) -> &str {
         "MediaKindMismatch" => "ERROR_MEDIA_KIND_MISMATCH",
         "ResolutionMismatch" => "ERROR_RESOLUTION_MISMATCH",
         "RungUpscale" => "ERROR_UPSCALE_NOT_ALLOWED",
+        "NoAudioTrack" => "ERROR_NO_AUDIO_TRACK",
         other => other,
     }
 }
@@ -38,6 +39,8 @@ pub fn failure_code(failure: &JobFailure) -> &str {
         "package_launch_failed" => "ERROR_PACKAGE_LAUNCH_FAILED",
         "package_failed" => "ERROR_PACKAGE_FAILED",
         "ladder_pack_failed" => "ERROR_LADDER_PACK_FAILED",
+        "loudness_measure_failed" => "ERROR_LOUDNESS_MEASURE_FAILED",
+        "loudness_failed" => "ERROR_LOUDNESS_FAILED",
         code if code.starts_with("ERROR_") => code,
         _ => INTERNAL,
     }

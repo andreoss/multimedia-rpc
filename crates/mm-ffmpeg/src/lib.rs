@@ -1,5 +1,6 @@
 mod concat;
 mod hls;
+mod loudness;
 mod parse;
 mod probe;
 mod profile;
@@ -12,6 +13,10 @@ mod trim;
 
 pub use concat::{ConcatError, build_concat_args};
 pub use hls::{HlsError, HlsTarget, build_hls_args};
+pub use loudness::{
+    LoudnessError, LoudnessMeasurement, LoudnessTarget, build_loudness_measure_args,
+    build_loudness_normalize_args, parse_loudnorm_report,
+};
 pub use parse::{
     AudioStream, MediaInfo, MediaKind, ParseError, StillInfo, VideoStream, media_kind,
     parse_keyframe_times, parse_media_info, parse_still_info,

@@ -3,13 +3,14 @@ use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
     ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder,
     InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, LadderResult,
-    LadderSpec, MediaRef, MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult,
-    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, OutputRange,
-    PackageResult, PackageSpec, ParameterDeclaration, ParameterName, ParameterType, ParameterValue,
-    ProbeResult, ProbeSpec, QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState,
-    SourceError, StepOutcome, StepState, Template, TemplateError, TextIdError, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
-    VideoStreamInfo, failure_code, verdict_code,
+    LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, MediaSource,
+    NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
+    OutputProfileError, OutputRange, PackageResult, PackageSpec, ParameterDeclaration,
+    ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl,
+    RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome, StepState,
+    Template, TemplateError, TextIdError, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo, failure_code,
+    verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -389,6 +390,30 @@ impl From<&LadderSpec> for v1::LadderSpec {
     }
 }
 
+impl TryFrom<v1::LoudnessSpec> for LoudnessSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::LoudnessSpec) -> Result<Self, Self::Error> {
+        let target = value
+            .target
+            .map(|target| LoudnessTarget::new(target.integrated_lufs, target.true_peak_db))
+            .transpose()?;
+        LoudnessSpec::new(required_source(value.input)?, target)
+    }
+}
+
+impl From<&LoudnessSpec> for v1::LoudnessSpec {
+    fn from(value: &LoudnessSpec) -> Self {
+        Self {
+            input: Some(v1::InputSource::from(value.input())),
+            target: value.target().map(|target| v1::LoudnessTarget {
+                integrated_lufs: target.integrated_lufs(),
+                true_peak_db: target.true_peak_db(),
+            }),
+        }
+    }
+}
+
 impl TryFrom<v1::OpSpec> for OpSpec {
     type Error = OpSpecError;
 
@@ -439,6 +464,9 @@ impl TryFrom<v1::OpSpec> for OpSpec {
             v1::op_spec::Op::Batch(batch) => Ok(OpSpec::Batch(BatchSpec::try_from(batch)?)),
             v1::op_spec::Op::Graph(graph) => Ok(OpSpec::Graph(GraphSpec::try_from(graph)?)),
             v1::op_spec::Op::Ladder(ladder) => Ok(OpSpec::Ladder(LadderSpec::try_from(ladder)?)),
+            v1::op_spec::Op::Loudness(loudness) => {
+                Ok(OpSpec::Loudness(LoudnessSpec::try_from(loudness)?))
+            }
         }
     }
 }
@@ -484,8 +512,35 @@ impl From<&OpSpec> for v1::OpSpec {
             OpSpec::Batch(batch) => v1::op_spec::Op::Batch(v1::BatchSpec::from(batch)),
             OpSpec::Graph(graph) => v1::op_spec::Op::Graph(v1::GraphSpec::from(graph)),
             OpSpec::Ladder(ladder) => v1::op_spec::Op::Ladder(v1::LadderSpec::from(ladder)),
+            OpSpec::Loudness(loudness) => {
+                v1::op_spec::Op::Loudness(v1::LoudnessSpec::from(loudness))
+            }
         };
         v1::OpSpec { op: Some(op) }
+    }
+}
+
+impl TryFrom<v1::LoudnessResult> for LoudnessResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::LoudnessResult) -> Result<Self, Self::Error> {
+        LoudnessResult::new(
+            optional_ref(value.output)?,
+            value.integrated_lufs,
+            value.true_peak_db,
+            value.loudness_range_lu,
+        )
+    }
+}
+
+impl From<&LoudnessResult> for v1::LoudnessResult {
+    fn from(value: &LoudnessResult) -> Self {
+        Self {
+            output: value.output().map(v1::MediaRef::from),
+            integrated_lufs: value.integrated_lufs(),
+            true_peak_db: value.true_peak_db(),
+            loudness_range_lu: value.loudness_range_lu(),
+        }
     }
 }
 
@@ -555,6 +610,9 @@ impl TryFrom<v1::OpResult> for OpResult {
             v1::op_result::Op::Graph(graph) => Ok(OpResult::Graph(GraphResult::try_from(graph)?)),
             v1::op_result::Op::Ladder(ladder) => {
                 Ok(OpResult::Ladder(LadderResult::try_from(ladder)?))
+            }
+            v1::op_result::Op::Loudness(loudness) => {
+                Ok(OpResult::Loudness(LoudnessResult::try_from(loudness)?))
             }
         }
     }
@@ -1053,6 +1111,9 @@ impl From<&OpResult> for v1::OpResult {
             OpResult::Batch(batch) => v1::op_result::Op::Batch(v1::BatchResult::from(batch)),
             OpResult::Graph(graph) => v1::op_result::Op::Graph(v1::GraphResult::from(graph)),
             OpResult::Ladder(ladder) => v1::op_result::Op::Ladder(v1::LadderResult::from(ladder)),
+            OpResult::Loudness(loudness) => {
+                v1::op_result::Op::Loudness(v1::LoudnessResult::from(loudness))
+            }
         };
         v1::OpResult { op: Some(op) }
     }

@@ -38,6 +38,7 @@ and no media bytes cross the API.
 |`image` |Resize, convert or composite stills.
 |`package` |One rendition into HLS segments and a media playlist.
 |`ladder` |Ordered renditions and one master playlist.
+|`loudness` |Measure integrated loudness, true peak and range, or normalise to a target.
 |`batch` |Steps in order, a later one reading an earlier result.
 |`graph` |Named nodes in dependency order, references inside the graph.
 |===

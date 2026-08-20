@@ -87,6 +87,16 @@ message LadderSpec {
   optional double poster_seconds = 4;
 }
 
+message LoudnessTarget {
+  double integrated_lufs = 1;
+  double true_peak_db = 2;
+}
+
+message LoudnessSpec {
+  InputSource input = 1;
+  optional LoudnessTarget target = 2;
+}
+
 message OpSpec {
   oneof op {
     ConcatSpec concat = 1;
@@ -99,6 +109,7 @@ message OpSpec {
     BatchSpec batch = 8;
     GraphSpec graph = 9;
     LadderSpec ladder = 10;
+    LoudnessSpec loudness = 11;
   }
 }
 
@@ -200,6 +211,13 @@ message LadderResult {
   repeated RenditionResult renditions = 2;
 }
 
+message LoudnessResult {
+  optional MediaRef output = 1;
+  double integrated_lufs = 2;
+  double true_peak_db = 3;
+  double loudness_range_lu = 4;
+}
+
 message OpResult {
   oneof op {
     ConcatResult concat = 1;
@@ -212,5 +230,6 @@ message OpResult {
     BatchResult batch = 8;
     GraphResult graph = 9;
     LadderResult ladder = 10;
+    LoudnessResult loudness = 11;
   }
 }

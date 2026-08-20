@@ -11,9 +11,14 @@ use async_trait::async_trait;
 use mm_domain::{
     BatchSpec, CallbackError, CallbackPublisher, ConcatSpec, GraphNode, GraphSpec, ImageFormat,
     ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec,
-    MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult,
-    OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, RungState,
-    StepState, ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    LoudnessSpec, LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
+    ResizeMode, RungState, StepState, ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId,
+    WorkerId, collect_body,
+};
+use mm_ffmpeg::{
+    RunLimits as ToolLimits, RunOutcome as ToolOutcome, Runner as ToolRunner,
+    build_loudness_measure_args, parse_loudnorm_report,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -3270,4 +3275,163 @@ async fn a_refused_terminal_write_keeps_its_row_counted_against_the_bound() {
         "a refused terminal write put {max_running} rows in Running under a bound of {bound}"
     );
     db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_measure_only_loudness_job_lands_the_numbers_and_no_object() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("loudness-measure.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/loudness-measure.mp4").await;
+    let repository = db.repository();
+    let spec = LoudnessSpec::new(input, None).expect("a measure-only spec is valid");
+    let job = repository
+        .create(single_input_job(OpSpec::Loudness(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-loudness-measure"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Loudness(result) = record.result.expect("result recorded") else {
+        panic!("expected a loudness result");
+    };
+    assert!(
+        result.output().is_none(),
+        "a measure-only job names no output"
+    );
+    assert!(result.integrated_lufs().is_finite());
+    assert!(result.true_peak_db().is_finite());
+    assert!(result.loudness_range_lu() >= 0.0);
+    let key = ObjectRef::new(BUCKET, &format!("jobs/{}/output.mp4", job.id)).unwrap();
+    assert!(
+        store.head(&key).await.is_err(),
+        "a measure-only job landed an output object"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_normalised_loudness_job_lands_an_output_at_the_target_and_ceiling() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("loudness-normalize.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/loudness-normalize.mp4").await;
+    let repository = db.repository();
+    let target = LoudnessTarget::new(-16.0, -1.5).expect("the target is in bounds");
+    let spec = LoudnessSpec::new(input, Some(target)).expect("a normalising spec is valid");
+    let job = repository
+        .create(single_input_job(OpSpec::Loudness(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-loudness-normalize"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Loudness(result) = record.result.expect("result recorded") else {
+        panic!("expected a loudness result");
+    };
+    let output = result.output().expect("a normalising job names its output");
+    let MediaRef::Object(object) = output else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/output.mp4", job.id));
+    let path = scratch_dir("loudness").join(format!("{}.mp4", job.id));
+    let bytes = collect_body(store.get(object).await.expect("the output is readable"))
+        .await
+        .expect("the output body is read");
+    std::fs::write(&path, bytes).expect("the output is staged");
+    let measured = measure_file(&path).await;
+    assert!(
+        (measured.integrated_lufs + 16.0).abs() <= 1.0,
+        "measured {} LUFS is outside one unit of -16",
+        measured.integrated_lufs
+    );
+    assert!(
+        measured.true_peak_db <= -1.5,
+        "measured true peak {} is above the -1.5 ceiling",
+        measured.true_peak_db
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loudness_job_on_an_input_without_audio_blocks_by_name() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture_without_audio("loudness-silent.mp4", 3);
+    let input = upload_input(&store, &source, "inputs/loudness-silent.mp4").await;
+    let repository = db.repository();
+    let spec = LoudnessSpec::new(input, None).expect("a measure-only spec is valid");
+    let job = repository
+        .create(single_input_job(OpSpec::Loudness(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-loudness-silent"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.result);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::VALIDATION_BLOCKED);
+    let input = failure.inputs().first().expect("the input is named");
+    assert_eq!(input.code(), "ERROR_NO_AUDIO_TRACK");
+    assert_eq!(
+        mm_domain::failure_code(&failure),
+        "ERROR_NO_AUDIO_TRACK",
+        "the reference code reaches the caller"
+    );
+    let key = ObjectRef::new(BUCKET, &format!("jobs/{}/output.mp4", job.id)).unwrap();
+    assert!(
+        store.head(&key).await.is_err(),
+        "a blocked job landed an output"
+    );
+    db.dispose().await;
+}
+
+fn fixture_without_audio(name: &str, seconds: u32) -> PathBuf {
+    static GENERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = GENERATION.lock().unwrap();
+    let path = scratch_dir("fixtures").join(name);
+    if path.is_file() && path.metadata().unwrap().len() > 0 {
+        return path;
+    }
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(format!("testsrc2=duration={seconds}:size=320x180:rate=24"))
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-an")
+        .arg("-f")
+        .arg("mp4")
+        .arg(&path)
+        .output()
+        .expect("the media tool must be runnable");
+    assert!(output.status.success(), "fixture generation failed: {name}");
+    path
+}
+
+async fn measure_file(path: &Path) -> mm_ffmpeg::LoudnessMeasurement {
+    let args = build_loudness_measure_args(path.to_string_lossy().as_ref());
+    let limits = ToolLimits {
+        total_duration: Duration::from_secs(30),
+        deadline: Duration::from_secs(120),
+        stderr_tail_bytes: 64 * 1024,
+    };
+    let run = ToolRunner::default()
+        .start(&args, &limits)
+        .expect("the meter starts");
+    let (outcome, stderr) = run.wait_with_stderr().await.expect("the run is waited");
+    assert_eq!(outcome, ToolOutcome::Succeeded, "{stderr}");
+    parse_loudnorm_report(&stderr).expect("the meter reports")
 }

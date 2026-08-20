@@ -12,18 +12,19 @@ use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec,
     ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
     InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
-    LadderResult, LadderSpec, MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody, ObjectRef,
-    ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
-    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
-    ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, ThumbnailResult,
-    ThumbnailSpec, Ticks, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, Verdict,
-    VideoStreamInfo, WorkerId, resolve_media_ref, validate_inputs, validate_ladder_rungs,
+    LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome,
+    NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
+    OutputKey, OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
+    RenditionResult, ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState,
+    ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    Verdict, VideoStreamInfo, WorkerId, resolve_media_ref, validate_inputs, validate_ladder_rungs,
     verdict_code,
 };
 use mm_ffmpeg::{
-    ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
-    ThumbnailTarget, Timestamp, TranscodeTarget, TrimStrategy, TrimTarget, build_concat_args,
-    build_thumbnail_args, build_transcode_args, build_trim_args,
+    ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo, RunLimits, RunOutcome, ScaleMode,
+    SourceCut, StillInfo, ThumbnailTarget, Timestamp, TranscodeTarget, TrimStrategy, TrimTarget,
+    build_concat_args, build_loudness_measure_args, build_loudness_normalize_args,
+    build_thumbnail_args, build_transcode_args, build_trim_args, parse_loudnorm_report,
 };
 use mm_gst::Written as GstWritten;
 use mm_gst::{
@@ -64,8 +65,10 @@ pub mod codes {
     pub const PACKAGE_LAUNCH_FAILED: &str = "package_launch_failed";
     pub const PACKAGE_FAILED: &str = "package_failed";
     pub const LADDER_PACK_FAILED: &str = "ladder_pack_failed";
+    pub const LOUDNESS_MEASURE_FAILED: &str = "loudness_measure_failed";
+    pub const LOUDNESS_FAILED: &str = "loudness_failed";
 
-    pub const ALL: [&str; 14] = [
+    pub const ALL: [&str; 16] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -80,6 +83,8 @@ pub mod codes {
         PACKAGE_LAUNCH_FAILED,
         PACKAGE_FAILED,
         LADDER_PACK_FAILED,
+        LOUDNESS_MEASURE_FAILED,
+        LOUDNESS_FAILED,
     ];
 }
 
@@ -686,6 +691,9 @@ async fn run_leaf(
         OpSpec::Ladder(ladder) => {
             ladder_pipeline(ctx, job, ladder, scope, deadline_at, signal).await?
         }
+        OpSpec::Loudness(spec) => {
+            loudness_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
+        }
     };
     scope.done.fetch_add(1, Ordering::Relaxed);
     Ok(result)
@@ -778,6 +786,11 @@ fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
                 }
             }
         }
+        OpResult::Loudness(loudness) => {
+            if let Some(output) = loudness.output() {
+                push(output);
+            }
+        }
         OpResult::Ladder(ladder) => {
             if let Some(master) = ladder.master_playlist() {
                 push(master);
@@ -832,6 +845,7 @@ fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
             }
         }
         OpResult::Ladder(ladder) => ladder.renditions().get(index).map(RenditionResult::media),
+        OpResult::Loudness(loudness) => (index == 0).then(|| loudness.output()).flatten(),
         OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
     }
 }
@@ -2039,6 +2053,126 @@ async fn transcode_pipeline(
     outcome
 }
 
+async fn loudness_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &LoudnessSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Loudness, &[input_report(&info)])?;
+
+    let measured =
+        measure_loudness(ctx, job.id, &url, info.duration, deadline_at, signal, scope).await?;
+    let Some(target) = spec.target() else {
+        return LoudnessResult::new(
+            None,
+            measured.integrated_lufs,
+            measured.true_peak_db,
+            measured.loudness_range_lu,
+        )
+        .map(OpResult::Loudness)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error));
+    };
+
+    let inputs = [spec.input().clone()];
+    let estimate = estimate_bytes(ctx, &inputs, std::slice::from_ref(&info)).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+    let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));
+    let tool_target = ToolLoudnessTarget {
+        integrated_lufs: target.integrated_lufs(),
+        true_peak_db: target.true_peak_db(),
+    };
+    let args = build_loudness_normalize_args(
+        &url,
+        &measured,
+        &tool_target,
+        &output_path.to_string_lossy(),
+    );
+    let limits = remaining_limits(ctx, info.duration + Duration::from_secs(30), deadline_at)?;
+    check(signal)?;
+    supervise(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await
+    .map_err(|error| match error {
+        Finish::Failed(failure) if failure.code() == codes::MERGE_FAILED => {
+            failed(codes::LOUDNESS_FAILED, failure.message())
+        }
+        other => other,
+    })?;
+    check(signal)?;
+    let normalized = measure_loudness(
+        ctx,
+        job.id,
+        &output_path.to_string_lossy(),
+        info.duration,
+        deadline_at,
+        signal,
+        scope,
+    )
+    .await?;
+    let object = output_object(ctx, job.id, &scope.prefix)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let bytes = file_bytes(&output_path).await;
+    let file = tokio::fs::File::open(&output_path)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.store
+        .put_multipart(&object, file_body(file))
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.metrics.output_bytes.add(bytes);
+    let _ = tokio::fs::remove_file(&output_path).await;
+    if let Err(finish) = check(signal) {
+        let _ = ctx.store.delete(&object).await;
+        return Err(finish);
+    }
+    LoudnessResult::new(
+        Some(MediaRef::Object(object)),
+        normalized.integrated_lufs,
+        normalized.true_peak_db,
+        normalized.loudness_range_lu,
+    )
+    .map(OpResult::Loudness)
+    .map_err(|error| failed(codes::OUTPUT_INVALID, error))
+}
+
+async fn measure_loudness(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    url: &str,
+    duration: Duration,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+    scope: &Scope,
+) -> Result<mm_ffmpeg::LoudnessMeasurement, Finish> {
+    let args = build_loudness_measure_args(url);
+    let limits = remaining_limits(ctx, duration + Duration::from_secs(30), deadline_at)?;
+    let stderr = supervise(
+        ctx,
+        id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
+    parse_loudnorm_report(&stderr).map_err(|error| failed(codes::LOUDNESS_MEASURE_FAILED, error))
+}
+
 async fn extract_poster(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
@@ -2485,7 +2619,7 @@ async fn supervise(
     signal: &mut watch::Receiver<Signal>,
     completed: usize,
     total: usize,
-) -> Result<(), Finish> {
+) -> Result<String, Finish> {
     let started = Instant::now();
     let mut run = ctx
         .runner
@@ -2493,7 +2627,7 @@ async fn supervise(
         .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
     let cancel = run.cancel_handle();
     let mut progress = run.take_progress();
-    let wait = run.wait();
+    let wait = run.wait_with_stderr();
     tokio::pin!(wait);
 
     let mut progress_open = true;
@@ -2502,7 +2636,7 @@ async fn supervise(
     let mut last_persisted = Instant::now()
         .checked_sub(ctx.progress_interval)
         .unwrap_or_else(Instant::now);
-    let outcome = loop {
+    let (outcome, stderr) = loop {
         tokio::select! {
             waited = &mut wait => {
                 break waited.map_err(|error| failed(codes::MERGE_FAILED, error))?;
@@ -2562,7 +2696,7 @@ async fn supervise(
         ],
     );
     match outcome {
-        RunOutcome::Succeeded => Ok(()),
+        RunOutcome::Succeeded => Ok(stderr),
         RunOutcome::Cancelled => Err(interrupted.unwrap_or(Finish::Cancelled)),
         RunOutcome::DeadlineExceeded { after } => Err(failed(
             codes::TIMEOUT,

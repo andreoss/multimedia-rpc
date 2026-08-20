@@ -266,6 +266,13 @@ fn op_spec_oneof_carries_every_arm() {
                 }),
             }],
         }),
+        v1::op_spec::Op::Loudness(v1::LoudnessSpec {
+            input: Some(media()),
+            target: Some(v1::LoudnessTarget {
+                integrated_lufs: -16.0,
+                true_peak_db: -1.5,
+            }),
+        }),
         v1::op_spec::Op::Ladder(v1::LadderSpec {
             input: Some(media()),
             rungs: vec![
@@ -288,7 +295,7 @@ fn op_spec_oneof_carries_every_arm() {
             poster_seconds: None,
         }),
     ];
-    assert_eq!(arms.len(), 10);
+    assert_eq!(arms.len(), 11);
     for arm in arms {
         assert!(OpSpec::try_from(v1::OpSpec { op: Some(arm) }).is_ok());
     }

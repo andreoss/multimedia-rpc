@@ -848,3 +848,23 @@ fn every_reference_warn_row_is_in_the_matrix() {
         assert!(blocks(&verdicts).is_empty(), "row {code:?} is a warning");
     }
 }
+
+#[test]
+fn a_loudness_input_without_audio_blocks_with_the_reference_code() {
+    let silent = InputReport {
+        audio: vec![],
+        ..input()
+    };
+    let verdicts = validate_inputs(OpKind::Loudness, &[silent]);
+    assert_eq!(blocks(&verdicts), vec![(Some(0), BlockCode::NoAudioTrack)]);
+    assert_eq!(
+        mm_domain::verdict_code(VerdictCode::Block(BlockCode::NoAudioTrack).name().as_str()),
+        "ERROR_NO_AUDIO_TRACK"
+    );
+}
+
+#[test]
+fn a_loudness_input_with_audio_passes_the_gate() {
+    let verdicts = validate_inputs(OpKind::Loudness, &[input()]);
+    assert!(blocks(&verdicts).is_empty(), "{verdicts:?}");
+}

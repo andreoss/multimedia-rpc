@@ -14,6 +14,7 @@ fn all_block_codes() -> Vec<BlockCode> {
         BlockCode::TotalDurationTooLong,
         BlockCode::MediaKindMismatch,
         BlockCode::ResolutionMismatch,
+        BlockCode::NoAudioTrack,
     ]
 }
 
@@ -58,6 +59,7 @@ fn every_block_code_carries_the_reference_vocabulary() {
         ),
         (BlockCode::MediaKindMismatch, "ERROR_MEDIA_KIND_MISMATCH"),
         (BlockCode::ResolutionMismatch, "ERROR_RESOLUTION_MISMATCH"),
+        (BlockCode::NoAudioTrack, "ERROR_NO_AUDIO_TRACK"),
     ];
     for (code, reference) in expected {
         let name = VerdictCode::Block(code).name();
@@ -127,6 +129,8 @@ fn every_worker_failure_code_carries_the_reference_vocabulary() {
         ("image_failed", "ERROR_IMAGE_FAILED"),
         ("package_launch_failed", "ERROR_PACKAGE_LAUNCH_FAILED"),
         ("package_failed", "ERROR_PACKAGE_FAILED"),
+        ("loudness_measure_failed", "ERROR_LOUDNESS_MEASURE_FAILED"),
+        ("loudness_failed", "ERROR_LOUDNESS_FAILED"),
     ];
     for (code, reference) in expected {
         assert_eq!(failure_code(&failure(code, Vec::new())), reference);

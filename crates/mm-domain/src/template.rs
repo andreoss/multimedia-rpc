@@ -6,8 +6,8 @@ use crate::id::{
     ParameterName, ParameterNameError, TemplateId, TemplateName, TemplateNameError, UserId,
 };
 use crate::op::{
-    BatchSpec, ConcatSpec, GraphNode, GraphSpec, ImageSpec, LadderSpec, OpSpec, OpSpecError,
-    PackageSpec, ProbeSpec, ThumbnailSpec, TranscodeSpec, TrimSpec,
+    BatchSpec, ConcatSpec, GraphNode, GraphSpec, ImageSpec, LadderSpec, LoudnessSpec, OpSpec,
+    OpSpecError, PackageSpec, ProbeSpec, ThumbnailSpec, TranscodeSpec, TrimSpec,
 };
 use crate::source::InputSource;
 
@@ -342,6 +342,10 @@ fn substitute_spec(
                 .collect::<Result<Vec<_>, _>>()?;
             OpSpec::Graph(GraphSpec::new(nodes)?)
         }
+        OpSpec::Loudness(loudness) => OpSpec::Loudness(LoudnessSpec::new(
+            substitute_input(loudness.input(), values)?,
+            loudness.target(),
+        )?),
         OpSpec::Ladder(ladder) => {
             let input = substitute_input(ladder.input(), values)?;
             let mut spec =

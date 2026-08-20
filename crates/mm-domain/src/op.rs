@@ -11,6 +11,10 @@ pub const MAX_NESTING_DEPTH: usize = 4;
 pub const MAX_TREE_STEPS: usize = 128;
 pub const MIN_LADDER_RUNGS: usize = 2;
 pub const MAX_LADDER_RUNGS: usize = 6;
+pub const MIN_LOUDNESS_LUFS: f64 = -70.0;
+pub const MAX_LOUDNESS_LUFS: f64 = 0.0;
+pub const MIN_TRUE_PEAK_DB: f64 = -20.0;
+pub const MAX_TRUE_PEAK_DB: f64 = 0.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRef {
@@ -341,6 +345,10 @@ pub enum OpSpecError {
     RungCarriesRange { index: usize },
     #[error("offset {value} is negative or not finite")]
     InvalidOffset { value: f64 },
+    #[error("integrated loudness {value} is outside {min} to {max} LUFS")]
+    InvalidLoudnessTarget { value: f64, min: f64, max: f64 },
+    #[error("true peak {value} is outside {min} to {max} dBTP")]
+    InvalidTruePeak { value: f64, min: f64, max: f64 },
     #[error("{dimension} is zero")]
     ZeroDimension { dimension: &'static str },
     #[error("{op} takes exactly {expected} inputs, got {got}")]
@@ -820,6 +828,72 @@ impl PackageSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoudnessTarget {
+    integrated_lufs: f64,
+    true_peak_db: f64,
+}
+
+impl LoudnessTarget {
+    pub fn new(integrated_lufs: f64, true_peak_db: f64) -> Result<Self, OpSpecError> {
+        if !integrated_lufs.is_finite()
+            || !(MIN_LOUDNESS_LUFS..=MAX_LOUDNESS_LUFS).contains(&integrated_lufs)
+        {
+            return Err(OpSpecError::InvalidLoudnessTarget {
+                value: integrated_lufs,
+                min: MIN_LOUDNESS_LUFS,
+                max: MAX_LOUDNESS_LUFS,
+            });
+        }
+        if !true_peak_db.is_finite()
+            || !(MIN_TRUE_PEAK_DB..=MAX_TRUE_PEAK_DB).contains(&true_peak_db)
+        {
+            return Err(OpSpecError::InvalidTruePeak {
+                value: true_peak_db,
+                min: MIN_TRUE_PEAK_DB,
+                max: MAX_TRUE_PEAK_DB,
+            });
+        }
+        Ok(Self {
+            integrated_lufs,
+            true_peak_db,
+        })
+    }
+
+    pub fn integrated_lufs(&self) -> f64 {
+        self.integrated_lufs
+    }
+
+    pub fn true_peak_db(&self) -> f64 {
+        self.true_peak_db
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoudnessSpec {
+    input: InputSource,
+    target: Option<LoudnessTarget>,
+}
+
+impl LoudnessSpec {
+    pub fn new<I: Into<InputSource>>(
+        input: I,
+        target: Option<LoudnessTarget>,
+    ) -> Result<Self, OpSpecError> {
+        let input = source(input);
+        reject_cuts("loudness", std::slice::from_ref(&input))?;
+        Ok(Self { input, target })
+    }
+
+    pub fn input(&self) -> &InputSource {
+        &self.input
+    }
+
+    pub fn target(&self) -> Option<LoudnessTarget> {
+        self.target
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LadderSpec {
     input: InputSource,
@@ -1269,6 +1343,7 @@ pub enum OpSpec {
     Batch(BatchSpec),
     Graph(GraphSpec),
     Ladder(LadderSpec),
+    Loudness(LoudnessSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1285,6 +1360,7 @@ pub enum OpKind {
     Batch,
     Graph,
     Ladder,
+    Loudness,
 }
 
 impl std::fmt::Display for OpKind {
@@ -1302,6 +1378,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Batch => "batch",
             OpKind::Graph => "graph",
             OpKind::Ladder => "ladder",
+            OpKind::Loudness => "loudness",
         };
         formatter.write_str(name)
     }
@@ -1333,7 +1410,8 @@ impl OpKind {
             | OpKind::Package
             | OpKind::Batch
             | OpKind::Graph
-            | OpKind::Ladder => Ok(()),
+            | OpKind::Ladder
+            | OpKind::Loudness => Ok(()),
         }
     }
 }
@@ -1351,6 +1429,7 @@ impl OpSpec {
             OpSpec::Batch(_) => OpKind::Batch,
             OpSpec::Graph(_) => OpKind::Graph,
             OpSpec::Ladder(_) => OpKind::Ladder,
+            OpSpec::Loudness(_) => OpKind::Loudness,
         }
     }
 
@@ -1370,6 +1449,7 @@ impl OpSpec {
                 .flat_map(|node| node.spec().inputs())
                 .collect(),
             OpSpec::Ladder(ladder) => vec![ladder.input()],
+            OpSpec::Loudness(loudness) => vec![loudness.input()],
         }
     }
 
@@ -1393,6 +1473,8 @@ pub enum OpResultError {
     MissingOp,
     #[error("duration {value} is negative or not finite")]
     InvalidDuration { value: f64 },
+    #[error("measurement {field} {value} is not finite")]
+    InvalidMeasurement { field: &'static str, value: f64 },
     #[error("thumbnail result has no outputs")]
     EmptyOutputs,
     #[error("batch result has no steps")]
@@ -1757,6 +1839,55 @@ impl RenditionResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct LoudnessResult {
+    output: Option<MediaRef>,
+    integrated_lufs: f64,
+    true_peak_db: f64,
+    loudness_range_lu: f64,
+}
+
+impl LoudnessResult {
+    pub fn new(
+        output: Option<MediaRef>,
+        integrated_lufs: f64,
+        true_peak_db: f64,
+        loudness_range_lu: f64,
+    ) -> Result<Self, OpResultError> {
+        for (field, value) in [
+            ("integrated_lufs", integrated_lufs),
+            ("true_peak_db", true_peak_db),
+            ("loudness_range_lu", loudness_range_lu),
+        ] {
+            if !value.is_finite() || (field == "loudness_range_lu" && value < 0.0) {
+                return Err(OpResultError::InvalidMeasurement { field, value });
+            }
+        }
+        Ok(Self {
+            output,
+            integrated_lufs,
+            true_peak_db,
+            loudness_range_lu,
+        })
+    }
+
+    pub fn output(&self) -> Option<&MediaRef> {
+        self.output.as_ref()
+    }
+
+    pub fn integrated_lufs(&self) -> f64 {
+        self.integrated_lufs
+    }
+
+    pub fn true_peak_db(&self) -> f64 {
+        self.true_peak_db
+    }
+
+    pub fn loudness_range_lu(&self) -> f64 {
+        self.loudness_range_lu
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LadderResult {
     master_playlist: Option<MediaRef>,
     renditions: Vec<RenditionResult>,
@@ -1797,6 +1928,7 @@ pub enum OpResult {
     Batch(BatchResult),
     Graph(GraphResult),
     Ladder(LadderResult),
+    Loudness(LoudnessResult),
 }
 
 impl OpResult {
@@ -1811,6 +1943,7 @@ impl OpResult {
             OpResult::Ladder(result) => result
                 .master_playlist()
                 .or_else(|| result.renditions().first().map(RenditionResult::media)),
+            OpResult::Loudness(result) => result.output(),
             OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
         }
     }

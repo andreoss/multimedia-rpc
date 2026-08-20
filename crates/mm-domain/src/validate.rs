@@ -55,6 +55,7 @@ pub enum BlockCode {
     MediaKindMismatch,
     ResolutionMismatch,
     RungUpscale,
+    NoAudioTrack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -295,16 +296,18 @@ impl OpKind {
                 video_codecs: &SUPPORTED_VIDEO_CODECS,
                 audio_codecs: &SUPPORTED_AUDIO_CODECS,
             }),
-            OpKind::Transcode | OpKind::Trim | OpKind::Thumbnail | OpKind::Ladder => {
-                Some(InputPolicy {
-                    min_inputs: 1,
-                    cross_input_checks: false,
-                    kinds: VIDEO_KINDS,
-                    containers: &SUPPORTED_CONTAINERS,
-                    video_codecs: &SUPPORTED_VIDEO_CODECS,
-                    audio_codecs: &SUPPORTED_AUDIO_CODECS,
-                })
-            }
+            OpKind::Transcode
+            | OpKind::Trim
+            | OpKind::Thumbnail
+            | OpKind::Ladder
+            | OpKind::Loudness => Some(InputPolicy {
+                min_inputs: 1,
+                cross_input_checks: false,
+                kinds: VIDEO_KINDS,
+                containers: &SUPPORTED_CONTAINERS,
+                video_codecs: &SUPPORTED_VIDEO_CODECS,
+                audio_codecs: &SUPPORTED_AUDIO_CODECS,
+            }),
             OpKind::Resize | OpKind::Convert => Some(InputPolicy {
                 min_inputs: 1,
                 cross_input_checks: false,
@@ -351,6 +354,13 @@ pub fn validate_inputs(kind: OpKind, inputs: &[InputReport]) -> Vec<Verdict> {
     }
     if policy.cross_input_checks {
         check_drift(inputs, &mut verdicts);
+    }
+    if kind == OpKind::Loudness {
+        for (index, report) in inputs.iter().enumerate() {
+            if report.audio.is_empty() {
+                push_unique(&mut verdicts, block(Some(index), BlockCode::NoAudioTrack));
+            }
+        }
     }
     verdicts
 }

@@ -133,6 +133,14 @@ impl MergeRun {
     }
 
     pub async fn wait(self) -> Result<RunOutcome, RunError> {
+        self.wait_inner().await.map(|(outcome, _)| outcome)
+    }
+
+    pub async fn wait_with_stderr(self) -> Result<(RunOutcome, String), RunError> {
+        self.wait_inner().await
+    }
+
+    async fn wait_inner(self) -> Result<(RunOutcome, String), RunError> {
         let MergeRun {
             mut child,
             pid,
@@ -157,36 +165,39 @@ impl MergeRun {
             () = tokio::time::sleep(deadline) => Interrupt::DeadlineExceeded,
         };
 
-        let outcome = match interrupt {
+        let (outcome, stderr) = match interrupt {
             Interrupt::Exited(waited) => {
                 let status = waited.map_err(|source| RunError::Wait { source })?;
-                if status.success() {
+                let tail =
+                    String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).into_owned();
+                let outcome = if status.success() {
                     RunOutcome::Succeeded
                 } else {
-                    let tail = stderr_task.await.unwrap_or_default();
-                    let _ = progress_task.await;
-                    drop(cancel);
-                    return Ok(RunOutcome::Failed {
+                    RunOutcome::Failed {
                         status: status.code(),
-                        stderr_tail: String::from_utf8_lossy(&tail).into_owned(),
-                    });
-                }
+                        stderr_tail: tail.clone(),
+                    }
+                };
+                (outcome, tail)
             }
             Interrupt::Cancelled => {
                 kill_group(pid);
                 let _ = child.wait().await;
-                RunOutcome::Cancelled
+                let tail =
+                    String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).into_owned();
+                (RunOutcome::Cancelled, tail)
             }
             Interrupt::DeadlineExceeded => {
                 kill_group(pid);
                 let _ = child.wait().await;
-                RunOutcome::DeadlineExceeded { after: deadline }
+                let tail =
+                    String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).into_owned();
+                (RunOutcome::DeadlineExceeded { after: deadline }, tail)
             }
         };
-        let _ = stderr_task.await;
         let _ = progress_task.await;
         drop(cancel);
-        Ok(outcome)
+        Ok((outcome, stderr))
     }
 }
 

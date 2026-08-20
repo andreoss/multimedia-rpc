@@ -271,11 +271,16 @@ async fn start_telemetry(
         .await
         .map_err(|error| format!("the metrics endpoint failed: {error}"))?;
     println!("metrics {}", scrape.local_addr());
-    let sampler = tokio::spawn(sample_queue_depth(
-        repository,
-        metrics.clone(),
-        settings.interval,
-    ));
+    let sampler = {
+        let interval = settings.interval;
+        let sample_timeout = settings.sample_timeout;
+        tokio::spawn(sample_queue_depth(
+            repository,
+            metrics.clone(),
+            interval,
+            sample_timeout,
+        ))
+    };
     Ok(Telemetry {
         metrics,
         scrape,
@@ -295,36 +300,40 @@ impl QueueDepth for PgJobRepository {
     }
 }
 
-async fn sample_once(repository: &dyn QueueDepth, metrics: &Metrics) -> Result<(), String> {
-    match repository.pending_count().await {
-        Ok(pending) => {
+async fn sample_once(
+    repository: &dyn QueueDepth,
+    metrics: &Metrics,
+    bound: Duration,
+) -> Result<(), String> {
+    let pending = match tokio::time::timeout(bound, repository.pending_count()).await {
+        Ok(Ok(pending)) => {
             metrics.jobs_pending.set(pending);
-            Ok(())
+            return Ok(());
         }
-        Err(error) => {
-            let message = error.to_string();
-            metrics.queue_depth_errors.add(1);
-            record(
-                Component::Daemon,
-                None,
-                "queue.depth.unavailable",
-                &[
-                    ("dependency", "job store".to_string()),
-                    ("error", message.clone()),
-                ],
-            );
-            Err(message)
-        }
-    }
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => format!("the job store did not answer within {bound:?}"),
+    };
+    metrics.queue_depth_errors.add(1);
+    record(
+        Component::Daemon,
+        None,
+        "queue.depth.unavailable",
+        &[
+            ("dependency", "job store".to_string()),
+            ("error", pending.clone()),
+        ],
+    );
+    Err(pending)
 }
 
 async fn sample_queue_depth(
     repository: Arc<PgJobRepository>,
     metrics: Metrics,
     interval: Duration,
+    sample_timeout: Duration,
 ) {
     loop {
-        let _ = sample_once(repository.as_ref(), &metrics).await;
+        let _ = sample_once(repository.as_ref(), &metrics, sample_timeout).await;
         tokio::time::sleep(interval).await;
     }
 }
@@ -494,6 +503,7 @@ where
 struct Observability {
     bind: SocketAddr,
     interval: Duration,
+    sample_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +531,7 @@ fn observability(get: &dyn Fn(&str) -> Option<String>) -> Result<Observability, 
     Ok(Observability {
         bind,
         interval: seconds_var(get, "MM_METRICS_INTERVAL_SECS", 5)?,
+        sample_timeout: seconds_var(get, "MM_METRICS_SAMPLE_TIMEOUT_SECS", 5)?,
     })
 }
 
@@ -581,6 +592,7 @@ mod tests {
         AuthSettings, QueueDepth, Role, ServerEnv, WorkerEnv, build_auth, parse_role, sample_once,
         server_env, worker_env,
     };
+    use mm_domain::JobStoreError;
     use mm_observability::Registry;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -838,11 +850,53 @@ mod tests {
     }
 
     #[test]
+    fn a_depth_sample_that_never_returns_is_bounded_and_counted() {
+        let (registry, metrics) = Registry::new();
+        metrics.jobs_pending.set(11);
+        let depth = Hanging;
+        let outcome = block_on(sample_once(&depth, &metrics, Duration::from_millis(50)));
+        assert_eq!(
+            outcome,
+            Err("the job store did not answer within 50ms".to_string())
+        );
+        assert_eq!(metrics.jobs_pending.value(), 11);
+        assert_eq!(metrics.queue_depth_errors.value(), 1);
+        assert!(registry.render().contains("mm_queue_depth_errors_total 1"));
+    }
+
+    #[test]
+    fn a_sample_timeout_is_configurable_and_defaults_to_five_seconds() {
+        let env = env_from(&complete()).expect("environment parses");
+        assert_eq!(env.observability.sample_timeout, Duration::from_secs(5));
+        let mut map = complete();
+        map.insert("MM_METRICS_SAMPLE_TIMEOUT_SECS".into(), "2".into());
+        let env = env_from(&map).expect("environment parses");
+        assert_eq!(env.observability.sample_timeout, Duration::from_secs(2));
+        let worker = worker_from(&map).expect("environment parses");
+        assert_eq!(worker.observability.sample_timeout, Duration::from_secs(2));
+        map.insert("MM_METRICS_SAMPLE_TIMEOUT_SECS".into(), "later".into());
+        assert!(
+            env_from(&map)
+                .unwrap_err()
+                .contains("MM_METRICS_SAMPLE_TIMEOUT_SECS")
+        );
+    }
+
+    struct Hanging;
+
+    #[async_trait::async_trait]
+    impl QueueDepth for Hanging {
+        async fn pending_count(&self) -> Result<u64, JobStoreError> {
+            std::future::pending().await
+        }
+    }
+
+    #[test]
     fn a_failed_depth_sample_counts_the_failure_and_keeps_the_last_value() {
         let (registry, metrics) = Registry::new();
         metrics.jobs_pending.set(3);
         let depth = Failing(Err("connection refused".to_string()));
-        let outcome = block_on(sample_once(&depth, &metrics));
+        let outcome = block_on(sample_once(&depth, &metrics, Duration::from_secs(5)));
         assert_eq!(
             outcome,
             Err("job store backend error: connection refused".to_string())
@@ -856,7 +910,10 @@ mod tests {
     fn a_depth_sample_that_answers_publishes_the_depth() {
         let (registry, metrics) = Registry::new();
         let depth = Failing(Ok(7));
-        assert_eq!(block_on(sample_once(&depth, &metrics)), Ok(()));
+        assert_eq!(
+            block_on(sample_once(&depth, &metrics, Duration::from_secs(5))),
+            Ok(())
+        );
         assert_eq!(metrics.jobs_pending.value(), 7);
         assert_eq!(metrics.queue_depth_errors.value(), 0);
         assert!(registry.render().contains("mm_jobs_pending 7"));

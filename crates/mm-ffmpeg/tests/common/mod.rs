@@ -11,6 +11,28 @@ pub fn scratch_dir() -> PathBuf {
 }
 
 pub fn fixture(name: &str, seconds: u32, fps: u32, width: u32, height: u32) -> PathBuf {
+    generate(name, seconds, fps, width, height, None)
+}
+
+pub fn keyed_fixture(
+    name: &str,
+    seconds: u32,
+    fps: u32,
+    width: u32,
+    height: u32,
+    keyint: u32,
+) -> PathBuf {
+    generate(name, seconds, fps, width, height, Some(keyint))
+}
+
+fn generate(
+    name: &str,
+    seconds: u32,
+    fps: u32,
+    width: u32,
+    height: u32,
+    keyint: Option<u32>,
+) -> PathBuf {
     static GENERATION: Mutex<()> = Mutex::new(());
     let _guard = GENERATION.lock().unwrap();
     let dir = scratch_dir().join("fixtures");
@@ -19,7 +41,8 @@ pub fn fixture(name: &str, seconds: u32, fps: u32, width: u32, height: u32) -> P
     if path.is_file() && path.metadata().unwrap().len() > 0 {
         return path;
     }
-    let output = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .arg("-y")
         .arg("-f")
         .arg("lavfi")
@@ -38,7 +61,11 @@ pub fn fixture(name: &str, seconds: u32, fps: u32, width: u32, height: u32) -> P
         .arg("-preset")
         .arg("veryfast")
         .arg("-pix_fmt")
-        .arg("yuv420p")
+        .arg("yuv420p");
+    if let Some(keyint) = keyint {
+        command.arg("-g").arg(keyint.to_string());
+    }
+    let output = command
         .arg("-c:a")
         .arg("aac")
         .arg("-b:a")

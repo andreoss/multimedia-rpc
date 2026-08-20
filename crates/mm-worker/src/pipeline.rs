@@ -9,21 +9,22 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use mm_domain::{
-    AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec,
+    AudioStreamInfo, BatchResult, BatchSpec, CaptionDocument, ConcatSpec, GraphResult, GraphSpec,
     ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
     InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
     LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome,
     NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
     OutputKey, OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
     RenditionResult, ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState,
-    ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    Verdict, VideoStreamInfo, WorkerId, resolve_media_ref, validate_inputs, validate_ladder_rungs,
-    verdict_code,
+    SubtitleMode, SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
+    TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId, collect_body,
+    resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
     ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo, RunLimits, RunOutcome, ScaleMode,
     SourceCut, StillInfo, ThumbnailTarget, Timestamp, TranscodeTarget, TrimStrategy, TrimTarget,
     build_concat_args, build_loudness_measure_args, build_loudness_normalize_args,
+    build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
     build_thumbnail_args, build_transcode_args, build_trim_args, parse_loudnorm_report,
 };
 use mm_gst::Written as GstWritten;
@@ -67,8 +68,9 @@ pub mod codes {
     pub const LADDER_PACK_FAILED: &str = "ladder_pack_failed";
     pub const LOUDNESS_MEASURE_FAILED: &str = "loudness_measure_failed";
     pub const LOUDNESS_FAILED: &str = "loudness_failed";
+    pub const CAPTION_INVALID: &str = "caption_invalid";
 
-    pub const ALL: [&str; 16] = [
+    pub const ALL: [&str; 17] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -85,6 +87,7 @@ pub mod codes {
         LADDER_PACK_FAILED,
         LOUDNESS_MEASURE_FAILED,
         LOUDNESS_FAILED,
+        CAPTION_INVALID,
     ];
 }
 
@@ -694,6 +697,9 @@ async fn run_leaf(
         OpSpec::Loudness(spec) => {
             loudness_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
         }
+        OpSpec::Subtitle(spec) => {
+            subtitle_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
+        }
     };
     scope.done.fetch_add(1, Ordering::Relaxed);
     Ok(result)
@@ -791,6 +797,7 @@ fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
                 push(output);
             }
         }
+        OpResult::Subtitle(subtitle) => push(subtitle.output()),
         OpResult::Ladder(ladder) => {
             if let Some(master) = ladder.master_playlist() {
                 push(master);
@@ -846,6 +853,7 @@ fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
         }
         OpResult::Ladder(ladder) => ladder.renditions().get(index).map(RenditionResult::media),
         OpResult::Loudness(loudness) => (index == 0).then(|| loudness.output()).flatten(),
+        OpResult::Subtitle(subtitle) => (index == 0).then_some(subtitle.output()),
         OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
     }
 }
@@ -2051,6 +2059,147 @@ async fn transcode_pipeline(
     };
     let _ = tokio::fs::remove_file(&output_path).await;
     outcome
+}
+
+async fn subtitle_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &SubtitleSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Subtitle, &[input_report(&info)])?;
+    let inputs = [spec.input().clone()];
+    let estimate = estimate_bytes(ctx, &inputs, std::slice::from_ref(&info)).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+    let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));
+    let caption_path = match spec.mode() {
+        SubtitleMode::Strip => None,
+        SubtitleMode::Burn | SubtitleMode::Mux => {
+            let captions = spec.captions().ok_or_else(|| {
+                failed(
+                    codes::CAPTION_INVALID,
+                    "the subtitle spec names no captions",
+                )
+            })?;
+            let format = spec.format().ok_or_else(|| {
+                failed(codes::CAPTION_INVALID, "the subtitle spec names no format")
+            })?;
+            let text = caption_text(ctx, captions).await?;
+            CaptionDocument::parse(format, &text)
+                .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+            let path = ctx
+                .staging_dir
+                .join(format!("{}.{}", job.id, format.extension()));
+            tokio::fs::write(&path, text.as_bytes())
+                .await
+                .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+            Some(path)
+        }
+    };
+    let args = match (spec.mode(), caption_path.as_ref()) {
+        (SubtitleMode::Burn, Some(captions)) => build_subtitle_burn_args(
+            &url,
+            &captions.to_string_lossy(),
+            &mm_ffmpeg::TargetProfile::default(),
+            &output_path.to_string_lossy(),
+        )
+        .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?,
+        (SubtitleMode::Mux, Some(captions)) => build_subtitle_mux_args(
+            &url,
+            &captions.to_string_lossy(),
+            &output_path.to_string_lossy(),
+        ),
+        (SubtitleMode::Strip, _) => build_subtitle_strip_args(&url, &output_path.to_string_lossy()),
+        _ => {
+            return Err(failed(
+                codes::CAPTION_INVALID,
+                "the subtitle mode needs captions",
+            ));
+        }
+    };
+    let limits = remaining_limits(ctx, info.duration + Duration::from_secs(30), deadline_at)?;
+    check(signal)?;
+    supervise(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
+    check(signal)?;
+    let produced = ctx
+        .prober
+        .probe(&output_path.to_string_lossy(), &ctx.probe_limits)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    match spec.mode() {
+        SubtitleMode::Mux if produced.subtitle.is_empty() => {
+            return Err(failed(
+                codes::OUTPUT_INVALID,
+                "the muxed output carries no subtitle stream",
+            ));
+        }
+        SubtitleMode::Strip if !produced.subtitle.is_empty() => {
+            return Err(failed(
+                codes::OUTPUT_INVALID,
+                "the stripped output still carries a subtitle stream",
+            ));
+        }
+        _ => {}
+    }
+    let object = output_object(ctx, job.id, &scope.prefix)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let bytes = file_bytes(&output_path).await;
+    let file = tokio::fs::File::open(&output_path)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.store
+        .put_multipart(&object, file_body(file))
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.metrics.output_bytes.add(bytes);
+    if let Some(path) = caption_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    let _ = tokio::fs::remove_file(&output_path).await;
+    if let Err(finish) = check(signal) {
+        let _ = ctx.store.delete(&object).await;
+        return Err(finish);
+    }
+    Ok(OpResult::Subtitle(SubtitleResult::new(MediaRef::Object(
+        object,
+    ))))
+}
+
+async fn caption_text(ctx: &WorkerConfig, captions: &InputSource) -> Result<String, Finish> {
+    let media = captions
+        .media()
+        .map(|source| source.media())
+        .ok_or_else(|| failed(codes::CAPTION_INVALID, "captions must name a media object"))?;
+    let MediaRef::Object(object) = media else {
+        return Err(failed(
+            codes::CAPTION_INVALID,
+            "captions must name an object, not a URL",
+        ));
+    };
+    let body = ctx
+        .store
+        .get(object)
+        .await
+        .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+    let bytes = collect_body(body)
+        .await
+        .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+    String::from_utf8(bytes).map_err(|error| failed(codes::CAPTION_INVALID, error))
 }
 
 async fn loudness_pipeline(

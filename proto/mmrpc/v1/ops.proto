@@ -32,6 +32,19 @@ message ThumbnailSpec {
   uint32 sprite_columns = 5;
 }
 
+enum SubtitleMode {
+  SUBTITLE_MODE_UNSPECIFIED = 0;
+  SUBTITLE_MODE_BURN = 1;
+  SUBTITLE_MODE_MUX = 2;
+  SUBTITLE_MODE_STRIP = 3;
+}
+
+enum CaptionFormat {
+  CAPTION_FORMAT_UNSPECIFIED = 0;
+  CAPTION_FORMAT_SRT = 1;
+  CAPTION_FORMAT_WEBVTT = 2;
+}
+
 enum ImageOp {
   IMAGE_OP_UNSPECIFIED = 0;
   IMAGE_OP_RESIZE = 1;
@@ -97,6 +110,13 @@ message LoudnessSpec {
   optional LoudnessTarget target = 2;
 }
 
+message SubtitleSpec {
+  InputSource input = 1;
+  optional InputSource captions = 2;
+  CaptionFormat format = 3;
+  SubtitleMode mode = 4;
+}
+
 message OpSpec {
   oneof op {
     ConcatSpec concat = 1;
@@ -110,6 +130,7 @@ message OpSpec {
     GraphSpec graph = 9;
     LadderSpec ladder = 10;
     LoudnessSpec loudness = 11;
+    SubtitleSpec subtitle = 12;
   }
 }
 
@@ -218,6 +239,10 @@ message LoudnessResult {
   double loudness_range_lu = 4;
 }
 
+message SubtitleResult {
+  MediaRef output = 1;
+}
+
 message OpResult {
   oneof op {
     ConcatResult concat = 1;
@@ -231,5 +256,6 @@ message OpResult {
     GraphResult graph = 9;
     LadderResult ladder = 10;
     LoudnessResult loudness = 11;
+    SubtitleResult subtitle = 12;
   }
 }

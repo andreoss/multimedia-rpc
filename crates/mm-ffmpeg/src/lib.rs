@@ -6,6 +6,7 @@ mod probe;
 mod profile;
 mod progress;
 mod runner;
+mod subtitle;
 mod thumbnail;
 mod timestamp;
 mod transcode;
@@ -18,13 +19,16 @@ pub use loudness::{
     build_loudness_normalize_args, parse_loudnorm_report,
 };
 pub use parse::{
-    AudioStream, MediaInfo, MediaKind, ParseError, StillInfo, VideoStream, media_kind,
-    parse_keyframe_times, parse_media_info, parse_still_info,
+    AudioStream, MediaInfo, MediaKind, ParseError, StillInfo, SubtitleStream, VideoStream,
+    media_kind, parse_keyframe_times, parse_media_info, parse_still_info,
 };
 pub use probe::{ProbeError, ProbeLimits, Prober};
 pub use profile::TargetProfile;
 pub use progress::{ProgressParser, ProgressUpdate};
 pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner};
+pub use subtitle::{
+    SubtitleError, build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
+};
 pub use thumbnail::{IMAGE_QUALITY, ImageFormat, ThumbnailTarget, build_thumbnail_args};
 pub use timestamp::Timestamp;
 pub use transcode::{

@@ -17,6 +17,8 @@ pub struct MediaInfo {
     pub bit_rate: Option<u64>,
     pub video: Vec<VideoStream>,
     pub audio: Vec<AudioStream>,
+    #[serde(default)]
+    pub subtitle: Vec<SubtitleStream>,
     pub drm: bool,
 }
 
@@ -39,6 +41,12 @@ pub struct AudioStream {
     pub channels: u32,
     pub sample_rate: Option<u32>,
     pub bit_rate: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleStream {
+    pub codec: String,
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +226,15 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, ParseError> {
         }
     }
 
+    let subtitle: Vec<SubtitleStream> = raw
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("subtitle"))
+        .map(|stream| SubtitleStream {
+            codec: stream.codec_name.clone().unwrap_or_default(),
+            language: stream.tags.get("language").cloned(),
+        })
+        .collect();
     Ok(MediaInfo {
         container: format.format_name.unwrap_or_default(),
         duration,
@@ -225,6 +242,7 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, ParseError> {
         bit_rate: parse_number(format.bit_rate.as_ref()),
         video,
         audio,
+        subtitle,
         drm,
     })
 }

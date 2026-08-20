@@ -41,6 +41,7 @@ pub fn failure_code(failure: &JobFailure) -> &str {
         "ladder_pack_failed" => "ERROR_LADDER_PACK_FAILED",
         "loudness_measure_failed" => "ERROR_LOUDNESS_MEASURE_FAILED",
         "loudness_failed" => "ERROR_LOUDNESS_FAILED",
+        "caption_invalid" => "ERROR_SUBTITLE_INVALID",
         code if code.starts_with("ERROR_") => code,
         _ => INTERNAL,
     }

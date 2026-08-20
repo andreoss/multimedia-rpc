@@ -351,3 +351,19 @@ fn a_container_name_carries_the_media_kind() {
     assert_eq!(media_kind("matroska,webm"), MediaKind::Video);
     assert_eq!(media_kind(""), MediaKind::Video);
 }
+
+#[test]
+fn subtitle_streams_are_reported() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+             "avg_frame_rate": "30/1", "r_frame_rate": "30/1"},
+            {"codec_type": "subtitle", "codec_name": "mov_text", "tags": {"language": "eng"}}
+        ],
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "5.0"}
+    }"#;
+    let info = parse_media_info(json).unwrap();
+    assert_eq!(info.subtitle.len(), 1);
+    assert_eq!(info.subtitle[0].codec, "mov_text");
+    assert_eq!(info.subtitle[0].language.as_deref(), Some("eng"));
+}

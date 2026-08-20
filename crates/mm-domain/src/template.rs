@@ -7,7 +7,7 @@ use crate::id::{
 };
 use crate::op::{
     BatchSpec, ConcatSpec, GraphNode, GraphSpec, ImageSpec, LadderSpec, LoudnessSpec, OpSpec,
-    OpSpecError, PackageSpec, ProbeSpec, ThumbnailSpec, TranscodeSpec, TrimSpec,
+    OpSpecError, PackageSpec, ProbeSpec, SubtitleSpec, ThumbnailSpec, TranscodeSpec, TrimSpec,
 };
 use crate::source::InputSource;
 
@@ -342,6 +342,15 @@ fn substitute_spec(
                 .collect::<Result<Vec<_>, _>>()?;
             OpSpec::Graph(GraphSpec::new(nodes)?)
         }
+        OpSpec::Subtitle(subtitle) => OpSpec::Subtitle(SubtitleSpec::new(
+            substitute_input(subtitle.input(), values)?,
+            subtitle
+                .captions()
+                .map(|captions| substitute_input(captions, values))
+                .transpose()?,
+            subtitle.format(),
+            subtitle.mode(),
+        )?),
         OpSpec::Loudness(loudness) => OpSpec::Loudness(LoudnessSpec::new(
             substitute_input(loudness.input(), values)?,
             loudness.target(),

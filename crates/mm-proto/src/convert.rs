@@ -1,16 +1,16 @@
 use crate::v1;
 use mm_domain::{
-    AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
-    ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder,
-    InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, LadderResult,
-    LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, MediaSource,
-    NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, OutputRange, PackageResult, PackageSpec, ParameterDeclaration,
-    ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl,
-    RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome, StepState,
-    Template, TemplateError, TextIdError, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo, failure_code,
-    verdict_code,
+    AudioStreamInfo, BatchResult, BatchSpec, CaptionFormat, ConcatSpec, GraphNode, GraphResult,
+    GraphSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError,
+    InputOrder, InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState,
+    LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef,
+    MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec,
+    OpSpecError, OutputProfile, OutputProfileError, OutputRange, PackageResult, PackageSpec,
+    ParameterDeclaration, ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec,
+    QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome,
+    StepState, SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
+    TrimSpec, VideoStreamInfo, failure_code, verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -414,6 +414,46 @@ impl From<&LoudnessSpec> for v1::LoudnessSpec {
     }
 }
 
+impl TryFrom<v1::SubtitleSpec> for SubtitleSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::SubtitleSpec) -> Result<Self, Self::Error> {
+        let captions = value.captions.map(InputSource::try_from).transpose()?;
+        let format = match v1::CaptionFormat::try_from(value.format).ok() {
+            None | Some(v1::CaptionFormat::Unspecified) => None,
+            Some(v1::CaptionFormat::Srt) => Some(CaptionFormat::Srt),
+            Some(v1::CaptionFormat::Webvtt) => Some(CaptionFormat::WebVtt),
+        };
+        let mode = match v1::SubtitleMode::try_from(value.mode) {
+            Ok(v1::SubtitleMode::Mux) => SubtitleMode::Mux,
+            Ok(v1::SubtitleMode::Strip) => SubtitleMode::Strip,
+            _ => SubtitleMode::Burn,
+        };
+        SubtitleSpec::new(required_source(value.input)?, captions, format, mode)
+    }
+}
+
+impl From<&SubtitleSpec> for v1::SubtitleSpec {
+    fn from(value: &SubtitleSpec) -> Self {
+        Self {
+            input: Some(v1::InputSource::from(value.input())),
+            captions: value.captions().map(v1::InputSource::from),
+            format: value
+                .format()
+                .map(|format| match format {
+                    CaptionFormat::Srt => v1::CaptionFormat::Srt as i32,
+                    CaptionFormat::WebVtt => v1::CaptionFormat::Webvtt as i32,
+                })
+                .unwrap_or(v1::CaptionFormat::Unspecified as i32),
+            mode: match value.mode() {
+                SubtitleMode::Burn => v1::SubtitleMode::Burn as i32,
+                SubtitleMode::Mux => v1::SubtitleMode::Mux as i32,
+                SubtitleMode::Strip => v1::SubtitleMode::Strip as i32,
+            },
+        }
+    }
+}
+
 impl TryFrom<v1::OpSpec> for OpSpec {
     type Error = OpSpecError;
 
@@ -467,6 +507,9 @@ impl TryFrom<v1::OpSpec> for OpSpec {
             v1::op_spec::Op::Loudness(loudness) => {
                 Ok(OpSpec::Loudness(LoudnessSpec::try_from(loudness)?))
             }
+            v1::op_spec::Op::Subtitle(subtitle) => {
+                Ok(OpSpec::Subtitle(SubtitleSpec::try_from(subtitle)?))
+            }
         }
     }
 }
@@ -515,6 +558,9 @@ impl From<&OpSpec> for v1::OpSpec {
             OpSpec::Loudness(loudness) => {
                 v1::op_spec::Op::Loudness(v1::LoudnessSpec::from(loudness))
             }
+            OpSpec::Subtitle(subtitle) => {
+                v1::op_spec::Op::Subtitle(v1::SubtitleSpec::from(subtitle))
+            }
         };
         v1::OpSpec { op: Some(op) }
     }
@@ -540,6 +586,22 @@ impl From<&LoudnessResult> for v1::LoudnessResult {
             integrated_lufs: value.integrated_lufs(),
             true_peak_db: value.true_peak_db(),
             loudness_range_lu: value.loudness_range_lu(),
+        }
+    }
+}
+
+impl TryFrom<v1::SubtitleResult> for SubtitleResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::SubtitleResult) -> Result<Self, Self::Error> {
+        Ok(SubtitleResult::new(required_ref(value.output)?))
+    }
+}
+
+impl From<&SubtitleResult> for v1::SubtitleResult {
+    fn from(value: &SubtitleResult) -> Self {
+        Self {
+            output: Some(v1::MediaRef::from(value.output())),
         }
     }
 }
@@ -613,6 +675,9 @@ impl TryFrom<v1::OpResult> for OpResult {
             }
             v1::op_result::Op::Loudness(loudness) => {
                 Ok(OpResult::Loudness(LoudnessResult::try_from(loudness)?))
+            }
+            v1::op_result::Op::Subtitle(subtitle) => {
+                Ok(OpResult::Subtitle(SubtitleResult::try_from(subtitle)?))
             }
         }
     }
@@ -1113,6 +1178,9 @@ impl From<&OpResult> for v1::OpResult {
             OpResult::Ladder(ladder) => v1::op_result::Op::Ladder(v1::LadderResult::from(ladder)),
             OpResult::Loudness(loudness) => {
                 v1::op_result::Op::Loudness(v1::LoudnessResult::from(loudness))
+            }
+            OpResult::Subtitle(subtitle) => {
+                v1::op_result::Op::Subtitle(v1::SubtitleResult::from(subtitle))
             }
         };
         v1::OpResult { op: Some(op) }

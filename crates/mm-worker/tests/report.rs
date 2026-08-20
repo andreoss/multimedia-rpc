@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use mm_domain::{BlockCode, OutputProfile, Verdict, VerdictCode, WarnCode};
-use mm_ffmpeg::{AudioStream, MediaInfo, VideoStream};
+use mm_ffmpeg::{AudioStream, MediaInfo, SubtitleStream, VideoStream};
 use mm_worker::{blocks, input_report, render_verdicts, target_profile, warnings};
 
 fn media_info() -> MediaInfo {
@@ -27,6 +27,7 @@ fn media_info() -> MediaInfo {
             sample_rate: Some(48_000),
             bit_rate: Some(128_000),
         }],
+        subtitle: Vec::<SubtitleStream>::new(),
         drm: false,
     }
 }

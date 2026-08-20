@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::caption::CaptionFormat;
 use crate::id::{NodeId, NodeIdError};
 use crate::jobs::{JobFailure, JobFailureError};
 use crate::source::{InputSource, SourceError};
@@ -359,6 +360,12 @@ pub enum OpSpecError {
     },
     #[error("convert needs an output format")]
     MissingImageFormat,
+    #[error("burning or muxing a subtitle needs a caption input")]
+    SubtitleCaptionsRequired,
+    #[error("stripping a subtitle takes no caption input")]
+    SubtitleCaptionsUnexpected,
+    #[error("burning or muxing a subtitle needs its text format")]
+    SubtitleFormatRequired,
     #[error("batch has no steps")]
     EmptyBatch,
     #[error("batch has {count} steps, above the {max} allowed")]
@@ -825,6 +832,70 @@ impl PackageSpec {
 
     pub fn segment_seconds(&self) -> f64 {
         self.segment.seconds()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtitleMode {
+    Burn,
+    Mux,
+    Strip,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubtitleSpec {
+    input: InputSource,
+    captions: Option<InputSource>,
+    format: Option<CaptionFormat>,
+    mode: SubtitleMode,
+}
+
+impl SubtitleSpec {
+    pub fn new<I: Into<InputSource>>(
+        input: I,
+        captions: Option<InputSource>,
+        format: Option<CaptionFormat>,
+        mode: SubtitleMode,
+    ) -> Result<Self, OpSpecError> {
+        let input = source(input);
+        reject_cuts("subtitle", std::slice::from_ref(&input))?;
+        if let Some(captions) = &captions {
+            reject_cuts("subtitle", std::slice::from_ref(captions))?;
+        }
+        match mode {
+            SubtitleMode::Burn | SubtitleMode::Mux if captions.is_none() => {
+                return Err(OpSpecError::SubtitleCaptionsRequired);
+            }
+            SubtitleMode::Strip if captions.is_some() => {
+                return Err(OpSpecError::SubtitleCaptionsUnexpected);
+            }
+            _ => {}
+        }
+        if matches!(mode, SubtitleMode::Burn | SubtitleMode::Mux) && format.is_none() {
+            return Err(OpSpecError::SubtitleFormatRequired);
+        }
+        Ok(Self {
+            input,
+            captions,
+            format,
+            mode,
+        })
+    }
+
+    pub fn input(&self) -> &InputSource {
+        &self.input
+    }
+
+    pub fn captions(&self) -> Option<&InputSource> {
+        self.captions.as_ref()
+    }
+
+    pub fn format(&self) -> Option<CaptionFormat> {
+        self.format
+    }
+
+    pub fn mode(&self) -> SubtitleMode {
+        self.mode
     }
 }
 
@@ -1344,6 +1415,7 @@ pub enum OpSpec {
     Graph(GraphSpec),
     Ladder(LadderSpec),
     Loudness(LoudnessSpec),
+    Subtitle(SubtitleSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1361,6 +1433,7 @@ pub enum OpKind {
     Graph,
     Ladder,
     Loudness,
+    Subtitle,
 }
 
 impl std::fmt::Display for OpKind {
@@ -1379,6 +1452,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Graph => "graph",
             OpKind::Ladder => "ladder",
             OpKind::Loudness => "loudness",
+            OpKind::Subtitle => "subtitle",
         };
         formatter.write_str(name)
     }
@@ -1411,7 +1485,8 @@ impl OpKind {
             | OpKind::Batch
             | OpKind::Graph
             | OpKind::Ladder
-            | OpKind::Loudness => Ok(()),
+            | OpKind::Loudness
+            | OpKind::Subtitle => Ok(()),
         }
     }
 }
@@ -1430,6 +1505,7 @@ impl OpSpec {
             OpSpec::Graph(_) => OpKind::Graph,
             OpSpec::Ladder(_) => OpKind::Ladder,
             OpSpec::Loudness(_) => OpKind::Loudness,
+            OpSpec::Subtitle(_) => OpKind::Subtitle,
         }
     }
 
@@ -1450,6 +1526,13 @@ impl OpSpec {
                 .collect(),
             OpSpec::Ladder(ladder) => vec![ladder.input()],
             OpSpec::Loudness(loudness) => vec![loudness.input()],
+            OpSpec::Subtitle(subtitle) => {
+                let mut inputs = vec![subtitle.input()];
+                if let Some(captions) = subtitle.captions() {
+                    inputs.push(captions);
+                }
+                inputs
+            }
         }
     }
 
@@ -1839,6 +1922,21 @@ impl RenditionResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SubtitleResult {
+    output: MediaRef,
+}
+
+impl SubtitleResult {
+    pub fn new(output: MediaRef) -> Self {
+        Self { output }
+    }
+
+    pub fn output(&self) -> &MediaRef {
+        &self.output
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoudnessResult {
     output: Option<MediaRef>,
     integrated_lufs: f64,
@@ -1929,6 +2027,7 @@ pub enum OpResult {
     Graph(GraphResult),
     Ladder(LadderResult),
     Loudness(LoudnessResult),
+    Subtitle(SubtitleResult),
 }
 
 impl OpResult {
@@ -1944,6 +2043,7 @@ impl OpResult {
                 .master_playlist()
                 .or_else(|| result.renditions().first().map(RenditionResult::media)),
             OpResult::Loudness(result) => result.output(),
+            OpResult::Subtitle(result) => Some(result.output()),
             OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
         }
     }

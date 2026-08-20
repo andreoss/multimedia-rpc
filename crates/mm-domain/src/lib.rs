@@ -1,4 +1,5 @@
 mod callback;
+mod caption;
 mod id;
 mod jobs;
 mod op;
@@ -12,6 +13,7 @@ mod time;
 mod validate;
 
 pub use callback::{CallbackError, CallbackPublisher, QueueUrl, QueueUrlError};
+pub use caption::{CaptionDocument, CaptionError, CaptionFormat, Cue};
 pub use id::{
     JobId, JobIdError, NodeId, NodeIdError, ParameterName, ParameterNameError, RequestId,
     RequestIdError, TemplateId, TemplateIdError, TemplateName, TemplateNameError, TextIdError,
@@ -32,9 +34,9 @@ pub use op::{
     MIN_LADDER_RUNGS, MIN_LOUDNESS_LUFS, MIN_TRUE_PEAK_DB, MediaRef, MediaRefError, NodeOutcome,
     ObjectRef, OpKind, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
     OutputProfileError, OutputRange, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
-    RenditionResult, ResizeMode, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput, UnsupportedOp,
-    VideoStreamInfo,
+    RenditionResult, ResizeMode, StepOutcome, StepState, SubtitleMode, SubtitleResult,
+    SubtitleSpec, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec,
+    TrimSpec, UnsupportedInput, UnsupportedOp, VideoStreamInfo,
 };
 pub use reference::{failure_code, verdict_code};
 pub use resolve::{ResolveError, resolve_media_ref};

@@ -300,7 +300,8 @@ impl OpKind {
             | OpKind::Trim
             | OpKind::Thumbnail
             | OpKind::Ladder
-            | OpKind::Loudness => Some(InputPolicy {
+            | OpKind::Loudness
+            | OpKind::Subtitle => Some(InputPolicy {
                 min_inputs: 1,
                 cross_input_checks: false,
                 kinds: VIDEO_KINDS,

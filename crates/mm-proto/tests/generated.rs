@@ -266,6 +266,12 @@ fn op_spec_oneof_carries_every_arm() {
                 }),
             }],
         }),
+        v1::op_spec::Op::Subtitle(v1::SubtitleSpec {
+            input: Some(media()),
+            captions: Some(media()),
+            format: v1::CaptionFormat::Srt as i32,
+            mode: v1::SubtitleMode::Burn as i32,
+        }),
         v1::op_spec::Op::Loudness(v1::LoudnessSpec {
             input: Some(media()),
             target: Some(v1::LoudnessTarget {
@@ -295,7 +301,7 @@ fn op_spec_oneof_carries_every_arm() {
             poster_seconds: None,
         }),
     ];
-    assert_eq!(arms.len(), 11);
+    assert_eq!(arms.len(), 12);
     for arm in arms {
         assert!(OpSpec::try_from(v1::OpSpec { op: Some(arm) }).is_ok());
     }

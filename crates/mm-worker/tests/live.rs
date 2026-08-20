@@ -9,15 +9,15 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    BatchSpec, CallbackError, CallbackPublisher, ConcatSpec, GraphNode, GraphSpec, ImageFormat,
-    ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec,
-    LoudnessSpec, LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore,
-    ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
-    ResizeMode, RungState, StepState, ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId,
-    WorkerId, collect_body,
+    BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, ConcatSpec, GraphNode, GraphSpec,
+    ImageFormat, ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState,
+    LadderSpec, LoudnessSpec, LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef,
+    ObjectStore, ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec,
+    QueueUrl, RequestId, ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec,
+    ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_ffmpeg::{
-    RunLimits as ToolLimits, RunOutcome as ToolOutcome, Runner as ToolRunner,
+    ProbeLimits, Prober, RunLimits as ToolLimits, RunOutcome as ToolOutcome, Runner as ToolRunner,
     build_loudness_measure_args, parse_loudnorm_report,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
@@ -3434,4 +3434,197 @@ async fn measure_file(path: &Path) -> mm_ffmpeg::LoudnessMeasurement {
     let (outcome, stderr) = run.wait_with_stderr().await.expect("the run is waited");
     assert_eq!(outcome, ToolOutcome::Succeeded, "{stderr}");
     parse_loudnorm_report(&stderr).expect("the meter reports")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burned_subtitle_changes_the_frame_at_a_cue() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-burn.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-burn.mp4").await;
+    let caption = caption_file(
+        "subtitle-burn",
+        "srt",
+        "1\n00:00:00,500 --> 00:00:03,500\nBURNED CAPTION\n",
+    );
+    let captions = upload_input(&store, &caption, "inputs/subtitle-burn.srt").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::Srt),
+        SubtitleMode::Burn,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-burn"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-burn.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let source_frame = extract_frame(&source, "subtitle-burn-source.jpg");
+    let output_frame = extract_frame(&path, "subtitle-burn-output.jpg");
+    assert_ne!(
+        std::fs::read(&source_frame).unwrap(),
+        std::fs::read(&output_frame).unwrap(),
+        "the cue left the frame unchanged"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_muxed_subtitle_is_reported_by_the_probe() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-mux.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-mux.mp4").await;
+    let caption = caption_file(
+        "subtitle-mux",
+        "vtt",
+        "WEBVTT\n\n00:00:00.500 --> 00:00:02.500\nMUXED CAPTION\n",
+    );
+    let captions = upload_input(&store, &caption, "inputs/subtitle-mux.vtt").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::WebVtt),
+        SubtitleMode::Mux,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-mux"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-mux.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let info = Prober::default()
+        .probe(&path.to_string_lossy(), &ProbeLimits::default())
+        .await
+        .expect("the muxed output probes");
+    assert_eq!(info.subtitle.len(), 1, "no subtitle stream in {info:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stripped_subtitle_leaves_no_track() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture_with_subtitles("subtitle-strip.mp4", 3);
+    let input = upload_input(&store, &source, "inputs/subtitle-strip.mp4").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(input, None, None, SubtitleMode::Strip).unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-strip"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-strip.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let info = Prober::default()
+        .probe(&path.to_string_lossy(), &ProbeLimits::default())
+        .await
+        .expect("the stripped output probes");
+    assert!(
+        info.subtitle.is_empty(),
+        "a subtitle track survived: {info:?}"
+    );
+    db.dispose().await;
+}
+
+fn caption_file(name: &str, extension: &str, text: &str) -> PathBuf {
+    let path = scratch_dir("fixtures").join(format!("{name}.{extension}"));
+    std::fs::write(&path, text).expect("caption file");
+    path
+}
+
+async fn write_object(store: &S3ObjectStore, object: &ObjectRef, path: &Path) {
+    let bytes = collect_body(store.get(object).await.expect("the output is readable"))
+        .await
+        .expect("the output body is read");
+    std::fs::write(path, bytes).expect("the output is staged");
+}
+
+fn extract_frame(input: &Path, name: &str) -> PathBuf {
+    let output = scratch_dir("subtitle").join(name);
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-ss", "1", "-i"])
+        .arg(input)
+        .args(["-frames:v", "1", "-f", "image2"])
+        .arg(&output)
+        .status()
+        .expect("ffmpeg must be runnable");
+    assert!(status.success(), "frame extraction failed");
+    output
+}
+
+fn fixture_with_subtitles(name: &str, seconds: u32) -> PathBuf {
+    let video = fixture(name, seconds, 24, "mp4");
+    let captions = caption_file(
+        &format!("{name}-text"),
+        "srt",
+        "1\n00:00:00,500 --> 00:00:02,500\nSTRIP ME\n",
+    );
+    let output_path = scratch_dir("fixtures").join(format!(
+        "{}-with-subtitles.mp4",
+        name.trim_end_matches(".mp4")
+    ));
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-i"])
+        .arg(&video)
+        .args(["-i"])
+        .arg(&captions)
+        .args([
+            "-map",
+            "0",
+            "-map",
+            "1:0",
+            "-c",
+            "copy",
+            "-c:s",
+            "mov_text",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ])
+        .arg(&output_path)
+        .status()
+        .expect("ffmpeg must be runnable");
+    assert!(status.success(), "subtitle fixture generation failed");
+    output_path
 }

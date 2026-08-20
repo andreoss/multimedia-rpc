@@ -1154,11 +1154,89 @@ impl TimedOutput {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct VideoStreamInfo {
+    codec: String,
+    width: u32,
+    height: u32,
+    frame_rate: f64,
+    rotation: i32,
+}
+
+impl VideoStreamInfo {
+    pub fn new(
+        codec: String,
+        width: u32,
+        height: u32,
+        frame_rate: f64,
+        rotation: i32,
+    ) -> Result<Self, OpResultError> {
+        Ok(Self {
+            codec,
+            width,
+            height,
+            frame_rate: parse_duration(frame_rate)?,
+            rotation,
+        })
+    }
+
+    pub fn codec(&self) -> &str {
+        &self.codec
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn frame_rate(&self) -> f64 {
+        self.frame_rate
+    }
+
+    pub fn rotation(&self) -> i32 {
+        self.rotation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioStreamInfo {
+    codec: String,
+    sample_rate: u32,
+    channels: u32,
+}
+
+impl AudioStreamInfo {
+    pub fn new(codec: String, sample_rate: u32, channels: u32) -> Self {
+        Self {
+            codec,
+            sample_rate,
+            channels,
+        }
+    }
+
+    pub fn codec(&self) -> &str {
+        &self.codec
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u32 {
+        self.channels
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProbeResult {
     duration_seconds: f64,
     video_streams: u32,
     audio_streams: u32,
     container: String,
+    video: Vec<VideoStreamInfo>,
+    audio: Vec<AudioStreamInfo>,
 }
 
 impl ProbeResult {
@@ -1173,7 +1251,19 @@ impl ProbeResult {
             video_streams,
             audio_streams,
             container,
+            video: Vec::new(),
+            audio: Vec::new(),
         })
+    }
+
+    pub fn with_streams(
+        mut self,
+        video: Vec<VideoStreamInfo>,
+        audio: Vec<AudioStreamInfo>,
+    ) -> Self {
+        self.video = video;
+        self.audio = audio;
+        self
     }
 
     pub fn duration_seconds(&self) -> f64 {
@@ -1186,6 +1276,14 @@ impl ProbeResult {
 
     pub fn audio_streams(&self) -> u32 {
         self.audio_streams
+    }
+
+    pub fn video(&self) -> &[VideoStreamInfo] {
+        &self.video
+    }
+
+    pub fn audio(&self) -> &[AudioStreamInfo] {
+        &self.audio
     }
 
     pub fn container(&self) -> &str {

@@ -51,11 +51,11 @@ pub enum BlockCode {
     TooFewInputs,
     TotalDurationTooLong,
     MediaKindMismatch,
+    ResolutionMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WarnCode {
-    ResolutionDrift,
     AspectDrift,
     FpsDrift,
     AudioChannelDrift,
@@ -200,7 +200,7 @@ fn check_drift(inputs: &[InputReport], verdicts: &mut Vec<Verdict>) {
             .iter()
             .any(|video| (video.width, video.height) != (first.width, first.height))
         {
-            verdicts.push(warn(None, WarnCode::ResolutionDrift));
+            verdicts.push(block(None, BlockCode::ResolutionMismatch));
         }
         if let Some(reference) = display_aspect(first)
             && rest.iter().any(|video| {

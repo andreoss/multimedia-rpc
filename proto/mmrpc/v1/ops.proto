@@ -98,11 +98,27 @@ message ConcatResult {
   double duration_seconds = 2;
 }
 
+message VideoStreamInfo {
+  string codec = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  double frame_rate = 4;
+  int32 rotation = 5;
+}
+
+message AudioStreamInfo {
+  string codec = 1;
+  uint32 sample_rate = 2;
+  uint32 channels = 3;
+}
+
 message ProbeResult {
   double duration_seconds = 1;
   uint32 video_streams = 2;
   uint32 audio_streams = 3;
   string container = 4;
+  repeated VideoStreamInfo video = 5;
+  repeated AudioStreamInfo audio = 6;
 }
 
 message TranscodeResult {

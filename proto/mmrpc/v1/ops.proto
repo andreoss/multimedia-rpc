@@ -70,6 +70,15 @@ message BatchSpec {
   optional bool stop_on_failure = 2;
 }
 
+message GraphNode {
+  string id = 1;
+  OpSpec spec = 2;
+}
+
+message GraphSpec {
+  repeated GraphNode nodes = 1;
+}
+
 message OpSpec {
   oneof op {
     ConcatSpec concat = 1;
@@ -80,6 +89,7 @@ message OpSpec {
     ImageSpec image = 6;
     PackageSpec package = 7;
     BatchSpec batch = 8;
+    GraphSpec graph = 9;
   }
 }
 
@@ -135,6 +145,18 @@ message BatchResult {
   repeated StepOutcome steps = 1;
 }
 
+message NodeOutcome {
+  string id = 1;
+  oneof outcome {
+    OpResult result = 2;
+    StepFailure failure = 3;
+  }
+}
+
+message GraphResult {
+  repeated NodeOutcome nodes = 1;
+}
+
 message OpResult {
   oneof op {
     ConcatResult concat = 1;
@@ -145,5 +167,6 @@ message OpResult {
     ImageResult image = 6;
     PackageResult package = 7;
     BatchResult batch = 8;
+    GraphResult graph = 9;
   }
 }

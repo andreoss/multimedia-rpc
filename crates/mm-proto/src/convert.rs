@@ -1,11 +1,12 @@
 use crate::v1;
 use mm_domain::{
-    BatchResult, BatchSpec, ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure,
-    InputFailureError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, MediaRef,
-    MediaRefError, MediaSource, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError,
-    OutputProfile, OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
-    QueueUrl, ResizeMode, SourceError, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
+    BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec, ImageFormat, ImageOp,
+    ImageResult, ImageSpec, InputFailure, InputFailureError, InputSource, JobFailure,
+    JobFailureError, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeId,
+    NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
+    OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec, QueueUrl, ResizeMode,
+    SourceError, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -154,6 +155,45 @@ impl From<&BatchSpec> for v1::BatchSpec {
     }
 }
 
+impl TryFrom<v1::GraphNode> for GraphNode {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::GraphNode) -> Result<Self, Self::Error> {
+        let spec = OpSpec::try_from(value.spec.ok_or(OpSpecError::MissingOp)?)?;
+        GraphNode::new(&value.id, spec)
+    }
+}
+
+impl From<&GraphNode> for v1::GraphNode {
+    fn from(value: &GraphNode) -> Self {
+        Self {
+            id: value.id().as_str().to_string(),
+            spec: Some(v1::OpSpec::from(value.spec())),
+        }
+    }
+}
+
+impl TryFrom<v1::GraphSpec> for GraphSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::GraphSpec) -> Result<Self, Self::Error> {
+        let nodes = value
+            .nodes
+            .into_iter()
+            .map(GraphNode::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        GraphSpec::new(nodes)
+    }
+}
+
+impl From<&GraphSpec> for v1::GraphSpec {
+    fn from(value: &GraphSpec) -> Self {
+        Self {
+            nodes: value.nodes().iter().map(v1::GraphNode::from).collect(),
+        }
+    }
+}
+
 impl TryFrom<v1::OutputProfile> for OutputProfile {
     type Error = OutputProfileError;
 
@@ -230,6 +270,7 @@ impl TryFrom<v1::OpSpec> for OpSpec {
                 image_format_from_raw(image.format),
             )?)),
             v1::op_spec::Op::Batch(batch) => Ok(OpSpec::Batch(BatchSpec::try_from(batch)?)),
+            v1::op_spec::Op::Graph(graph) => Ok(OpSpec::Graph(GraphSpec::try_from(graph)?)),
         }
     }
 }
@@ -272,6 +313,7 @@ impl From<&OpSpec> for v1::OpSpec {
                 format: image_format_to_raw(image.declared_format()),
             }),
             OpSpec::Batch(batch) => v1::op_spec::Op::Batch(v1::BatchSpec::from(batch)),
+            OpSpec::Graph(graph) => v1::op_spec::Op::Graph(v1::GraphSpec::from(graph)),
         };
         v1::OpSpec { op: Some(op) }
     }
@@ -310,6 +352,69 @@ impl TryFrom<v1::OpResult> for OpResult {
                 ref_list(package.segments)?,
             )?)),
             v1::op_result::Op::Batch(batch) => Ok(OpResult::Batch(BatchResult::try_from(batch)?)),
+            v1::op_result::Op::Graph(graph) => Ok(OpResult::Graph(GraphResult::try_from(graph)?)),
+        }
+    }
+}
+
+impl TryFrom<v1::GraphResult> for GraphResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::GraphResult) -> Result<Self, Self::Error> {
+        let nodes = value
+            .nodes
+            .iter()
+            .map(NodeOutcome::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        GraphResult::new(nodes)
+    }
+}
+
+impl From<&GraphResult> for v1::GraphResult {
+    fn from(value: &GraphResult) -> Self {
+        Self {
+            nodes: value.nodes().iter().map(v1::NodeOutcome::from).collect(),
+        }
+    }
+}
+
+impl TryFrom<&v1::NodeOutcome> for NodeOutcome {
+    type Error = OpResultError;
+
+    fn try_from(value: &v1::NodeOutcome) -> Result<Self, Self::Error> {
+        let state = match &value.outcome {
+            Some(v1::node_outcome::Outcome::Result(result)) => {
+                StepState::Result(OpResult::try_from(result.clone())?)
+            }
+            Some(v1::node_outcome::Outcome::Failure(failure)) => {
+                StepState::Failure(JobFailure::try_from(failure)?)
+            }
+            None => return Err(OpResultError::MissingOp),
+        };
+        let id = value
+            .id
+            .parse::<NodeId>()
+            .map_err(|source| OpResultError::InvalidNodeId {
+                id: value.id.clone(),
+                source,
+            })?;
+        Ok(NodeOutcome::new(id, state))
+    }
+}
+
+impl From<&NodeOutcome> for v1::NodeOutcome {
+    fn from(value: &NodeOutcome) -> Self {
+        let outcome = match value.state() {
+            StepState::Result(result) => {
+                v1::node_outcome::Outcome::Result(v1::OpResult::from(result))
+            }
+            StepState::Failure(failure) => {
+                v1::node_outcome::Outcome::Failure(v1::StepFailure::from(failure))
+            }
+        };
+        Self {
+            id: value.id().as_str().to_string(),
+            outcome: Some(outcome),
         }
     }
 }
@@ -545,6 +650,7 @@ impl From<&OpResult> for v1::OpResult {
                 outputs: image.outputs().iter().map(v1::MediaRef::from).collect(),
             }),
             OpResult::Batch(batch) => v1::op_result::Op::Batch(v1::BatchResult::from(batch)),
+            OpResult::Graph(graph) => v1::op_result::Op::Graph(v1::GraphResult::from(graph)),
         };
         v1::OpResult { op: Some(op) }
     }

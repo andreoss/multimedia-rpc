@@ -1,9 +1,11 @@
 use thiserror::Error;
 
+use crate::id::{NodeId, NodeIdError};
 use crate::jobs::{JobFailure, JobFailureError};
 use crate::source::{InputSource, SourceError};
 
 pub const MAX_BATCH_STEPS: usize = 32;
+pub const MAX_GRAPH_NODES: usize = 64;
 pub const MAX_NESTING_DEPTH: usize = 4;
 pub const MAX_TREE_STEPS: usize = 128;
 
@@ -243,6 +245,22 @@ pub enum OpSpecError {
     NestingTooDeep { depth: usize, max: usize },
     #[error("composition holds {count} steps, above the {max} allowed")]
     TreeTooLarge { count: usize, max: usize },
+    #[error("graph has no nodes")]
+    EmptyGraph,
+    #[error("graph has {count} nodes, above the {max} allowed")]
+    GraphTooLarge { count: usize, max: usize },
+    #[error("graph node id {id:?} is not valid: {source}")]
+    InvalidNodeId {
+        id: String,
+        #[source]
+        source: NodeIdError,
+    },
+    #[error("graph holds two nodes named {id:?}")]
+    DuplicateNode { id: String },
+    #[error("node {node} references {reference}, which is not in the graph")]
+    DanglingReference { node: String, reference: String },
+    #[error("node {node} closes a cycle")]
+    Cycle { node: String },
     #[error("{op} cannot apply {field} to its input")]
     InputCut {
         op: &'static str,
@@ -675,9 +693,14 @@ impl BatchResult {
     }
 }
 
-fn tree_steps(spec: &OpSpec) -> usize {
+fn tree_units(spec: &OpSpec) -> usize {
     match spec {
-        OpSpec::Batch(batch) => batch.steps().iter().map(tree_steps).sum(),
+        OpSpec::Batch(batch) => batch.steps().iter().map(tree_units).sum(),
+        OpSpec::Graph(graph) => graph
+            .nodes()
+            .iter()
+            .map(|node| tree_units(node.spec()))
+            .sum(),
         _ => 1,
     }
 }
@@ -685,7 +708,198 @@ fn tree_steps(spec: &OpSpec) -> usize {
 fn tree_depth(spec: &OpSpec) -> usize {
     match spec {
         OpSpec::Batch(batch) => 1 + batch.steps().iter().map(tree_depth).max().unwrap_or(0),
+        OpSpec::Graph(graph) => {
+            1 + graph
+                .nodes()
+                .iter()
+                .map(|node| tree_depth(node.spec()))
+                .max()
+                .unwrap_or(0)
+        }
         _ => 0,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphNode {
+    id: NodeId,
+    spec: OpSpec,
+}
+
+impl GraphNode {
+    pub fn new(id: &str, spec: OpSpec) -> Result<Self, OpSpecError> {
+        let id = id
+            .parse::<NodeId>()
+            .map_err(|source| OpSpecError::InvalidNodeId {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(Self { id, spec })
+    }
+
+    pub fn id(&self) -> &NodeId {
+        &self.id
+    }
+
+    pub fn spec(&self) -> &OpSpec {
+        &self.spec
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphSpec {
+    nodes: Vec<GraphNode>,
+}
+
+impl GraphSpec {
+    pub fn new(nodes: Vec<GraphNode>) -> Result<Self, OpSpecError> {
+        if nodes.is_empty() {
+            return Err(OpSpecError::EmptyGraph);
+        }
+        if nodes.len() > MAX_GRAPH_NODES {
+            return Err(OpSpecError::GraphTooLarge {
+                count: nodes.len(),
+                max: MAX_GRAPH_NODES,
+            });
+        }
+        for (index, node) in nodes.iter().enumerate() {
+            if nodes[index + 1..]
+                .iter()
+                .any(|other| other.id.as_str() == node.id.as_str())
+            {
+                return Err(OpSpecError::DuplicateNode {
+                    id: node.id.as_str().to_string(),
+                });
+            }
+        }
+        let count: usize = nodes.iter().map(|node| tree_units(node.spec())).sum();
+        if count > MAX_TREE_STEPS {
+            return Err(OpSpecError::TreeTooLarge {
+                count,
+                max: MAX_TREE_STEPS,
+            });
+        }
+        let depth = 1 + nodes
+            .iter()
+            .map(|node| tree_depth(node.spec()))
+            .max()
+            .unwrap_or(0);
+        if depth > MAX_NESTING_DEPTH {
+            return Err(OpSpecError::NestingTooDeep {
+                depth,
+                max: MAX_NESTING_DEPTH,
+            });
+        }
+        let graph = Self { nodes };
+        graph.check_graph()?;
+        Ok(graph)
+    }
+
+    pub fn nodes(&self) -> &[GraphNode] {
+        &self.nodes
+    }
+
+    pub fn ensure_resolvable(&self) -> Result<(), UnsupportedInput> {
+        Ok(())
+    }
+
+    fn check_graph(&self) -> Result<(), OpSpecError> {
+        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        for (index, node) in self.nodes.iter().enumerate() {
+            match node.spec() {
+                OpSpec::Batch(batch) => {
+                    batch
+                        .ensure_resolvable()
+                        .map_err(|error| OpSpecError::DanglingReference {
+                            node: node.id().as_str().to_string(),
+                            reference: error.node,
+                        })?
+                }
+                OpSpec::Graph(nested) => nested.check_graph()?,
+                leaf => {
+                    for reference in leaf.inputs().into_iter().filter_map(InputSource::node) {
+                        let Some(target) = self
+                            .nodes
+                            .iter()
+                            .position(|other| other.id.as_str() == reference.id().as_str())
+                        else {
+                            return Err(OpSpecError::DanglingReference {
+                                node: node.id().as_str().to_string(),
+                                reference: reference.id().as_str().to_string(),
+                            });
+                        };
+                        edges[index].push(target);
+                    }
+                }
+            }
+        }
+        let mut colour = vec![0u8; self.nodes.len()];
+        for start in 0..self.nodes.len() {
+            if colour[start] == 0 {
+                self.visit(start, &edges, &mut colour)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn visit(
+        &self,
+        node: usize,
+        edges: &[Vec<usize>],
+        colour: &mut [u8],
+    ) -> Result<(), OpSpecError> {
+        colour[node] = 1;
+        for &next in &edges[node] {
+            match colour[next] {
+                1 => {
+                    return Err(OpSpecError::Cycle {
+                        node: self.nodes[node].id().as_str().to_string(),
+                    });
+                }
+                0 => self.visit(next, edges, colour)?,
+                _ => {}
+            }
+        }
+        colour[node] = 2;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeOutcome {
+    id: NodeId,
+    state: StepState,
+}
+
+impl NodeOutcome {
+    pub fn new(id: NodeId, state: StepState) -> Self {
+        Self { id, state }
+    }
+
+    pub fn id(&self) -> &NodeId {
+        &self.id
+    }
+
+    pub fn state(&self) -> &StepState {
+        &self.state
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphResult {
+    nodes: Vec<NodeOutcome>,
+}
+
+impl GraphResult {
+    pub fn new(nodes: Vec<NodeOutcome>) -> Result<Self, OpResultError> {
+        if nodes.is_empty() {
+            return Err(OpResultError::EmptyGraphResult);
+        }
+        Ok(Self { nodes })
+    }
+
+    pub fn nodes(&self) -> &[NodeOutcome] {
+        &self.nodes
     }
 }
 
@@ -706,7 +920,7 @@ impl BatchSpec {
                 max: MAX_BATCH_STEPS,
             });
         }
-        let count: usize = steps.iter().map(tree_steps).sum();
+        let count: usize = steps.iter().map(tree_units).sum();
         if count > MAX_TREE_STEPS {
             return Err(OpSpecError::TreeTooLarge {
                 count,
@@ -738,6 +952,7 @@ impl BatchSpec {
         for (position, step) in self.steps.iter().enumerate() {
             match step {
                 OpSpec::Batch(nested) => nested.ensure_resolvable()?,
+                OpSpec::Graph(nested) => nested.ensure_resolvable()?,
                 leaf => {
                     for node in leaf.inputs().into_iter().filter_map(InputSource::node) {
                         let resolves = node
@@ -769,6 +984,7 @@ pub enum OpSpec {
     Image(ImageSpec),
     Package(PackageSpec),
     Batch(BatchSpec),
+    Graph(GraphSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -783,6 +999,7 @@ pub enum OpKind {
     Composite,
     Package,
     Batch,
+    Graph,
 }
 
 impl std::fmt::Display for OpKind {
@@ -798,6 +1015,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Composite => "composite",
             OpKind::Package => "package",
             OpKind::Batch => "batch",
+            OpKind::Graph => "graph",
         };
         formatter.write_str(name)
     }
@@ -827,7 +1045,8 @@ impl OpKind {
             | OpKind::Convert
             | OpKind::Composite
             | OpKind::Package
-            | OpKind::Batch => Ok(()),
+            | OpKind::Batch
+            | OpKind::Graph => Ok(()),
         }
     }
 }
@@ -843,6 +1062,7 @@ impl OpSpec {
             OpSpec::Image(spec) => spec.op.kind(),
             OpSpec::Package(_) => OpKind::Package,
             OpSpec::Batch(_) => OpKind::Batch,
+            OpSpec::Graph(_) => OpKind::Graph,
         }
     }
 
@@ -856,12 +1076,18 @@ impl OpSpec {
             OpSpec::Image(image) => image.inputs().iter().collect(),
             OpSpec::Package(package) => vec![package.input()],
             OpSpec::Batch(batch) => batch.steps().iter().flat_map(OpSpec::inputs).collect(),
+            OpSpec::Graph(graph) => graph
+                .nodes()
+                .iter()
+                .flat_map(|node| node.spec().inputs())
+                .collect(),
         }
     }
 
     pub fn ensure_resolvable(&self) -> Result<(), UnsupportedInput> {
         match self {
             OpSpec::Batch(batch) => batch.ensure_resolvable(),
+            OpSpec::Graph(graph) => graph.ensure_resolvable(),
             _ => match self.inputs().into_iter().find_map(InputSource::node) {
                 Some(node) => Err(UnsupportedInput {
                     node: node.id().as_str().to_string(),
@@ -882,6 +1108,14 @@ pub enum OpResultError {
     EmptyOutputs,
     #[error("batch result has no steps")]
     EmptyBatchResult,
+    #[error("graph result has no nodes")]
+    EmptyGraphResult,
+    #[error("graph node id {id:?} is not valid: {source}")]
+    InvalidNodeId {
+        id: String,
+        #[source]
+        source: NodeIdError,
+    },
     #[error(transparent)]
     JobFailure(#[from] JobFailureError),
     #[error(transparent)]
@@ -1043,4 +1277,5 @@ pub enum OpResult {
     Image(ImageResult),
     Package(PackageResult),
     Batch(BatchResult),
+    Graph(GraphResult),
 }

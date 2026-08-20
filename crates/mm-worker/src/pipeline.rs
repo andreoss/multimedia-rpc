@@ -8,13 +8,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
-    BatchResult, BatchSpec, ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult,
-    ImageSpec, InputFailure, InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository,
-    JobState, JobStoreError, MediaRef, NodeRef, ObjectBody, ObjectRef, ObjectStore,
-    ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult, PackageSpec, ProbeResult,
-    ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode, StepOutcome, StepState,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    WorkerId, resolve_media_ref, validate_inputs,
+    BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec, ImageFormat as DomainImageFormat,
+    ImageOp, ImageResult, ImageSpec, InputFailure, InputReport, InputSource, JobFailure, JobId,
+    JobRecord, JobRepository, JobState, JobStoreError, MediaRef, NodeOutcome, NodeRef, ObjectBody,
+    ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult,
+    PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode,
+    StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
+    TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -461,11 +461,30 @@ impl Scope {
             total: self.total,
         }
     }
+
+    fn node_child(&self, id: &str) -> Self {
+        let prefix = if self.prefix.is_empty() {
+            format!("nodes/{id}")
+        } else {
+            format!("{}/nodes/{id}", self.prefix)
+        };
+        Self {
+            prefix,
+            resolved: self.resolved.clone(),
+            done: self.done.clone(),
+            total: self.total,
+        }
+    }
 }
 
 fn leaf_count(spec: &OpSpec) -> usize {
     match spec {
         OpSpec::Batch(batch) => batch.steps().iter().map(leaf_count).sum(),
+        OpSpec::Graph(graph) => graph
+            .nodes()
+            .iter()
+            .map(|node| leaf_count(node.spec()))
+            .sum(),
         _ => 1,
     }
 }
@@ -498,8 +517,98 @@ async fn run_spec(
 ) -> Result<OpResult, Finish> {
     match spec {
         OpSpec::Batch(batch) => batch_pipeline(ctx, job, batch, scope, deadline_at, signal).await,
+        OpSpec::Graph(graph) => graph_pipeline(ctx, job, graph, scope, deadline_at, signal).await,
         leaf => run_leaf(ctx, job, leaf, scope, deadline_at, signal).await,
     }
+}
+
+fn graph_order(graph: &GraphSpec) -> Vec<usize> {
+    let nodes = graph.nodes();
+    let index: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (node.id().as_str(), position))
+        .collect();
+    let mut dependencies = vec![Vec::new(); nodes.len()];
+    for (position, node) in nodes.iter().enumerate() {
+        for reference in node
+            .spec()
+            .inputs()
+            .into_iter()
+            .filter_map(InputSource::node)
+        {
+            if let Some(&target) = index.get(reference.id().as_str()) {
+                dependencies[position].push(target);
+            }
+        }
+    }
+    let mut order = Vec::with_capacity(nodes.len());
+    let mut done = vec![false; nodes.len()];
+    while order.len() < nodes.len() {
+        let mut progressed = false;
+        for position in 0..nodes.len() {
+            if done[position] {
+                continue;
+            }
+            if dependencies[position].iter().all(|target| done[*target]) {
+                order.push(position);
+                done[position] = true;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    order
+}
+
+async fn graph_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &GraphSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    let order = graph_order(spec);
+    let mut outcomes = Vec::with_capacity(spec.nodes().len());
+    let mut landed: Vec<ObjectRef> = Vec::new();
+    for position in order {
+        check(signal)?;
+        let node = &spec.nodes()[position];
+        if matches!(node.spec(), OpSpec::Batch(_) | OpSpec::Graph(_)) {
+            discard_all(ctx, &landed).await;
+            cleanup_staging(ctx, job.id).await;
+            return Err(failed(
+                codes::UNSUPPORTED_OPERATION,
+                "a nested composition node is not executed yet",
+            ));
+        }
+        let child = scope.node_child(node.id().as_str());
+        match run_leaf(ctx, job, node.spec(), &child, deadline_at, signal).await {
+            Ok(result) => {
+                collect_outputs(&result, &mut landed);
+                scope
+                    .resolved
+                    .lock()
+                    .expect("resolved lock")
+                    .insert(node.id().as_str().to_string(), result.clone());
+                outcomes.push(NodeOutcome::new(
+                    node.id().clone(),
+                    StepState::Result(result),
+                ));
+            }
+            Err(other) => {
+                discard_all(ctx, &landed).await;
+                cleanup_staging(ctx, job.id).await;
+                return Err(other);
+            }
+        }
+    }
+    let result =
+        GraphResult::new(outcomes).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    Ok(OpResult::Graph(result))
 }
 
 async fn run_leaf(
@@ -528,6 +637,12 @@ async fn run_leaf(
             return Err(failed(
                 codes::UNSUPPORTED_OPERATION,
                 "a nested batch is not executed yet",
+            ));
+        }
+        OpSpec::Graph(_) => {
+            return Err(failed(
+                codes::UNSUPPORTED_OPERATION,
+                "a graph is not executed yet",
             ));
         }
     };
@@ -615,6 +730,13 @@ fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
             push(package.playlist());
             package.segments().iter().for_each(&mut push);
         }
+        OpResult::Graph(graph) => {
+            for node in graph.nodes() {
+                if let StepState::Result(result) = node.state() {
+                    collect_outputs(result, landed);
+                }
+            }
+        }
         OpResult::Probe(_) | OpResult::Batch(_) => {}
     }
 }
@@ -656,7 +778,7 @@ fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
                 package.segments().get(index - 1)
             }
         }
-        OpResult::Probe(_) | OpResult::Batch(_) => None,
+        OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
     }
 }
 

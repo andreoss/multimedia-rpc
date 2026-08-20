@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package mmrpc.videomerge.v1;
+
+import "mmrpc/v1/media.proto";
+import "mmrpc/v1/stitch.proto";
+
+enum Requester {
+  REQUESTER_UNSPECIFIED = 0;
+  REQUESTER_CHAT_MESSAGE = 1;
+  REQUESTER_CANVAS_EXECUTION_TASK = 2;
+  REQUESTER_SERIES_EPISODE = 3;
+  REQUESTER_STUDIO = 4;
+}
+
+message InputFile {
+  int32 sequence_order = 1;
+  string media_id = 2;
+}
+
+message OutputProfile {
+  optional int32 frame_rate = 1;
+  optional int32 video_max_bitrate = 2;
+  optional int32 video_qvbr_quality = 3;
+  optional int32 audio_bitrate = 4;
+  optional int32 audio_sample_rate = 5;
+}
+
+message ResponseCallback {
+  string response_queue_url = 1;
+}
+
+message VideoMergeJob {
+  string job_id = 1;
+  string request_id = 2;
+  Requester requester = 3;
+  string user_id = 4 [deprecated = true];
+  optional mmrpc.v1.StitchStatus status = 5;
+  repeated InputFile input_files = 6;
+  int64 created_at_millis = 7;
+  optional string error_code = 8;
+  repeated mmrpc.v1.FileError file_errors = 9;
+  optional OutputProfile output = 10;
+  optional string r2_uri = 11;
+}
+
+message CreateJobRequest {
+  VideoMergeJob job = 1;
+  string idempotency_key = 2;
+  optional ResponseCallback callback = 3;
+}
+
+message CreateJobResponse {
+  string job_id = 1;
+  string request_id = 2;
+  int64 created_at_millis = 3;
+  bool created = 4;
+}
+
+message CancelJobRequest {
+  string job_id = 1;
+  string user_id = 2 [deprecated = true];
+}
+
+message CancelJobResponse {
+  string job_id = 1;
+  mmrpc.v1.StitchStatus status = 2;
+  bool cancellation_accepted = 3;
+}
+
+message GetJobRequest {
+  string job_id = 1;
+  string user_id = 2 [deprecated = true];
+}
+
+message ListUserJobsRequest {
+  string user_id = 1 [deprecated = true];
+  repeated mmrpc.v1.StitchStatus statuses = 2;
+  optional Requester requester = 3;
+  int32 page_size = 4;
+  string page_token = 5;
+}
+
+message GetJobResponse {
+  VideoMergeJob job = 1;
+}
+
+message ListUserJobsResponse {
+  repeated VideoMergeJob jobs = 1;
+  string next_page_token = 2;
+}
+
+service VideoMergeService {
+  rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc ListUserJobs(ListUserJobsRequest) returns (ListUserJobsResponse);
+}

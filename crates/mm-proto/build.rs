@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/mmrpc/v1/ops.proto",
         "../../proto/mmrpc/v1/job.proto",
         "../../proto/mmrpc/v1/stitch.proto",
+        "../../proto/mmrpc/videomerge/v1/videomerge.proto",
         "../../proto/mmrpc/v1/service.proto",
     ];
     tonic_prost_build::configure()

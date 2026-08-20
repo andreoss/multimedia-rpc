@@ -215,6 +215,14 @@ pub fn ci(root: &Path) -> Result<(), String> {
                 "warnings".into(),
             ],
         ),
+        (
+            "layering",
+            vec!["cargo".into(), "xtask".into(), "layering".into()],
+        ),
+        (
+            "comments",
+            vec!["cargo".into(), "xtask".into(), "comments".into()],
+        ),
         ("contract", vec!["buf".into(), "lint".into()]),
         (
             "breaking",

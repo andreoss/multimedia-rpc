@@ -23,10 +23,24 @@ shape over the same store: `CreateJob`, `GetJob`, `CancelJob`,
 `ListUserJobs`, with a requester, ordered input files and an output
 profile on every job.
 
-Operations (`OpSpec` oneof): `probe` inspect, `transcode`, `trim`,
-`thumbnail`, `concat`, `image` resize/convert/composite, `package` HLS,
-`ladder` ordered renditions and a master playlist.
-Results are object-storage keys; no media bytes cross the API.
+Operations (`OpSpec` oneof), one job each; results are object-storage keys
+and no media bytes cross the API.
+
+[cols="1,3"]
+|===
+|Operation |Does
+
+|`probe` |Read container, streams and dimensions.
+|`concat` |Join two or more inputs into one output.
+|`transcode` |Re-encode one input to a profile.
+|`trim` |Cut a range, by copy when the cut is keyframe-aligned.
+|`thumbnail` |Frames at offsets, one size or a sprite.
+|`image` |Resize, convert or composite stills.
+|`package` |One rendition into HLS segments and a media playlist.
+|`ladder` |Ordered renditions and one master playlist.
+|`batch` |Steps in order, a later one reading an earlier result.
+|`graph` |Named nodes in dependency order, references inside the graph.
+|===
 
 == Example
 

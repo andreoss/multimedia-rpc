@@ -5,6 +5,7 @@ mod jobs;
 mod op;
 mod reference;
 mod resolve;
+mod scope;
 mod source;
 mod state;
 mod store;
@@ -35,13 +36,14 @@ pub use op::{
     MIN_LADDER_RUNGS, MIN_LOUDNESS_LUFS, MIN_TRUE_PEAK_DB, MediaRef, MediaRefError, NodeOutcome,
     ObjectRef, OpKind, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
     OutputProfileError, OutputRange, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
-    RenditionResult, ResizeMode, StepOutcome, StepState, SubtitleMode, SubtitleResult,
-    SubtitleSpec, ThumbnailResult, ThumbnailSpec, TimedOutput, TitleResult, TitleSpec,
-    TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput, UnsupportedOp, VideoEncoder,
-    VideoStreamInfo,
+    RenditionResult, ResizeMode, ScopeMode, ScopeOutput, StepOutcome, StepState, SubtitleMode,
+    SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, TimedOutput, TitleResult,
+    TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedInput, UnsupportedOp,
+    VideoEncoder, VideoStreamInfo,
 };
 pub use reference::{failure_code, verdict_code};
 pub use resolve::{ResolveError, resolve_media_ref};
+pub use scope::{Frame, ScopeData, ScopeError, measure};
 
 pub use store::{
     JobPrefix, JobPrefixError, ObjectBody, ObjectStore, ObjectStoreError, OutputKey,

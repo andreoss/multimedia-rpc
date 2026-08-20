@@ -8,6 +8,7 @@ mod probe;
 mod profile;
 mod progress;
 mod runner;
+mod scope;
 mod subtitle;
 mod thumbnail;
 mod timestamp;
@@ -30,6 +31,7 @@ pub use probe::{ProbeError, ProbeLimits, Prober};
 pub use profile::TargetProfile;
 pub use progress::{ProgressParser, ProgressUpdate};
 pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner, parse_encoders};
+pub use scope::{ScopeKind, build_frame_sample_args, build_scope_args};
 pub use subtitle::{
     SubtitleError, build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
 };

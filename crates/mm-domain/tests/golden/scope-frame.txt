@@ -1,0 +1,4 @@
+# 4x2 rgb24, first line is the top row: black, white, red, green
+000000 ffffff ff0000 00ff00
+# second row: blue, mid grey, dark grey, yellow
+0000ff 808080 404040 ffff00

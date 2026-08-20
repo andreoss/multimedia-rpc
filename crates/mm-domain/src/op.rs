@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::caption::CaptionFormat;
 use crate::id::{NodeId, NodeIdError};
 use crate::jobs::{JobFailure, JobFailureError};
+use crate::scope::{ScopeData, ScopeError};
 use crate::source::{InputSource, SourceError};
 use crate::time::Ticks;
 
@@ -442,6 +443,8 @@ pub enum OpSpecError {
     InvalidGamma { value: f64 },
     #[error("grade has no adjustment and no lookup table")]
     EmptyGrade,
+    #[error("a frame scope carries no measurements")]
+    FrameScopeData,
     #[error("title text is empty")]
     EmptyTitle,
     #[error("title text has {length} characters, above the {max} allowed")]
@@ -496,6 +499,10 @@ pub enum OpSpecError {
     DanglingReference { node: String, reference: String },
     #[error("node {node} closes a cycle")]
     Cycle { node: String },
+    #[error("scope mode {value} is unknown")]
+    UnknownScopeMode { value: i32 },
+    #[error("scope output {value} is unknown")]
+    UnknownScopeOutput { value: i32 },
     #[error("{op} cannot apply {field} to its input")]
     InputCut {
         op: &'static str,
@@ -1285,9 +1292,70 @@ impl GradeAdjustments {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeMode {
+    Frame,
+    Waveform,
+    Parade,
+    Histogram,
+    Vectorscope,
+}
+
+impl ScopeMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Frame => "frame",
+            Self::Waveform => "waveform",
+            Self::Parade => "parade",
+            Self::Histogram => "histogram",
+            Self::Vectorscope => "vectorscope",
+        }
+    }
+
+    pub fn components(self) -> u32 {
+        match self {
+            Self::Parade => 3,
+            Self::Frame | Self::Waveform | Self::Histogram | Self::Vectorscope => 1,
+        }
+    }
+
+    pub fn default_grid(self) -> (u32, u32) {
+        match self {
+            Self::Waveform | Self::Parade => (256, 64),
+            Self::Histogram => (1, 256),
+            Self::Vectorscope => (1, 64),
+            Self::Frame => (0, 0),
+        }
+    }
+
+    pub fn grid(self) -> (u32, u32, u32) {
+        let (columns, bins) = self.default_grid();
+        (self.components(), columns, bins)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeOutput {
+    Image,
+    Data,
+}
+
+impl ScopeOutput {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Data => "data",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GradeScope {
     width: u32,
     height: u32,
+    mode: ScopeMode,
+    output: ScopeOutput,
+    columns: u32,
+    bins: u32,
 }
 
 impl GradeScope {
@@ -1300,7 +1368,30 @@ impl GradeScope {
                 dimension: "height",
             });
         }
-        Ok(Self { width, height })
+        Ok(Self {
+            width,
+            height,
+            mode: ScopeMode::Frame,
+            output: ScopeOutput::Image,
+            columns: 0,
+            bins: 0,
+        })
+    }
+
+    pub fn with_mode(mut self, mode: ScopeMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn with_output(mut self, output: ScopeOutput) -> Self {
+        self.output = output;
+        self
+    }
+
+    pub fn with_grid(mut self, columns: u32, bins: u32) -> Self {
+        self.columns = columns;
+        self.bins = bins;
+        self
     }
 
     pub fn width(&self) -> u32 {
@@ -1309,6 +1400,46 @@ impl GradeScope {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn mode(&self) -> ScopeMode {
+        self.mode
+    }
+
+    pub fn output(&self) -> ScopeOutput {
+        self.output
+    }
+
+    pub fn columns(&self) -> u32 {
+        self.columns
+    }
+
+    pub fn bins(&self) -> u32 {
+        self.bins
+    }
+
+    pub fn grid(&self) -> (u32, u32, u32) {
+        let (default_columns, default_bins) = self.mode.default_grid();
+        (
+            self.mode.components(),
+            if self.columns == 0 {
+                default_columns
+            } else {
+                self.columns
+            },
+            if self.bins == 0 {
+                default_bins
+            } else {
+                self.bins
+            },
+        )
+    }
+
+    fn check(&self) -> Result<(), OpSpecError> {
+        if self.output == ScopeOutput::Data && self.mode == ScopeMode::Frame {
+            return Err(OpSpecError::FrameScopeData);
+        }
+        Ok(())
     }
 }
 
@@ -1334,6 +1465,9 @@ impl GradeSpec {
         }
         if adjustments.is_identity() && lookup_table.is_none() {
             return Err(OpSpecError::EmptyGrade);
+        }
+        if let Some(scope) = &scope {
+            scope.check()?;
         }
         Ok(Self {
             input,
@@ -2135,6 +2269,8 @@ pub enum OpResultError {
     EmptyBatchResult,
     #[error("graph result has no nodes")]
     EmptyGraphResult,
+    #[error("scope mode {value} is unknown")]
+    UnknownScopeMode { value: i32 },
     #[error("graph node id {id:?} is not valid: {source}")]
     InvalidNodeId {
         id: String,
@@ -2147,6 +2283,8 @@ pub enum OpResultError {
     MediaRef(#[from] MediaRefError),
     #[error(transparent)]
     Profile(#[from] OutputProfileError),
+    #[error(transparent)]
+    Scope(#[from] ScopeError),
 }
 
 fn parse_duration(value: f64) -> Result<f64, OpResultError> {
@@ -2547,11 +2685,16 @@ impl AudioResult {
 pub struct GradeResult {
     output: MediaRef,
     scope: Option<MediaRef>,
+    data: Option<ScopeData>,
 }
 
 impl GradeResult {
-    pub fn new(output: MediaRef, scope: Option<MediaRef>) -> Self {
-        Self { output, scope }
+    pub fn new(output: MediaRef, scope: Option<MediaRef>, data: Option<ScopeData>) -> Self {
+        Self {
+            output,
+            scope,
+            data,
+        }
     }
 
     pub fn output(&self) -> &MediaRef {
@@ -2560,6 +2703,10 @@ impl GradeResult {
 
     pub fn scope(&self) -> Option<&MediaRef> {
         self.scope.as_ref()
+    }
+
+    pub fn data(&self) -> Option<&ScopeData> {
+        self.data.as_ref()
     }
 }
 

@@ -565,8 +565,9 @@ fn a_grade_spec_requires_an_adjustment_or_a_lookup_table() {
     assert_eq!(OpSpec::Grade(grade.clone()).kind(), OpKind::Grade);
     assert_eq!(grade.adjustments().brightness(), 0.1);
     assert_eq!(grade.scope().unwrap().width(), 320);
-    let result = GradeResult::new(object(), Some(object()));
+    let result = GradeResult::new(object(), Some(object()), None);
     assert!(result.scope().is_some());
+    assert!(result.data().is_none());
 }
 
 #[test]

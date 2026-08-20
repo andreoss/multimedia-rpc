@@ -11,26 +11,26 @@ use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use mm_domain::{
     AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CachedTranscode,
-    CaptionDocument, ConcatSpec, GradeResult, GradeSpec, GraphResult, GraphSpec,
+    CaptionDocument, ConcatSpec, Frame, GradeResult, GradeScope, GradeSpec, GraphResult, GraphSpec,
     ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
     InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
     LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome,
     NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
     OutputKey, OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
-    RenditionResult, ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState,
-    SubtitleMode, SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
-    TitleResult, TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoEncoder,
-    VideoStreamInfo, WorkerId, collect_body, resolve_media_ref, validate_inputs,
-    validate_ladder_rungs, verdict_code,
+    RenditionResult, ResizeMode as DomainResizeMode, RungState, ScopeData, ScopeMode, ScopeOutput,
+    StepOutcome, StepState, SubtitleMode, SubtitleResult, SubtitleSpec, ThumbnailResult,
+    ThumbnailSpec, Ticks, TimedOutput, TitleResult, TitleSpec, TranscodeResult, TranscodeSpec,
+    TrimSpec, Verdict, VideoEncoder, VideoStreamInfo, WorkerId, collect_body, measure,
+    resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
     AudioTarget, GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo,
-    RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo, ThumbnailTarget, Timestamp,
+    RunLimits, RunOutcome, ScaleMode, ScopeKind, SourceCut, StillInfo, ThumbnailTarget, Timestamp,
     TranscodeTarget, TrimStrategy, TrimTarget, build_audio_args, build_concat_args,
-    build_grade_args, build_loudness_measure_args, build_loudness_normalize_args,
-    build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
-    build_thumbnail_args, build_transcode_args, build_trim_args, parse_cube_table,
-    parse_loudnorm_report,
+    build_frame_sample_args, build_grade_args, build_loudness_measure_args,
+    build_loudness_normalize_args, build_scope_args, build_subtitle_burn_args,
+    build_subtitle_mux_args, build_subtitle_strip_args, build_thumbnail_args, build_transcode_args,
+    build_trim_args, parse_cube_table, parse_loudnorm_report,
 };
 use mm_gst::Written as GstWritten;
 use mm_gst::{
@@ -2378,6 +2378,16 @@ async fn audio_pipeline(
     ))
 }
 
+fn scope_kind(mode: ScopeMode) -> ScopeKind {
+    match mode {
+        ScopeMode::Frame => ScopeKind::Frame,
+        ScopeMode::Waveform => ScopeKind::Waveform,
+        ScopeMode::Parade => ScopeKind::Parade,
+        ScopeMode::Histogram => ScopeKind::Histogram,
+        ScopeMode::Vectorscope => ScopeKind::Vectorscope,
+    }
+}
+
 async fn grade_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
@@ -2438,20 +2448,29 @@ async fn grade_pipeline(
     )
     .await?;
     check(signal)?;
-    let scope_path = match spec.scope() {
-        Some(scope_spec) => {
+    let scope_image = match spec.scope() {
+        Some(scope_spec) if scope_spec.output() == ScopeOutput::Image => {
             let path = ctx.staging_dir.join(format!("{}-scope.jpg", job.id));
             let target = ThumbnailTarget {
                 width: scope_spec.width(),
                 height: scope_spec.height(),
                 format: ImageFormat::Jpeg,
             };
-            let args = build_thumbnail_args(
-                &output_path.to_string_lossy(),
-                Timestamp::ZERO,
-                &target,
-                &path.to_string_lossy(),
-            );
+            let args = match scope_spec.mode() {
+                ScopeMode::Frame => build_thumbnail_args(
+                    &output_path.to_string_lossy(),
+                    Timestamp::ZERO,
+                    &target,
+                    &path.to_string_lossy(),
+                ),
+                mode => build_scope_args(
+                    &output_path.to_string_lossy(),
+                    scope_kind(mode),
+                    scope_spec.width(),
+                    scope_spec.height(),
+                    &path.to_string_lossy(),
+                ),
+            };
             let limits = remaining_limits(
                 ctx,
                 Duration::from_secs(u64::from(THUMBNAIL_RUN_SECONDS)),
@@ -2470,13 +2489,41 @@ async fn grade_pipeline(
             .await?;
             Some((path, scope_spec))
         }
-        None => None,
+        _ => None,
+    };
+    check(signal)?;
+    let scope_data = match spec.scope() {
+        Some(scope_spec) if scope_spec.output() == ScopeOutput::Data => {
+            let stream = info.video.first().ok_or_else(|| {
+                failed(
+                    codes::GRADE_INVALID,
+                    "the graded frame carries no video stream to measure",
+                )
+            })?;
+            Some(
+                measure_scope(
+                    ctx,
+                    job.id,
+                    &GradedFrame {
+                        path: output_path.clone(),
+                        width: stream.width,
+                        height: stream.height,
+                    },
+                    scope_spec,
+                    scope,
+                    deadline_at,
+                    signal,
+                )
+                .await?,
+            )
+        }
+        _ => None,
     };
     check(signal)?;
     let output_object = output_object(ctx, job.id, &scope.prefix)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
     upload_object(ctx, &output_object, &output_path).await?;
-    let scope_object = match scope_path.as_ref() {
+    let scope_object = match scope_image.as_ref() {
         Some((path, _)) => {
             let object = artifact_object_named(ctx, job.id, &scope.prefix, "scope.jpg").await?;
             upload_object(ctx, &object, path).await?;
@@ -2484,7 +2531,7 @@ async fn grade_pipeline(
         }
         None => None,
     };
-    if let Some((path, _)) = &scope_path {
+    if let Some((path, _)) = &scope_image {
         let _ = tokio::fs::remove_file(path).await;
     }
     if let Some(path) = lookup_path {
@@ -2501,7 +2548,53 @@ async fn grade_pipeline(
     Ok(OpResult::Grade(GradeResult::new(
         MediaRef::Object(output_object),
         scope_object.map(MediaRef::Object),
+        scope_data,
     )))
+}
+
+struct GradedFrame {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+}
+
+async fn measure_scope(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    graded: &GradedFrame,
+    scope_spec: GradeScope,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<ScopeData, Finish> {
+    let path = ctx.staging_dir.join(format!("{}-scope.rgb", id));
+    let args = build_frame_sample_args(&graded.path.to_string_lossy(), &path.to_string_lossy());
+    let limits = remaining_limits(
+        ctx,
+        Duration::from_secs(u64::from(THUMBNAIL_RUN_SECONDS)),
+        deadline_at,
+    )?;
+    check(signal)?;
+    supervise(
+        ctx,
+        id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
+    check(signal)?;
+    let pixels = tokio::fs::read(&path)
+        .await
+        .map_err(|error| failed(codes::GRADE_INVALID, error))?;
+    let _ = tokio::fs::remove_file(&path).await;
+    let frame = Frame::new(graded.width, graded.height, pixels)
+        .map_err(|error| failed(codes::GRADE_INVALID, error))?;
+    let (_, columns, bins) = scope_spec.grid();
+    measure(scope_spec.mode(), &frame, columns, bins)
+        .map_err(|error| failed(codes::GRADE_INVALID, error))
 }
 
 async fn subtitle_pipeline(

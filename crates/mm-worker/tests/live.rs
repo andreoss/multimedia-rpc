@@ -14,8 +14,9 @@ use mm_domain::{
     InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, LadderSpec, LoudnessSpec,
     LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore,
     ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
-    ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks, TitleSpec,
-    TranscodeSpec, TrimSpec, UserId, VideoEncoder, WorkerId, collect_body,
+    ResizeMode, RungState, ScopeMode, ScopeOutput, StepState, SubtitleMode, SubtitleSpec,
+    ThumbnailSpec, Ticks, TitleSpec, TranscodeSpec, TrimSpec, UserId, VideoEncoder, WorkerId,
+    collect_body,
 };
 use mm_ffmpeg::{
     ProbeLimits, Prober, RunLimits as ToolLimits, RunOutcome as ToolOutcome, Runner as ToolRunner,
@@ -1044,6 +1045,20 @@ async fn a_blocked_transcode_fails_with_the_input_code() {
     db.dispose().await;
 }
 
+async fn states_snapshot(db: &TestDb, ids: &[JobId]) -> (usize, usize) {
+    let uuids: Vec<Uuid> = ids.iter().map(|id| id.as_uuid()).collect();
+    let (running, terminal): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE state = 'RUNNING'), \
+         count(*) FILTER (WHERE state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')) \
+         FROM jobs WHERE id = ANY($1)",
+    )
+    .bind(&uuids)
+    .fetch_one(&db.pool)
+    .await
+    .expect("the states snapshot reads");
+    (running as usize, terminal as usize)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn parallel_jobs_never_exceed_the_concurrency_bound() {
     let _slot = mm_testkit::stack_slot();
@@ -1075,16 +1090,7 @@ async fn parallel_jobs_never_exceed_the_concurrency_bound() {
     let deadline = Instant::now() + mm_testkit::budget::MERGE_TERMINAL;
     let mut max_running = 0usize;
     loop {
-        let mut running = 0usize;
-        let mut terminal = 0usize;
-        for id in &ids {
-            let record = repository.get(*id).await.unwrap().unwrap();
-            match record.state {
-                JobState::Running => running += 1,
-                state if state.is_terminal() => terminal += 1,
-                _ => {}
-            }
-        }
+        let (running, terminal) = states_snapshot(&db, &ids).await;
         max_running = max_running.max(running);
         if terminal == ids.len() {
             break;
@@ -3684,6 +3690,100 @@ async fn a_brighter_grade_moves_the_mean_luma_and_lands_a_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_graded_job_answers_its_scope_data_over_the_graded_frame() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("grade-scope.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/grade-scope.mp4").await;
+    let repository = db.repository();
+    let adjustments = GradeAdjustments::new(0.2, 1.1, 1.0, 1.0).unwrap();
+    let scope = GradeScope::new(160, 120)
+        .unwrap()
+        .with_mode(ScopeMode::Parade)
+        .with_output(ScopeOutput::Data)
+        .with_grid(64, 256);
+    let spec = GradeSpec::new(input, adjustments, None, Some(scope)).unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Grade(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-grade-scope"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Grade(result) = record.result.expect("result recorded") else {
+        panic!("expected a grade result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(output.key(), format!("jobs/{}/output.mp4", job.id));
+    assert!(result.scope().is_none(), "a data scope lands no image");
+    let data = result.data().expect("the scope carries data");
+    assert_eq!(data.mode(), ScopeMode::Parade);
+    assert_eq!(data.components(), 3);
+    assert_eq!(data.columns(), 64);
+    assert_eq!(data.bins(), 256);
+
+    let path = scratch_dir("grade").join(format!("{}-scoped.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let info = Prober::default()
+        .probe(&path.to_string_lossy(), &ProbeLimits::default())
+        .await
+        .expect("the graded output probes");
+    let stream = info.video.first().expect("a video stream");
+    let pixels = u64::from(stream.width) * u64::from(stream.height);
+    assert_eq!(
+        data.total(),
+        3 * pixels,
+        "every pixel of the frame is counted in every panel"
+    );
+
+    let tool = tool_channel_means(&path);
+    for (component, name) in ["red", "green", "blue"].into_iter().enumerate() {
+        let measured = mean_of(data.panel(component as u32), data.bins());
+        assert!(
+            (measured - tool[component]).abs() <= 1.0,
+            "the scope read a mean {name} of {measured}, the tool read {}",
+            tool[component]
+        );
+    }
+    db.dispose().await;
+}
+
+fn mean_of(panel: &[u32], bins: u32) -> f64 {
+    let counted: u64 = panel.iter().map(|count| u64::from(*count)).sum();
+    assert!(counted > 0, "the panel counts nothing");
+    panel
+        .iter()
+        .enumerate()
+        .map(|(index, count)| ((index as u32) % bins) as f64 * f64::from(*count))
+        .sum::<f64>()
+        / counted as f64
+}
+
+fn tool_channel_means(path: &Path) -> [f64; 3] {
+    let output = Command::new("convert")
+        .arg(format!("{}[0]", path.to_string_lossy()))
+        .args(["-depth", "8", "-format"])
+        .arg("%[fx:mean.r*255],%[fx:mean.g*255],%[fx:mean.b*255]")
+        .arg("info:")
+        .output()
+        .expect("ImageMagick must be runnable");
+    assert!(output.status.success(), "the tool read no frame");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let means: Vec<f64> = text
+        .trim()
+        .split(',')
+        .map(|value| value.parse().expect("a channel mean is a number"))
+        .collect();
+    assert_eq!(means.len(), 3, "the tool read three channels: {text}");
+    [means[0], means[1], means[2]]
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_valid_lookup_table_is_fetched_and_applied() {
     let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
@@ -4562,5 +4662,52 @@ async fn a_transcode_node_reading_another_node_hits_the_branch_cache() {
         2,
         "the second graph ran an encoder"
     );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grade_scope_mode_changes_the_scope_object() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("grade-scope.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/grade-scope.mp4").await;
+    let repository = db.repository();
+    let handle = start(base_config(&db, store.clone(), "worker-scope"));
+    let mut bodies = std::collections::HashMap::new();
+    for mode in [
+        ScopeMode::Frame,
+        ScopeMode::Waveform,
+        ScopeMode::Parade,
+        ScopeMode::Histogram,
+        ScopeMode::Vectorscope,
+    ] {
+        let spec = GradeSpec::new(
+            input.clone(),
+            GradeAdjustments::new(0.1, 1.0, 1.0, 1.0).unwrap(),
+            None,
+            Some(GradeScope::new(160, 120).unwrap().with_mode(mode)),
+        )
+        .unwrap();
+        let job = repository
+            .create(single_input_job(OpSpec::Grade(spec)))
+            .await
+            .unwrap();
+        let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+        assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+        let OpResult::Grade(result) = record.result.expect("result recorded") else {
+            panic!("expected a grade result");
+        };
+        let MediaRef::Object(scope) = result.scope().expect("a scope was requested") else {
+            panic!("expected a scope object");
+        };
+        let body = store.get(scope).await.expect("scope fetches");
+        let bytes = collect_body(body).await.expect("scope body collects");
+        if let Some(previous) = bodies.insert(bytes, mode) {
+            panic!("{mode:?} and {previous:?} produced the same scope");
+        }
+    }
+    handle.shutdown().await;
+    assert_eq!(bodies.len(), 5);
     db.dispose().await;
 }

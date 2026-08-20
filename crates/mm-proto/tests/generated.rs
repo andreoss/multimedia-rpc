@@ -298,6 +298,10 @@ fn op_spec_oneof_carries_every_arm() {
             scope: Some(v1::GradeScope {
                 width: 320,
                 height: 180,
+                mode: v1::ScopeMode::Waveform as i32,
+                output: v1::ScopeOutput::Data as i32,
+                columns: 128,
+                bins: 32,
             }),
         }),
         v1::op_spec::Op::Subtitle(v1::SubtitleSpec {

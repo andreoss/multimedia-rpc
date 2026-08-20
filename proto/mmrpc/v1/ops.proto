@@ -117,9 +117,28 @@ message GradeAdjustments {
   double gamma = 4;
 }
 
+enum ScopeMode {
+  SCOPE_MODE_UNSPECIFIED = 0;
+  SCOPE_MODE_FRAME = 1;
+  SCOPE_MODE_WAVEFORM = 2;
+  SCOPE_MODE_PARADE = 3;
+  SCOPE_MODE_HISTOGRAM = 4;
+  SCOPE_MODE_VECTORSCOPE = 5;
+}
+
+enum ScopeOutput {
+  SCOPE_OUTPUT_UNSPECIFIED = 0;
+  SCOPE_OUTPUT_IMAGE = 1;
+  SCOPE_OUTPUT_DATA = 2;
+}
+
 message GradeScope {
   uint32 width = 1;
   uint32 height = 2;
+  ScopeMode mode = 3;
+  ScopeOutput output = 4;
+  uint32 columns = 5;
+  uint32 bins = 6;
 }
 
 message GradeSpec {
@@ -282,9 +301,18 @@ message LoudnessResult {
   double loudness_range_lu = 4;
 }
 
+message ScopeData {
+  ScopeMode mode = 1;
+  uint32 components = 2;
+  uint32 columns = 3;
+  uint32 bins = 4;
+  repeated uint32 counts = 5;
+}
+
 message GradeResult {
   MediaRef output = 1;
   optional MediaRef scope = 2;
+  optional ScopeData data = 3;
 }
 
 message SubtitleResult {

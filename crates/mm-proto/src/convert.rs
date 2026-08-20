@@ -8,10 +8,11 @@ use mm_domain::{
     MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec,
     OpSpecError, OutputProfile, OutputProfileError, OutputRange, PackageResult, PackageSpec,
     ParameterDeclaration, ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec,
-    QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome,
-    StepState, SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
-    ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TitleResult, TitleSpec, TranscodeResult,
-    TranscodeSpec, TrimRange, TrimSpec, VideoEncoder, VideoStreamInfo, failure_code, verdict_code,
+    QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState, ScopeData, ScopeMode,
+    ScopeOutput, SourceError, StepOutcome, StepState, SubtitleMode, SubtitleResult, SubtitleSpec,
+    Template, TemplateError, TextIdError, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
+    TitleResult, TitleSpec, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoEncoder,
+    VideoStreamInfo, failure_code, verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -511,10 +512,15 @@ impl TryFrom<v1::GradeSpec> for GradeSpec {
             None => GradeAdjustments::default(),
         };
         let lookup_table = value.lookup_table.map(InputSource::try_from).transpose()?;
-        let scope = value
-            .scope
-            .map(|scope| GradeScope::new(scope.width, scope.height))
-            .transpose()?;
+        let scope = match value.scope {
+            Some(scope) => Some(
+                GradeScope::new(scope.width, scope.height)?
+                    .with_mode(scope_mode_from_raw(scope.mode)?)
+                    .with_output(scope_output_from_raw(scope.output)?)
+                    .with_grid(scope.columns, scope.bins),
+            ),
+            None => None,
+        };
         GradeSpec::new(
             required_source(value.input)?,
             adjustments,
@@ -538,6 +544,10 @@ impl From<&GradeSpec> for v1::GradeSpec {
             scope: value.scope().map(|scope| v1::GradeScope {
                 width: scope.width(),
                 height: scope.height(),
+                mode: scope_mode_to_raw(scope.mode()),
+                output: scope_output_to_raw(scope.output()),
+                columns: scope.columns(),
+                bins: scope.bins(),
             }),
         }
     }
@@ -762,10 +772,41 @@ impl TryFrom<v1::GradeResult> for GradeResult {
     type Error = OpResultError;
 
     fn try_from(value: v1::GradeResult) -> Result<Self, Self::Error> {
+        let data = match value.data {
+            Some(data) => Some(ScopeData::try_from(data)?),
+            None => None,
+        };
         Ok(GradeResult::new(
             required_ref(value.output)?,
             optional_ref(value.scope)?,
+            data,
         ))
+    }
+}
+
+impl TryFrom<v1::ScopeData> for ScopeData {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::ScopeData) -> Result<Self, Self::Error> {
+        Ok(ScopeData::new(
+            scope_mode_from_raw_result(value.mode)?,
+            value.components,
+            value.columns,
+            value.bins,
+            value.counts,
+        )?)
+    }
+}
+
+impl From<&ScopeData> for v1::ScopeData {
+    fn from(value: &ScopeData) -> Self {
+        Self {
+            mode: scope_mode_to_raw(value.mode()),
+            components: value.components(),
+            columns: value.columns(),
+            bins: value.bins(),
+            counts: value.counts().to_vec(),
+        }
     }
 }
 
@@ -774,6 +815,7 @@ impl From<&GradeResult> for v1::GradeResult {
         Self {
             output: Some(v1::MediaRef::from(value.output())),
             scope: value.scope().map(v1::MediaRef::from),
+            data: value.data().map(v1::ScopeData::from),
         }
     }
 }
@@ -1384,6 +1426,53 @@ impl From<&OpResult> for v1::OpResult {
             OpResult::Title(title) => v1::op_result::Op::Title(v1::TitleResult::from(title)),
         };
         v1::OpResult { op: Some(op) }
+    }
+}
+
+fn scope_mode_from_raw(value: i32) -> Result<ScopeMode, OpSpecError> {
+    match value {
+        0 | 1 => Ok(ScopeMode::Frame),
+        2 => Ok(ScopeMode::Waveform),
+        3 => Ok(ScopeMode::Parade),
+        4 => Ok(ScopeMode::Histogram),
+        5 => Ok(ScopeMode::Vectorscope),
+        other => Err(OpSpecError::UnknownScopeMode { value: other }),
+    }
+}
+
+fn scope_mode_from_raw_result(value: i32) -> Result<ScopeMode, OpResultError> {
+    match value {
+        0 | 1 => Ok(ScopeMode::Frame),
+        2 => Ok(ScopeMode::Waveform),
+        3 => Ok(ScopeMode::Parade),
+        4 => Ok(ScopeMode::Histogram),
+        5 => Ok(ScopeMode::Vectorscope),
+        other => Err(OpResultError::UnknownScopeMode { value: other }),
+    }
+}
+
+fn scope_output_from_raw(value: i32) -> Result<ScopeOutput, OpSpecError> {
+    match value {
+        0 | 1 => Ok(ScopeOutput::Image),
+        2 => Ok(ScopeOutput::Data),
+        other => Err(OpSpecError::UnknownScopeOutput { value: other }),
+    }
+}
+
+fn scope_output_to_raw(value: ScopeOutput) -> i32 {
+    match value {
+        ScopeOutput::Image => v1::ScopeOutput::Image as i32,
+        ScopeOutput::Data => v1::ScopeOutput::Data as i32,
+    }
+}
+
+fn scope_mode_to_raw(value: ScopeMode) -> i32 {
+    match value {
+        ScopeMode::Frame => v1::ScopeMode::Frame as i32,
+        ScopeMode::Waveform => v1::ScopeMode::Waveform as i32,
+        ScopeMode::Parade => v1::ScopeMode::Parade as i32,
+        ScopeMode::Histogram => v1::ScopeMode::Histogram as i32,
+        ScopeMode::Vectorscope => v1::ScopeMode::Vectorscope as i32,
     }
 }
 

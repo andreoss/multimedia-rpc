@@ -1516,3 +1516,185 @@ async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
     drop(daemon);
     db.dispose().await;
 }
+
+fn composition_input(name: &str) -> v1::InputSource {
+    v1::InputSource {
+        source: Some(v1::input_source::Source::Parameter(v1::ParameterRef {
+            name: name.to_string(),
+        })),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p13_composition_batch_lands_its_steps() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let media = fixture("composition-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &media, "inputs/p13.mp4").await;
+    let mut daemon = spawn_daemon(&db.url, "parity-p13", &[]);
+    let address = announced_address(&mut daemon).await;
+    let mut client = unary_client(address).await;
+
+    let batch = v1::BatchSpec {
+        steps: vec![probe_spec(&input), probe_spec(&input)],
+        stop_on_failure: Some(true),
+    };
+    let created = create_job(
+        &mut client,
+        "owner-p13",
+        "req-p13",
+        v1::OpSpec {
+            op: Some(v1::op_spec::Op::Batch(batch)),
+        },
+        None,
+    )
+    .await;
+    let settled = await_terminal(
+        &mut client,
+        "owner-p13",
+        &created.job_id,
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(settled.state(), v1::JobState::Succeeded);
+    let result =
+        mm_domain::OpResult::try_from(settled.result.expect("result recorded")).expect("decodes");
+    let mm_domain::OpResult::Batch(batch) = result else {
+        panic!("expected a batch result");
+    };
+    assert_eq!(batch.steps().len(), 2);
+    for step in batch.steps() {
+        assert!(matches!(
+            step.state(),
+            mm_domain::StepState::Result(mm_domain::OpResult::Probe(_))
+        ));
+    }
+    let reread = get_job(&mut client, "owner-p13", &created.job_id).await;
+    assert!(reread.result.is_some(), "the result did not read back");
+    drop(daemon);
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p14_composition_graph_lands_its_nodes() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let media = fixture("composition-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &media, "inputs/p14.mp4").await;
+    let mut daemon = spawn_daemon(&db.url, "parity-p14", &[]);
+    let address = announced_address(&mut daemon).await;
+    let mut client = unary_client(address).await;
+
+    let graph = v1::GraphSpec {
+        nodes: vec![
+            v1::GraphNode {
+                id: "left".to_string(),
+                spec: Some(probe_spec(&input)),
+            },
+            v1::GraphNode {
+                id: "right".to_string(),
+                spec: Some(probe_spec(&input)),
+            },
+        ],
+    };
+    let created = create_job(
+        &mut client,
+        "owner-p14",
+        "req-p14",
+        v1::OpSpec {
+            op: Some(v1::op_spec::Op::Graph(graph)),
+        },
+        None,
+    )
+    .await;
+    let settled = await_terminal(
+        &mut client,
+        "owner-p14",
+        &created.job_id,
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(settled.state(), v1::JobState::Succeeded);
+    let result =
+        mm_domain::OpResult::try_from(settled.result.expect("result recorded")).expect("decodes");
+    let mm_domain::OpResult::Graph(graph) = result else {
+        panic!("expected a graph result");
+    };
+    assert_eq!(graph.nodes().len(), 2);
+    for node in graph.nodes() {
+        assert!(matches!(
+            node.state(),
+            mm_domain::StepState::Result(mm_domain::OpResult::Probe(_))
+        ));
+    }
+    let reread = get_job(&mut client, "owner-p14", &created.job_id).await;
+    assert!(reread.result.is_some(), "the result did not read back");
+    drop(daemon);
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p15_composition_template_renders_and_runs() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let media = fixture("composition-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &media, "inputs/p15.mp4").await;
+    let mut daemon = spawn_daemon(&db.url, "parity-p15", &[]);
+    let address = announced_address(&mut daemon).await;
+    let mut client = unary_client(address).await;
+
+    let template = client
+        .create_template(v1::CreateTemplateRequest {
+            user_id: "owner-p15".to_string(),
+            name: "probe-recipe".to_string(),
+            spec: Some(v1::OpSpec {
+                op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+                    input: Some(composition_input("source")),
+                })),
+            }),
+            parameters: vec![v1::ParameterDeclaration {
+                name: "source".to_string(),
+                r#type: v1::ParameterType::Uri as i32,
+            }],
+        })
+        .await
+        .expect("template stores")
+        .into_inner()
+        .template
+        .expect("template present");
+
+    let rendered = client
+        .render_template(v1::RenderTemplateRequest {
+            user_id: "owner-p15".to_string(),
+            template_id: template.template_id.clone(),
+            idempotency_key: "req-p15".to_string(),
+            values: vec![v1::ParameterBinding {
+                name: "source".to_string(),
+                value: Some(v1::ParameterValue {
+                    value: Some(v1::parameter_value::Value::Uri(object_ref(&input))),
+                }),
+            }],
+            callback: None,
+        })
+        .await
+        .expect("render succeeds")
+        .into_inner();
+    let settled = await_terminal(
+        &mut client,
+        "owner-p15",
+        &rendered.job_id,
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(settled.state(), v1::JobState::Succeeded);
+    let result =
+        mm_domain::OpResult::try_from(settled.result.expect("result recorded")).expect("decodes");
+    assert!(matches!(result, mm_domain::OpResult::Probe(_)));
+    let reread = get_job(&mut client, "owner-p15", &rendered.job_id).await;
+    assert!(reread.result.is_some(), "the result did not read back");
+    drop(daemon);
+    db.dispose().await;
+}

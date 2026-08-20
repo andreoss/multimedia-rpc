@@ -126,6 +126,8 @@ jobs:
         run: nix develop -c cargo test --workspace --no-fail-fast
       - name: Auth conformance
         run: nix develop -c sh scripts/auth-conformance.sh
+      - name: Composition conformance
+        run: nix develop -c sh scripts/composition-conformance.sh
 
   coverage:
     runs-on: ubuntu-latest

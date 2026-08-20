@@ -1,14 +1,14 @@
 use crate::v1;
 use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
-    ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputSource,
-    JobFailure, JobFailureError, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeId,
-    NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, OutputRange, PackageResult, PackageSpec, ParameterDeclaration,
-    ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl, ResizeMode,
-    SourceError, StepOutcome, StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
-    failure_code, verdict_code,
+    ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder,
+    InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, MediaRef,
+    MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec,
+    OpSpecError, OutputProfile, OutputProfileError, OutputRange, PackageResult, PackageSpec,
+    ParameterDeclaration, ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec,
+    QueueUrl, ResizeMode, SourceError, StepOutcome, StepState, Template, TemplateError,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
+    TrimSpec, VideoStreamInfo, failure_code, verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -921,5 +921,21 @@ fn image_format_to_raw(value: Option<ImageFormat>) -> i32 {
         Some(ImageFormat::Jpeg) => v1::ImageFormat::Jpeg as i32,
         Some(ImageFormat::Png) => v1::ImageFormat::Png as i32,
         None => v1::ImageFormat::Unspecified as i32,
+    }
+}
+
+impl From<&InputOrder> for v1::InputSequence {
+    fn from(value: &InputOrder) -> Self {
+        v1::InputSequence {
+            sequence: value.sequence(),
+        }
+    }
+}
+
+impl TryFrom<v1::InputSequence> for InputOrder {
+    type Error = InputOrderError;
+
+    fn try_from(value: v1::InputSequence) -> Result<Self, Self::Error> {
+        InputOrder::new(value.sequence)
     }
 }

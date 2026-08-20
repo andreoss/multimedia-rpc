@@ -10,4 +10,4 @@ pub use description::{DescriptionError, Element, Link, PipelineDescription, Prop
 pub use package::{PackageRequest, ProducedPaths, playlist_name, render_playlist};
 #[cfg(feature = "gst")]
 pub use pipeline::{PackageOutcome, PipelineError, run_package_pipeline};
-pub use segment::{SegmentError, Segmented, split_fragments, top_level_boxes};
+pub use segment::{SegmentError, Segmented, Written, split_fragments, top_level_boxes};

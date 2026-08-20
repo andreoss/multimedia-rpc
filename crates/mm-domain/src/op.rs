@@ -214,6 +214,8 @@ pub enum OpSpecError {
     NonPositiveDuration { value: f64 },
     #[error("thumbnail has no offsets")]
     EmptyOffsets,
+    #[error("segment length {value} is not positive and finite")]
+    InvalidSegmentLength { value: f64 },
     #[error("offset {value} is negative or not finite")]
     InvalidOffset { value: f64 },
     #[error("{dimension} is zero")]
@@ -544,6 +546,34 @@ impl ImageSpec {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct PackageSpec {
+    input: MediaRef,
+    segment_seconds: f64,
+}
+
+impl PackageSpec {
+    pub fn new(input: MediaRef, segment_seconds: f64) -> Result<Self, OpSpecError> {
+        if !segment_seconds.is_finite() || segment_seconds <= 0.0 {
+            return Err(OpSpecError::InvalidSegmentLength {
+                value: segment_seconds,
+            });
+        }
+        Ok(Self {
+            input,
+            segment_seconds,
+        })
+    }
+
+    pub fn input(&self) -> &MediaRef {
+        &self.input
+    }
+
+    pub fn segment_seconds(&self) -> f64 {
+        self.segment_seconds
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum OpSpec {
     Concat(ConcatSpec),
     Probe(ProbeSpec),
@@ -551,6 +581,7 @@ pub enum OpSpec {
     Trim(TrimSpec),
     Thumbnail(ThumbnailSpec),
     Image(ImageSpec),
+    Package(PackageSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -563,6 +594,7 @@ pub enum OpKind {
     Resize,
     Convert,
     Composite,
+    Package,
 }
 
 impl std::fmt::Display for OpKind {
@@ -576,6 +608,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Resize => "resize",
             OpKind::Convert => "convert",
             OpKind::Composite => "composite",
+            OpKind::Package => "package",
         };
         formatter.write_str(name)
     }
@@ -594,8 +627,11 @@ impl OpKind {
             | OpKind::Probe
             | OpKind::Transcode
             | OpKind::Trim
-            | OpKind::Thumbnail => Ok(()),
-            OpKind::Resize | OpKind::Convert | OpKind::Composite => Ok(()),
+            | OpKind::Thumbnail
+            | OpKind::Resize
+            | OpKind::Convert
+            | OpKind::Composite
+            | OpKind::Package => Ok(()),
         }
     }
 }
@@ -609,6 +645,7 @@ impl OpSpec {
             OpSpec::Trim(_) => OpKind::Trim,
             OpSpec::Thumbnail(_) => OpKind::Thumbnail,
             OpSpec::Image(spec) => spec.op.kind(),
+            OpSpec::Package(_) => OpKind::Package,
         }
     }
 }
@@ -748,6 +785,29 @@ impl ImageResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct PackageResult {
+    playlist: MediaRef,
+    segments: Vec<MediaRef>,
+}
+
+impl PackageResult {
+    pub fn new(playlist: MediaRef, segments: Vec<MediaRef>) -> Result<Self, OpResultError> {
+        if segments.is_empty() {
+            return Err(OpResultError::EmptyOutputs);
+        }
+        Ok(Self { playlist, segments })
+    }
+
+    pub fn playlist(&self) -> &MediaRef {
+        &self.playlist
+    }
+
+    pub fn segments(&self) -> &[MediaRef] {
+        &self.segments
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum OpResult {
     Concat(TimedOutput),
     Probe(ProbeResult),
@@ -755,4 +815,5 @@ pub enum OpResult {
     Trim(TimedOutput),
     Thumbnail(ThumbnailResult),
     Image(ImageResult),
+    Package(PackageResult),
 }

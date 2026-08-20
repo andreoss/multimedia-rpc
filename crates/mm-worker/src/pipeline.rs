@@ -8,14 +8,20 @@ use bytes::Bytes;
 use mm_domain::{
     ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputReport,
     JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef, ObjectBody, ObjectRef,
-    ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, ProbeResult, ProbeSpec,
-    ProgressPercent, ResizeMode as DomainResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
+    ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult, PackageSpec,
+    ProbeResult, ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode, ThumbnailResult,
+    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, WorkerId,
+    resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, StillInfo, ThumbnailTarget,
     TranscodeTarget, TrimStrategy, TrimTarget, build_concat_args, build_thumbnail_args,
     build_transcode_args, build_trim_args,
+};
+use mm_gst::Written as GstWritten;
+use mm_gst::{
+    Element as GstElement, Link as GstLink, PackageOutcome as GstOutcome,
+    PackageRequest as GstRequest, PipelineDescription as GstDescription, Property as GstProperty,
 };
 use mm_magick::{
     ImageFormat as ToolImageFormat, ResizeMode as ToolResizeMode, ToolError as ImageToolError,
@@ -43,11 +49,15 @@ pub mod codes {
     pub const OUTPUT_UPLOAD_FAILED: &str = "output_upload_failed";
     pub const IMAGE_LAUNCH_FAILED: &str = "image_launch_failed";
     pub const IMAGE_FAILED: &str = "image_failed";
+    pub const PACKAGE_LAUNCH_FAILED: &str = "package_launch_failed";
+    pub const PACKAGE_FAILED: &str = "package_failed";
 }
 
 const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const THUMBNAIL_RUN_SECONDS: u32 = 5;
 const IMAGE_RUN_SECONDS: std::time::Duration = std::time::Duration::from_secs(120);
+const PACKAGE_RUN_SECONDS: std::time::Duration = std::time::Duration::from_secs(600);
+const SEGMENT_ESTIMATE_BYTES: u64 = 4 * 1024 * 1024;
 
 enum Finish {
     Cancelled,
@@ -360,7 +370,188 @@ async fn pipeline(
         OpSpec::Trim(spec) => trim_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Thumbnail(spec) => thumbnail_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Image(spec) => image_pipeline(ctx, job, spec, deadline_at, signal).await,
+        OpSpec::Package(spec) => package_pipeline(ctx, job, spec, deadline_at, signal).await,
     }
+}
+
+async fn package_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &PackageSpec,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_input(ctx, &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Package, &[input_report(&info)])?;
+
+    let segments_expected = (info.duration.as_secs_f64() / spec.segment_seconds())
+        .ceil()
+        .max(1.0) as u64;
+    let inputs = [spec.input().clone()];
+    let infos = [info];
+    let estimate =
+        estimate_bytes(ctx, &inputs, &infos).await + segments_expected * SEGMENT_ESTIMATE_BYTES;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+    let _ = remaining_limits(ctx, PACKAGE_RUN_SECONDS, deadline_at)?;
+
+    let staging = ctx.staging_dir.join(job.id.to_string());
+    std::fs::create_dir_all(&staging).map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+    let request = GstRequest::new(
+        url.clone(),
+        staging.clone(),
+        staging.join("stream"),
+        spec.segment_seconds(),
+    );
+    let description = packaging_description(&request);
+    let seconds = spec.segment_seconds();
+
+    check(signal)?;
+    let produced = tokio::task::spawn_blocking(move || {
+        mm_gst::run_package_pipeline(&description, &request, PACKAGE_RUN_SECONDS)
+    })
+    .await
+    .map_err(|error| failed(codes::PACKAGE_LAUNCH_FAILED, error))
+    .and_then(|outcome| outcome.map_err(|error| failed(codes::PACKAGE_FAILED, error)))?;
+
+    let uploaded = upload_package(ctx, job.id, &produced, seconds).await;
+    let _ = std::fs::remove_dir_all(&staging);
+    uploaded
+}
+
+fn packaging_description(request: &GstRequest) -> GstDescription {
+    GstDescription::new(
+        vec![
+            GstElement::new("filesrc", "source"),
+            GstElement::new("qtdemux", "demux"),
+            GstElement::new("mp4mux", "mux")
+                .with("streamable", GstProperty::Flag(true))
+                .milliseconds("fragment-duration", request.fragment_milliseconds()),
+            GstElement::new("filesink", "sink").text("location", request.stream_location()),
+        ],
+        vec![
+            GstLink::direct("source", "demux"),
+            GstLink::direct("demux", "mux"),
+            GstLink::direct("mux", "sink"),
+        ],
+    )
+    .expect("the packaging description is valid")
+}
+
+async fn upload_package(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    produced: &GstOutcome,
+    segment_seconds: f64,
+) -> Result<OpResult, Finish> {
+    let bytes = tokio::fs::read(&produced.stream)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let segmented =
+        mm_gst::split_fragments(&bytes).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    if segmented.segments.is_empty() {
+        return Err(failed(
+            codes::OUTPUT_INVALID,
+            "the packaging produced no segment",
+        ));
+    }
+
+    let dir = produced
+        .stream
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let written = segmented
+        .write_to(&dir)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let playlist = mm_gst::render_playlist(Some("init.mp4"), segment_seconds, &segmented.names(0));
+    let playlist_path = dir.join(mm_gst::playlist_name());
+    std::fs::write(&playlist_path, playlist)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+
+    let mut landed = Landed {
+        store: ctx.store.as_ref(),
+        keys: Vec::new(),
+    };
+    let outcome = upload_set(ctx, id, &written, &playlist_path, &mut landed).await;
+    let staged: Vec<PathBuf> = std::iter::once(written.init.clone())
+        .chain(written.segments.iter().cloned())
+        .chain(std::iter::once(playlist_path.clone()))
+        .collect();
+    for path in staged {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    match outcome {
+        Ok(result) => Ok(result),
+        Err(finish) => {
+            landed.discard().await;
+            Err(finish)
+        }
+    }
+}
+
+async fn upload_set(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    written: &GstWritten,
+    playlist_path: &Path,
+    landed: &mut Landed<'_>,
+) -> Result<OpResult, Finish> {
+    let init = artifact_object_named(ctx, id, "init.mp4").await?;
+    let playlist = artifact_object_named(ctx, id, mm_gst::playlist_name()).await?;
+    let mut segments = Vec::with_capacity(written.segments.len());
+    let mut paths: Vec<PathBuf> = vec![written.init.clone(), playlist_path.to_path_buf()];
+    paths.extend(written.segments.iter().cloned());
+    let mut keys = Vec::with_capacity(paths.len());
+    keys.push(init.clone());
+    keys.push(playlist.clone());
+    for path in &written.segments {
+        keys.push(artifact_object_named(ctx, id, &segment_name(path)).await?);
+    }
+    for (index, path) in paths.iter().enumerate() {
+        let key = keys[index].clone();
+        upload_object(ctx, &key, path).await?;
+        landed.record(key.clone());
+        if key.key() != playlist.key() {
+            segments.push(MediaRef::Object(key));
+        }
+    }
+    let result = PackageResult::new(MediaRef::Object(playlist), segments)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    Ok(OpResult::Package(result))
+}
+
+fn segment_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "segment.m4s".to_string())
+}
+
+async fn artifact_object_named(
+    ctx: &WorkerConfig,
+    id: JobId,
+    artifact: &str,
+) -> Result<ObjectRef, Finish> {
+    OutputKey::new(&id, artifact)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+        .into_object(&ctx.bucket)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))
+}
+
+async fn upload_object(
+    ctx: &Arc<WorkerConfig>,
+    object: &ObjectRef,
+    path: &Path,
+) -> Result<(), Finish> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.store
+        .put_multipart(object, file_body(file))
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))
 }
 
 async fn image_pipeline(

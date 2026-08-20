@@ -8,6 +8,7 @@ rust-version.workspace = true
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 mm-magick = { path = "../mm-magick" }
+mm-gst = { path = "../mm-gst", features = ["gst"] }
 mm-proto = { path = "../mm-proto" }
 base64.workspace = true
 bytes.workspace = true

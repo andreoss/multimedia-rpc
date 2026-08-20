@@ -89,6 +89,17 @@ pub struct PipelineDescription {
     links: Vec<Link>,
 }
 
+impl Link {
+    pub fn direct(from: &str, to: &str) -> Self {
+        Link::Direct {
+            from: from.to_string(),
+            from_pad: None,
+            to: to.to_string(),
+            to_pad: None,
+        }
+    }
+}
+
 impl PipelineDescription {
     pub fn new(elements: Vec<Element>, links: Vec<Link>) -> Result<Self, DescriptionError> {
         if elements.is_empty() {
@@ -212,7 +223,11 @@ fn endpoints(link: &Link) -> Vec<String> {
 fn render(element: &Element) -> String {
     let mut parts = vec![format!("{} name={}", element.factory, element.name)];
     for (key, value) in &element.properties {
-        parts.push(format!("{key}={}", value.text()));
+        parts.push(format!("{key}={}", escape(&value.text())));
     }
     parts.join(" ")
+}
+
+fn escape(value: &str) -> String {
+    value.replace('\\', "\\\\")
 }

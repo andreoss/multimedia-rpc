@@ -278,6 +278,14 @@ impl OpKind {
                 video_codecs: &SUPPORTED_IMAGE_CODECS,
                 audio_codecs: &[],
             }),
+            OpKind::Package => Some(InputPolicy {
+                min_inputs: 1,
+                cross_input_checks: false,
+                kinds: VIDEO_KINDS,
+                containers: &SUPPORTED_CONTAINERS,
+                video_codecs: &SUPPORTED_VIDEO_CODECS,
+                audio_codecs: &SUPPORTED_AUDIO_CODECS,
+            }),
             OpKind::Probe => None,
         }
     }

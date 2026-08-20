@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use mm_domain::{
     CallbackError, CallbackPublisher, ConcatSpec, ImageFormat, ImageOp, ImageSpec, JobId,
     JobRecord, JobRepository, JobState, MediaRef, NewJob, ObjectBody, ObjectRef, ObjectStore,
-    ObjectStoreError, OpResult, OpSpec, OutputProfile, ProbeSpec, QueueUrl, RequestId, ResizeMode,
-    ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
+    ResizeMode, ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -688,6 +688,48 @@ async fn a_thumbnail_set_over_the_disk_budget_is_released_until_it_fits() {
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
     db.dispose().await;
+}
+
+fn keyed_fixture(name: &str, seconds: u32) -> PathBuf {
+    let dir = scratch_dir("fixtures");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    if path.is_file() && path.metadata().map(|meta| meta.len()).unwrap_or(0) > 0 {
+        return path;
+    }
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(format!("testsrc2=duration={seconds}:size=640x360:rate=30"))
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(format!(
+            "sine=frequency=440:sample_rate=44100:duration={seconds}"
+        ))
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-g")
+        .arg("30")
+        .arg("-keyint_min")
+        .arg("30")
+        .arg("-sc_threshold")
+        .arg("0")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg(&path)
+        .output()
+        .expect("the media tool must be runnable to generate fixtures");
+    assert!(output.status.success(), "fixture generation failed: {name}");
+    path
 }
 
 fn image_fixture(name: &str, width: u32, height: u32, colour: &str) -> PathBuf {
@@ -1793,5 +1835,59 @@ async fn a_deadline_reaped_job_still_delivers_one_callback() {
     assert_eq!(outcome.state, mm_proto::v1::JobState::Failed as i32);
     assert_eq!(outcome.error_code, codes::TIMEOUT);
     publisher.delete_queue(&queue).await.expect("queue removed");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_package_job_lands_a_playlist_and_its_segments() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = keyed_fixture("package-source.mp4", 4);
+    let input = upload_input(&store, &source, "inputs/package-source.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Package(
+            PackageSpec::new(input, 1.0).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-package"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Package(result) = record.result.expect("result recorded") else {
+        panic!("expected a package result");
+    };
+    assert!(
+        result.segments().len() >= 2,
+        "segments: {:?}",
+        result.segments()
+    );
+    let MediaRef::Object(playlist) = result.playlist() else {
+        panic!("expected an object playlist");
+    };
+    assert_eq!(playlist.key(), format!("jobs/{}/playlist.m3u8", job.id));
+    let playlist_body = store.get(playlist).await.expect("playlist fetches");
+    let playlist_text = String::from_utf8(collect_body(playlist_body).await.unwrap()).unwrap();
+    assert!(playlist_text.starts_with("#EXTM3U"), "{playlist_text}");
+    assert!(playlist_text.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+    assert!(playlist_text.contains("#EXTINF:1.000,"));
+    assert!(playlist_text.trim_end().ends_with("#EXT-X-ENDLIST"));
+
+    let init = ObjectRef::new(BUCKET, &format!("jobs/{}/init.mp4", job.id)).unwrap();
+    assert!(store.head(&init).await.expect("init exists") > 0);
+    for (index, segment) in result.segments().iter().enumerate() {
+        let MediaRef::Object(object) = segment else {
+            panic!("expected an object segment");
+        };
+        assert_eq!(object.key(), format!("jobs/{}/seg{index:05}.m4s", job.id));
+        assert!(store.head(object).await.expect("segment exists") > 0);
+    }
+    let staging = scratch_dir("staging").join(job.id.to_string());
+    assert!(!staging.exists(), "staging survived: {staging:?}");
     db.dispose().await;
 }

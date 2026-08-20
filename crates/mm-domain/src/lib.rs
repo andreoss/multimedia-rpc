@@ -20,8 +20,9 @@ pub use jobs::{
 pub use op::{
     ConcatSpec, HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError,
     ObjectRef, OpKind, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedOp,
+    OutputProfileError, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    UnsupportedOp,
 };
 pub use resolve::{ResolveError, resolve_media_ref};
 

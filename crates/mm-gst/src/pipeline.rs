@@ -15,14 +15,12 @@ pub enum PipelineError {
     Init(String),
     #[error("the pipeline description was refused: {0}")]
     Description(String),
-    #[error("the pipeline could not start: {0}")]
-    State(String),
     #[error("the pipeline carried no bus")]
     NoBus,
     #[error("the pipeline reported: {0}")]
     Bus(String),
-    #[error("the pipeline did not finish inside {0:?}")]
-    Deadline(Duration),
+    #[error("the pipeline did not finish inside {0:?}; last bus message: {1}")]
+    Deadline(Duration, String),
     #[error("the pipeline produced no stream at {0}")]
     NoStream(PathBuf),
 }
@@ -45,10 +43,9 @@ pub fn run_package_pipeline(
     pipeline
         .add(&parsed)
         .map_err(|error| PipelineError::Description(error.to_string()))?;
+    bind_input(&parsed, &request.input);
 
-    pipeline
-        .set_state(State::Playing)
-        .map_err(|error| PipelineError::State(error.to_string()))?;
+    let _ = pipeline.set_state(State::Playing);
     let outcome = wait_for_eos(&pipeline, deadline);
     let _ = pipeline.set_state(State::Null);
     outcome?;
@@ -63,9 +60,10 @@ pub fn run_package_pipeline(
 fn wait_for_eos(pipeline: &Pipeline, deadline: Duration) -> Result<(), PipelineError> {
     let bus = pipeline.bus().ok_or(PipelineError::NoBus)?;
     let started = std::time::Instant::now();
+    let mut last: Option<String> = None;
     loop {
         if started.elapsed() > deadline {
-            return Err(PipelineError::Deadline(deadline));
+            return Err(PipelineError::Deadline(deadline, last.unwrap_or_default()));
         }
         match next_message(&bus) {
             Some(message) => match message.view() {
@@ -73,7 +71,7 @@ fn wait_for_eos(pipeline: &Pipeline, deadline: Duration) -> Result<(), PipelineE
                 MessageView::Error(error) => {
                     return Err(PipelineError::Bus(error.error().to_string()));
                 }
-                _ => {}
+                other => last = Some(format!("{other:?}")),
             },
             None => std::thread::sleep(BUS_POLL),
         }
@@ -82,4 +80,10 @@ fn wait_for_eos(pipeline: &Pipeline, deadline: Duration) -> Result<(), PipelineE
 
 fn next_message(bus: &Bus) -> Option<RawBusMessage> {
     bus.timed_pop(ClockTime::from_nseconds(BUS_POLL.as_nanos() as u64))
+}
+
+fn bind_input(bin: &gstreamer::Bin, input: &str) {
+    if let Some(source) = bin.by_name("source") {
+        source.set_property("location", input);
+    }
 }

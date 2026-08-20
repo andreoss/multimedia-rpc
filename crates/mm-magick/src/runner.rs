@@ -111,7 +111,7 @@ impl Tool {
         };
         let bounded_err = async {
             let mut buffer = Vec::new();
-            let mut reader = (&mut stderr).take(MAX_OUTPUT_BYTES as u64);
+            let mut reader = (&mut stderr).take(MAX_OUTPUT_BYTES);
             reader.read_to_end(&mut buffer).await.map(|_| buffer)
         };
 

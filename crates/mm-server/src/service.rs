@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use mm_domain::{
     JobEventNotifications, JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
-    OpSpec, ProgressPercent, RequestId, UserId,
+    OpSpec, ProgressPercent, QueueUrl, RequestId, UserId,
 };
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
@@ -191,6 +191,16 @@ fn parse_spec(value: Option<v1::OpSpec>) -> Result<OpSpec, Status> {
         .map_err(|error| Status::invalid_argument(format!("spec is invalid: {error}")))
 }
 
+fn parse_callback(value: Option<v1::Callback>) -> Result<Option<QueueUrl>, Status> {
+    value
+        .map(|callback| {
+            QueueUrl::new(&callback.queue_url).map_err(|error| {
+                Status::invalid_argument(format!("callback queue_url is invalid: {error}"))
+            })
+        })
+        .transpose()
+}
+
 fn parse_job_id(value: &str) -> Result<JobId, Status> {
     JobId::from_str(value)
         .map_err(|error| Status::invalid_argument(format!("job_id is invalid: {error}")))
@@ -257,7 +267,9 @@ fn job_to_proto(record: &JobRecord) -> v1::Job {
         result: record.result.as_ref().map(v1::OpResult::from),
         file_errors: Vec::new(),
         progress_percent: u32::from(record.progress.value()),
-        callback: None,
+        callback: record.callback.as_ref().map(|queue| v1::Callback {
+            queue_url: queue.as_str().to_string(),
+        }),
     }
 }
 
@@ -271,7 +283,11 @@ impl MediaJobService for MediaJobs {
         let owner = parse_user(&message.user_id)?;
         let request_id = parse_request_id(&message.idempotency_key)?;
         let spec = parse_spec(message.spec)?;
-        let job = NewJob::new(JobId::generate(), owner.clone(), request_id, spec, None);
+        let callback = parse_callback(message.callback)?;
+        let mut job = NewJob::new(JobId::generate(), owner.clone(), request_id, spec, None);
+        if let Some(queue) = callback {
+            job = job.with_callback(queue);
+        }
         match self.repository.create(job).await {
             Ok(record) => Ok(Response::new(v1::CreateJobResponse {
                 job_id: record.id.to_string(),

@@ -471,6 +471,56 @@ fn concat_result() -> mm_domain::OpResult {
 }
 
 #[tokio::test]
+async fn a_callback_is_persisted_and_echoed_on_reads() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut request = create_request("owner-1", "req-callback-echo");
+    request.callback = Some(v1::Callback {
+        queue_url: "http://127.0.0.1:9324/queue/results".to_string(),
+    });
+    let created = client
+        .create_job(request)
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let fetched = client
+        .get_job(v1::GetJobRequest {
+            user_id: "owner-1".to_string(),
+            job_id: created.job_id,
+        })
+        .await
+        .expect("get succeeds")
+        .into_inner()
+        .job
+        .expect("job present");
+    assert_eq!(
+        fetched.callback,
+        Some(v1::Callback {
+            queue_url: "http://127.0.0.1:9324/queue/results".to_string(),
+        })
+    );
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_malformed_callback_queue_url_is_rejected() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut request = create_request("owner-1", "req-callback-bad");
+    request.callback = Some(v1::Callback {
+        queue_url: "not-a-queue".to_string(),
+    });
+    let status = client
+        .create_job(request)
+        .await
+        .expect_err("malformed callback rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
 async fn watching_a_foreign_job_answers_not_found_before_streaming() {
     let (db, handle) = healthy_server().await;
     let mut client = job_client(&handle).await;

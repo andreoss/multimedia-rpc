@@ -5,3 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

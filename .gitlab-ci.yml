@@ -21,17 +21,43 @@ fmt:
 
 clippy:
   stage: lint
+  before_script:
+    - apt-get update && apt-get install -y protobuf-compiler
   script:
     - rustup component add clippy
     - cargo clippy --workspace --all-targets -- -D warnings
 
+proto-lint:
+  stage: lint
+  image:
+    name: bufbuild/buf:1.72.0
+    entrypoint: [""]
+  cache: []
+  script:
+    - buf lint
+
+proto-breaking:
+  stage: lint
+  image:
+    name: bufbuild/buf:1.72.0
+    entrypoint: [""]
+  cache: []
+  script:
+    - buf breaking --against "$CI_REPOSITORY_URL#branch=$CI_DEFAULT_BRANCH"
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+
 test:
   stage: test
+  before_script:
+    - apt-get update && apt-get install -y protobuf-compiler
   script:
     - cargo test --workspace
 
 coverage:
   stage: test
+  before_script:
+    - apt-get update && apt-get install -y protobuf-compiler
   script:
     - rustup component add llvm-tools-preview
     - cargo install cargo-llvm-cov --locked

@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package mmrpc.v1;
+
+import "mmrpc/v1/media.proto";
+
+message ConcatSpec {
+  repeated MediaRef inputs = 1;
+  OutputProfile profile = 2;
+}
+
+message ProbeSpec {
+  MediaRef input = 1;
+}
+
+message TranscodeSpec {
+  MediaRef input = 1;
+  OutputProfile profile = 2;
+}
+
+message TrimSpec {
+  MediaRef input = 1;
+  double start_seconds = 2;
+  double duration_seconds = 3;
+}
+
+message ThumbnailSpec {
+  MediaRef input = 1;
+  repeated double offsets_seconds = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+message OpSpec {
+  oneof op {
+    ConcatSpec concat = 1;
+    ProbeSpec probe = 2;
+    TranscodeSpec transcode = 3;
+    TrimSpec trim = 4;
+    ThumbnailSpec thumbnail = 5;
+  }
+}
+
+message ConcatResult {
+  MediaRef output = 1;
+  double duration_seconds = 2;
+}
+
+message ProbeResult {
+  double duration_seconds = 1;
+  uint32 video_streams = 2;
+  uint32 audio_streams = 3;
+  string container = 4;
+}
+
+message TranscodeResult {
+  MediaRef output = 1;
+}
+
+message TrimResult {
+  MediaRef output = 1;
+  double duration_seconds = 2;
+}
+
+message ThumbnailResult {
+  repeated MediaRef outputs = 1;
+}
+
+message OpResult {
+  oneof op {
+    ConcatResult concat = 1;
+    ProbeResult probe = 2;
+    TranscodeResult transcode = 3;
+    TrimResult trim = 4;
+    ThumbnailResult thumbnail = 5;
+  }
+}

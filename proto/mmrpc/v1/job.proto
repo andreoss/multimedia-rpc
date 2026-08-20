@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package mmrpc.v1;
+
+import "mmrpc/v1/media.proto";
+import "mmrpc/v1/ops.proto";
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_PENDING = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_SUCCEEDED = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_CANCELLED = 5;
+}
+
+message Job {
+  string job_id = 1;
+  string user_id = 2;
+  string request_id = 3;
+  JobState state = 4;
+  OpSpec spec = 5;
+  OpResult result = 6;
+  repeated FileError file_errors = 7;
+  uint32 progress_percent = 8;
+  Callback callback = 9;
+}
+
+message JobEvent {
+  oneof kind {
+    JobState state = 1;
+    uint32 progress_percent = 2;
+  }
+}

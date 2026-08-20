@@ -13,9 +13,9 @@ use mm_domain::{
     InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
     MediaRef, NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind,
     OpResult, OpSpec, OutputKey, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
-    ProgressPercent, ResizeMode as DomainResizeMode, StepOutcome, StepState, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, VideoStreamInfo,
-    WorkerId, resolve_media_ref, validate_inputs,
+    ProgressPercent, RenditionResult, ResizeMode as DomainResizeMode, StepOutcome, StepState,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    VideoStreamInfo, WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -662,6 +662,12 @@ async fn run_leaf(
                 "a graph is not executed yet",
             ));
         }
+        OpSpec::Ladder(_) => {
+            return Err(failed(
+                codes::UNSUPPORTED_OPERATION,
+                "a ladder is not executed yet",
+            ));
+        }
     };
     scope.done.fetch_add(1, Ordering::Relaxed);
     Ok(result)
@@ -754,6 +760,18 @@ fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
                 }
             }
         }
+        OpResult::Ladder(ladder) => {
+            if let Some(master) = ladder.master_playlist() {
+                push(master);
+            }
+            for rendition in ladder.renditions() {
+                push(rendition.media());
+                if let Some(playlist) = rendition.playlist() {
+                    push(playlist);
+                }
+                rendition.segments().iter().for_each(&mut push);
+            }
+        }
         OpResult::Probe(_) | OpResult::Batch(_) => {}
     }
 }
@@ -795,6 +813,7 @@ fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
                 package.segments().get(index - 1)
             }
         }
+        OpResult::Ladder(ladder) => ladder.renditions().get(index).map(RenditionResult::media),
         OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
     }
 }

@@ -1183,6 +1183,7 @@ pub enum OpSpec {
     Package(PackageSpec),
     Batch(BatchSpec),
     Graph(GraphSpec),
+    Ladder(LadderSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1198,6 +1199,7 @@ pub enum OpKind {
     Package,
     Batch,
     Graph,
+    Ladder,
 }
 
 impl std::fmt::Display for OpKind {
@@ -1214,6 +1216,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Package => "package",
             OpKind::Batch => "batch",
             OpKind::Graph => "graph",
+            OpKind::Ladder => "ladder",
         };
         formatter.write_str(name)
     }
@@ -1245,6 +1248,7 @@ impl OpKind {
             | OpKind::Package
             | OpKind::Batch
             | OpKind::Graph => Ok(()),
+            OpKind::Ladder => Err(UnsupportedOp { kind: self }),
         }
     }
 }
@@ -1261,6 +1265,7 @@ impl OpSpec {
             OpSpec::Package(_) => OpKind::Package,
             OpSpec::Batch(_) => OpKind::Batch,
             OpSpec::Graph(_) => OpKind::Graph,
+            OpSpec::Ladder(_) => OpKind::Ladder,
         }
     }
 
@@ -1279,6 +1284,7 @@ impl OpSpec {
                 .iter()
                 .flat_map(|node| node.spec().inputs())
                 .collect(),
+            OpSpec::Ladder(ladder) => vec![ladder.input()],
         }
     }
 
@@ -1318,6 +1324,8 @@ pub enum OpResultError {
     JobFailure(#[from] JobFailureError),
     #[error(transparent)]
     MediaRef(#[from] MediaRefError),
+    #[error(transparent)]
+    Profile(#[from] OutputProfileError),
 }
 
 fn parse_duration(value: f64) -> Result<f64, OpResultError> {
@@ -1679,6 +1687,7 @@ pub enum OpResult {
     Package(PackageResult),
     Batch(BatchResult),
     Graph(GraphResult),
+    Ladder(LadderResult),
 }
 
 impl OpResult {
@@ -1690,6 +1699,9 @@ impl OpResult {
             OpResult::Thumbnail(result) => result.outputs().first(),
             OpResult::Image(result) => result.outputs().first(),
             OpResult::Package(result) => Some(result.playlist()),
+            OpResult::Ladder(result) => result
+                .master_playlist()
+                .or_else(|| result.renditions().first().map(RenditionResult::media)),
             OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
         }
     }
@@ -1697,6 +1709,10 @@ impl OpResult {
     pub fn merged_duration_ms(&self) -> Option<i64> {
         match self {
             OpResult::Concat(timed) => Some(millis(timed.duration_seconds())),
+            OpResult::Ladder(result) => result
+                .renditions()
+                .first()
+                .map(|rendition| millis(rendition.duration_seconds())),
             _ => None,
         }
     }

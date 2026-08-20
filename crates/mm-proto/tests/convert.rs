@@ -1,10 +1,11 @@
 use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
-    ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, JobFailure, MediaRef, MediaRefError,
-    MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError,
-    OutputProfile, OutputRange, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ResizeMode,
-    SourceError, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
+    ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, JobFailure, LadderResult,
+    LadderSpec, MediaRef, MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult,
+    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputRange, PackageResult, PackageSpec,
+    ProbeResult, ProbeSpec, RenditionResult, ResizeMode, SourceError, StepOutcome, StepState,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
+    TrimSpec, VideoStreamInfo,
 };
 use mm_proto::v1;
 use proptest::prelude::*;
@@ -78,6 +79,34 @@ fn profile_strategy() -> impl Strategy<Value = OutputProfile> {
         )
 }
 
+fn ladder_rungs_strategy() -> impl Strategy<Value = Vec<OutputProfile>> {
+    prop::collection::vec((1u32..3, 1u32..3, 100_000u32..1_000_000), 2..=4).prop_map(|rungs| {
+        let mut width = 320u32;
+        let mut height = 180u32;
+        let mut video = 100_000u32;
+        let mut built = Vec::with_capacity(rungs.len());
+        for (grow_w, grow_h, bitrate) in rungs {
+            width *= 2 * grow_w;
+            height *= 2 * grow_h;
+            video *= 2 * bitrate / bitrate.max(1);
+            built.push(
+                OutputProfile::from_raw(24.0, video * 2, 23, 96_000, 48_000, width, height)
+                    .unwrap(),
+            );
+        }
+        built
+    })
+}
+
+fn ladder_spec(input: MediaRef, rungs: Vec<OutputProfile>, segment_seconds: Option<f64>) -> OpSpec {
+    let spec = LadderSpec::new(InputSource::from(input), rungs).unwrap();
+    let spec = match segment_seconds {
+        Some(seconds) => spec.with_segment_seconds(seconds).unwrap(),
+        None => spec,
+    };
+    OpSpec::Ladder(spec)
+}
+
 fn op_spec_strategy() -> impl Strategy<Value = OpSpec> {
     prop_oneof![
         (
@@ -111,6 +140,14 @@ fn op_spec_strategy() -> impl Strategy<Value = OpSpec> {
                     ThumbnailSpec::new(InputSource::from(input), offsets, width, height).unwrap(),
                 )
             }),
+        (
+            media_ref_strategy(),
+            ladder_rungs_strategy(),
+            prop::option::of(0.5f64..12.0)
+        )
+            .prop_map(|(input, rungs, segment_seconds)| {
+                ladder_spec(input, rungs, segment_seconds)
+            }),
     ]
 }
 
@@ -130,6 +167,25 @@ fn op_result_strategy() -> impl Strategy<Value = OpResult> {
         }),
         prop::collection::vec(media_ref_strategy(), 1..4)
             .prop_map(|outputs| OpResult::Thumbnail(ThumbnailResult::new(outputs).unwrap())),
+        (
+            ladder_rungs_strategy(),
+            prop::collection::vec(media_ref_strategy(), 2..4),
+            prop::option::of(media_ref_strategy()),
+            0.0f64..7200.0,
+        )
+            .prop_map(|(rungs, media, master, duration)| {
+                let renditions = rungs
+                    .iter()
+                    .zip(media)
+                    .enumerate()
+                    .map(|(index, (profile, media))| {
+                        RenditionResult::new(*profile, media, None, Vec::new(), duration)
+                            .unwrap()
+                            .with_measurement(640 * (index as u32 + 1), 360, 800_000)
+                    })
+                    .collect();
+                OpResult::Ladder(LadderResult::new(master, renditions).unwrap())
+            }),
     ]
 }
 
@@ -838,4 +894,130 @@ fn a_profile_with_a_poster_and_a_range_round_trips() {
         v1::OutputProfile::from(&decoded),
         v1::OutputProfile::from(&profile)
     );
+}
+
+fn ladder_input() -> MediaRef {
+    MediaRef::object_uri("s3://bucket/in.mp4").unwrap()
+}
+
+fn ladder_rungs() -> Vec<OutputProfile> {
+    vec![
+        OutputProfile::from_raw(24.0, 800_000, 23, 96_000, 48_000, 640, 360).unwrap(),
+        OutputProfile::from_raw(24.0, 2_500_000, 23, 96_000, 48_000, 1280, 720).unwrap(),
+    ]
+}
+
+#[test]
+fn a_ladder_spec_round_trips_without_packaging() {
+    let spec =
+        OpSpec::Ladder(LadderSpec::new(InputSource::from(ladder_input()), ladder_rungs()).unwrap());
+    let wire = v1::OpSpec::from(&spec);
+    assert!(matches!(wire.op, Some(v1::op_spec::Op::Ladder(_))));
+    assert_eq!(OpSpec::try_from(wire).unwrap(), spec);
+}
+
+#[test]
+fn a_ladder_spec_round_trips_with_packaging_and_a_poster() {
+    let ladder = LadderSpec::new(InputSource::from(ladder_input()), ladder_rungs())
+        .unwrap()
+        .with_segment_seconds(6.0)
+        .unwrap()
+        .with_poster(2.5)
+        .unwrap();
+    let spec = OpSpec::Ladder(ladder);
+    let wire = v1::OpSpec::from(&spec);
+    let OpSpec::Ladder(decoded) = OpSpec::try_from(wire).unwrap() else {
+        panic!("expected a ladder");
+    };
+    assert_eq!(decoded.segment_seconds(), Some(6.0));
+    assert_eq!(decoded.poster_seconds(), Some(2.5));
+    assert_eq!(spec, OpSpec::Ladder(decoded));
+}
+
+#[test]
+fn an_unset_ladder_segment_length_arrives_absent_rather_than_zero() {
+    let spec =
+        OpSpec::Ladder(LadderSpec::new(InputSource::from(ladder_input()), ladder_rungs()).unwrap());
+    let wire = v1::OpSpec::from(&spec);
+    let v1::op_spec::Op::Ladder(ladder) = wire.op.unwrap() else {
+        panic!("expected a ladder");
+    };
+    assert_eq!(ladder.segment_seconds, None);
+    assert_eq!(ladder.poster_seconds, None);
+}
+
+#[test]
+fn a_ladder_spec_with_one_rung_is_rejected() {
+    let wire = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Ladder(v1::LadderSpec {
+            input: Some(media_source(&ladder_input())),
+            rungs: vec![v1::OutputProfile::from(&ladder_rungs()[0])],
+            segment_seconds: None,
+            poster_seconds: None,
+        })),
+    };
+    assert!(matches!(
+        OpSpec::try_from(wire).unwrap_err(),
+        OpSpecError::EmptyLadder { count: 1 }
+    ));
+}
+
+#[test]
+fn a_ladder_result_round_trips_with_its_master_playlist() {
+    let renditions = vec![
+        RenditionResult::new(
+            ladder_rungs()[0],
+            MediaRef::object_uri("s3://bucket/renditions/0/output.mp4").unwrap(),
+            Some(MediaRef::object_uri("s3://bucket/renditions/0/playlist.m3u8").unwrap()),
+            vec![
+                MediaRef::object_uri("s3://bucket/renditions/0/seg00000.m4s").unwrap(),
+                MediaRef::object_uri("s3://bucket/renditions/0/seg00001.m4s").unwrap(),
+            ],
+            12.5,
+        )
+        .unwrap()
+        .with_measurement(640, 360, 896_000),
+        RenditionResult::new(
+            ladder_rungs()[1],
+            MediaRef::object_uri("s3://bucket/renditions/1/output.mp4").unwrap(),
+            None,
+            Vec::new(),
+            12.5,
+        )
+        .unwrap()
+        .with_measurement(1280, 720, 2_596_000),
+    ];
+    let result = OpResult::Ladder(
+        LadderResult::new(
+            Some(MediaRef::object_uri("s3://bucket/master.m3u8").unwrap()),
+            renditions,
+        )
+        .unwrap(),
+    );
+    let wire = v1::OpResult::from(&result);
+    assert_eq!(OpResult::try_from(wire.clone()).unwrap(), result);
+    assert_eq!(
+        v1::OpResult::from(&OpResult::try_from(wire).unwrap()),
+        v1::OpResult::from(&result)
+    );
+}
+
+#[test]
+fn a_ladder_result_publishes_the_master_playlist_as_its_output() {
+    let renditions = vec![
+        RenditionResult::new(ladder_rungs()[0], ladder_input(), None, Vec::new(), 1.0).unwrap(),
+    ];
+    let master = MediaRef::object_uri("s3://bucket/master.m3u8").unwrap();
+    let result = OpResult::Ladder(LadderResult::new(Some(master.clone()), renditions).unwrap());
+    assert_eq!(result.primary_output(), Some(&master));
+}
+
+#[test]
+fn a_ladder_result_without_a_master_playlist_publishes_its_first_rendition() {
+    let media = MediaRef::object_uri("s3://bucket/renditions/0/output.mp4").unwrap();
+    let renditions = vec![
+        RenditionResult::new(ladder_rungs()[0], media.clone(), None, Vec::new(), 1.0).unwrap(),
+    ];
+    let result = OpResult::Ladder(LadderResult::new(None, renditions).unwrap());
+    assert_eq!(result.primary_output(), Some(&media));
 }

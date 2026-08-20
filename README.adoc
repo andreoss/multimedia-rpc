@@ -24,7 +24,8 @@ shape over the same store: `CreateJob`, `GetJob`, `CancelJob`,
 profile on every job.
 
 Operations (`OpSpec` oneof): `probe` inspect, `transcode`, `trim`,
-`thumbnail`, `concat`, `image` resize/convert/composite, `package` HLS.
+`thumbnail`, `concat`, `image` resize/convert/composite, `package` HLS,
+`ladder` ordered renditions and a master playlist.
 Results are object-storage keys; no media bytes cross the API.
 
 == Example

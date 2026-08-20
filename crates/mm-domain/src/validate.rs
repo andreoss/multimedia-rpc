@@ -290,14 +290,16 @@ impl OpKind {
                 video_codecs: &SUPPORTED_VIDEO_CODECS,
                 audio_codecs: &SUPPORTED_AUDIO_CODECS,
             }),
-            OpKind::Transcode | OpKind::Trim | OpKind::Thumbnail => Some(InputPolicy {
-                min_inputs: 1,
-                cross_input_checks: false,
-                kinds: VIDEO_KINDS,
-                containers: &SUPPORTED_CONTAINERS,
-                video_codecs: &SUPPORTED_VIDEO_CODECS,
-                audio_codecs: &SUPPORTED_AUDIO_CODECS,
-            }),
+            OpKind::Transcode | OpKind::Trim | OpKind::Thumbnail | OpKind::Ladder => {
+                Some(InputPolicy {
+                    min_inputs: 1,
+                    cross_input_checks: false,
+                    kinds: VIDEO_KINDS,
+                    containers: &SUPPORTED_CONTAINERS,
+                    video_codecs: &SUPPORTED_VIDEO_CODECS,
+                    audio_codecs: &SUPPORTED_AUDIO_CODECS,
+                })
+            }
             OpKind::Resize | OpKind::Convert => Some(InputPolicy {
                 min_inputs: 1,
                 cross_input_checks: false,

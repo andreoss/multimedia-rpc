@@ -2,13 +2,14 @@ use crate::v1;
 use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
     ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder,
-    InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, MediaRef,
-    MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec,
-    OpSpecError, OutputProfile, OutputProfileError, OutputRange, PackageResult, PackageSpec,
-    ParameterDeclaration, ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec,
-    QueueUrl, ResizeMode, SourceError, StepOutcome, StepState, Template, TemplateError,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
-    TrimSpec, VideoStreamInfo, failure_code, verdict_code,
+    InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, LadderResult,
+    LadderSpec, MediaRef, MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult,
+    OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, OutputRange,
+    PackageResult, PackageSpec, ParameterDeclaration, ParameterName, ParameterType, ParameterValue,
+    ProbeResult, ProbeSpec, QueueUrl, RenditionResult, ResizeMode, SourceError, StepOutcome,
+    StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo, failure_code,
+    verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -349,6 +350,38 @@ impl From<&OutputProfile> for v1::OutputProfile {
     }
 }
 
+impl TryFrom<v1::LadderSpec> for LadderSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::LadderSpec) -> Result<Self, Self::Error> {
+        let rungs = value
+            .rungs
+            .into_iter()
+            .map(OutputProfile::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        let spec = LadderSpec::new(required_source(value.input)?, rungs)?;
+        let spec = match value.segment_seconds {
+            Some(seconds) => spec.with_segment_seconds(seconds)?,
+            None => spec,
+        };
+        match value.poster_seconds {
+            Some(seconds) => Ok(spec.with_poster(seconds)?),
+            None => Ok(spec),
+        }
+    }
+}
+
+impl From<&LadderSpec> for v1::LadderSpec {
+    fn from(value: &LadderSpec) -> Self {
+        Self {
+            input: Some(v1::InputSource::from(value.input())),
+            rungs: value.rungs().iter().map(v1::OutputProfile::from).collect(),
+            segment_seconds: value.segment_seconds(),
+            poster_seconds: value.poster_seconds(),
+        }
+    }
+}
+
 impl TryFrom<v1::OpSpec> for OpSpec {
     type Error = OpSpecError;
 
@@ -398,6 +431,7 @@ impl TryFrom<v1::OpSpec> for OpSpec {
             )?)),
             v1::op_spec::Op::Batch(batch) => Ok(OpSpec::Batch(BatchSpec::try_from(batch)?)),
             v1::op_spec::Op::Graph(graph) => Ok(OpSpec::Graph(GraphSpec::try_from(graph)?)),
+            v1::op_spec::Op::Ladder(ladder) => Ok(OpSpec::Ladder(LadderSpec::try_from(ladder)?)),
         }
     }
 }
@@ -442,6 +476,7 @@ impl From<&OpSpec> for v1::OpSpec {
             }),
             OpSpec::Batch(batch) => v1::op_spec::Op::Batch(v1::BatchSpec::from(batch)),
             OpSpec::Graph(graph) => v1::op_spec::Op::Graph(v1::GraphSpec::from(graph)),
+            OpSpec::Ladder(ladder) => v1::op_spec::Op::Ladder(v1::LadderSpec::from(ladder)),
         };
         v1::OpSpec { op: Some(op) }
     }
@@ -510,6 +545,75 @@ impl TryFrom<v1::OpResult> for OpResult {
             )?)),
             v1::op_result::Op::Batch(batch) => Ok(OpResult::Batch(BatchResult::try_from(batch)?)),
             v1::op_result::Op::Graph(graph) => Ok(OpResult::Graph(GraphResult::try_from(graph)?)),
+            v1::op_result::Op::Ladder(ladder) => {
+                Ok(OpResult::Ladder(LadderResult::try_from(ladder)?))
+            }
+        }
+    }
+}
+
+impl TryFrom<v1::RenditionResult> for RenditionResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::RenditionResult) -> Result<Self, Self::Error> {
+        let profile = value.profile.ok_or(OpResultError::MissingOp)?;
+        let media = required_ref(value.media)?;
+        let playlist = match value.playlist {
+            Some(playlist) => Some(playlist.try_into()?),
+            None => None,
+        };
+        Ok(RenditionResult::new(
+            OutputProfile::try_from(profile)?,
+            media,
+            playlist,
+            ref_list(value.segments)?,
+            value.duration_seconds,
+        )?
+        .with_measurement(value.width, value.height, value.bandwidth_bps))
+    }
+}
+
+impl From<&RenditionResult> for v1::RenditionResult {
+    fn from(value: &RenditionResult) -> Self {
+        Self {
+            profile: Some(v1::OutputProfile::from(value.profile())),
+            media: Some(v1::MediaRef::from(value.media())),
+            playlist: value.playlist().map(v1::MediaRef::from),
+            segments: value.segments().iter().map(v1::MediaRef::from).collect(),
+            duration_seconds: value.duration_seconds(),
+            width: value.width(),
+            height: value.height(),
+            bandwidth_bps: value.bandwidth_bps(),
+        }
+    }
+}
+
+impl TryFrom<v1::LadderResult> for LadderResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::LadderResult) -> Result<Self, Self::Error> {
+        let master_playlist = match value.master_playlist {
+            Some(playlist) => Some(playlist.try_into()?),
+            None => None,
+        };
+        let renditions = value
+            .renditions
+            .into_iter()
+            .map(RenditionResult::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        LadderResult::new(master_playlist, renditions)
+    }
+}
+
+impl From<&LadderResult> for v1::LadderResult {
+    fn from(value: &LadderResult) -> Self {
+        Self {
+            master_playlist: value.master_playlist().map(v1::MediaRef::from),
+            renditions: value
+                .renditions()
+                .iter()
+                .map(v1::RenditionResult::from)
+                .collect(),
         }
     }
 }
@@ -867,6 +971,7 @@ impl From<&OpResult> for v1::OpResult {
             }),
             OpResult::Batch(batch) => v1::op_result::Op::Batch(v1::BatchResult::from(batch)),
             OpResult::Graph(graph) => v1::op_result::Op::Graph(v1::GraphResult::from(graph)),
+            OpResult::Ladder(ladder) => v1::op_result::Op::Ladder(v1::LadderResult::from(ladder)),
         };
         v1::OpResult { op: Some(op) }
     }

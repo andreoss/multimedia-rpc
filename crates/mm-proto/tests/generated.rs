@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+use mm_domain::OpSpec;
 use mm_proto::v1;
 use prost::Message;
 
@@ -188,7 +189,7 @@ fn job_state_enum_covers_lifecycle() {
 }
 
 #[test]
-fn op_spec_oneof_has_all_five_arms() {
+fn op_spec_oneof_carries_every_arm() {
     let media = || v1::InputSource {
         source: Some(v1::input_source::Source::Media(v1::MediaSource {
             media: Some(v1::MediaRef {
@@ -235,8 +236,62 @@ fn op_spec_oneof_has_all_five_arms() {
             height: 180,
             sprite_columns: 0,
         }),
+        v1::op_spec::Op::Image(v1::ImageSpec {
+            inputs: vec![media()],
+            op: v1::ImageOp::Resize as i32,
+            width: 320,
+            height: 180,
+            resize_mode: v1::ResizeMode::Fit as i32,
+            format: v1::ImageFormat::Unspecified as i32,
+        }),
+        v1::op_spec::Op::Package(v1::PackageSpec {
+            input: Some(media()),
+            segment_seconds: 6.0,
+        }),
+        v1::op_spec::Op::Batch(v1::BatchSpec {
+            steps: vec![v1::OpSpec {
+                op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+                    input: Some(media()),
+                })),
+            }],
+            stop_on_failure: Some(true),
+        }),
+        v1::op_spec::Op::Graph(v1::GraphSpec {
+            nodes: vec![v1::GraphNode {
+                id: "only".to_string(),
+                spec: Some(v1::OpSpec {
+                    op: Some(v1::op_spec::Op::Probe(v1::ProbeSpec {
+                        input: Some(media()),
+                    })),
+                }),
+            }],
+        }),
+        v1::op_spec::Op::Ladder(v1::LadderSpec {
+            input: Some(media()),
+            rungs: vec![
+                v1::OutputProfile {
+                    video_max_bitrate: 800_000,
+                    audio_bitrate: 96_000,
+                    width: 640,
+                    height: 360,
+                    ..Default::default()
+                },
+                v1::OutputProfile {
+                    video_max_bitrate: 2_500_000,
+                    audio_bitrate: 96_000,
+                    width: 1280,
+                    height: 720,
+                    ..Default::default()
+                },
+            ],
+            segment_seconds: Some(6.0),
+            poster_seconds: None,
+        }),
     ];
-    assert_eq!(arms.len(), 5);
+    assert_eq!(arms.len(), 10);
+    for arm in arms {
+        assert!(OpSpec::try_from(v1::OpSpec { op: Some(arm) }).is_ok());
+    }
 }
 
 #[test]

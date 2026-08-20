@@ -80,6 +80,13 @@ message GraphSpec {
   repeated GraphNode nodes = 1;
 }
 
+message LadderSpec {
+  InputSource input = 1;
+  repeated OutputProfile rungs = 2;
+  optional double segment_seconds = 3;
+  optional double poster_seconds = 4;
+}
+
 message OpSpec {
   oneof op {
     ConcatSpec concat = 1;
@@ -91,6 +98,7 @@ message OpSpec {
     PackageSpec package = 7;
     BatchSpec batch = 8;
     GraphSpec graph = 9;
+    LadderSpec ladder = 10;
   }
 }
 
@@ -174,6 +182,22 @@ message GraphResult {
   repeated NodeOutcome nodes = 1;
 }
 
+message RenditionResult {
+  OutputProfile profile = 1;
+  MediaRef media = 2;
+  optional MediaRef playlist = 3;
+  repeated MediaRef segments = 4;
+  double duration_seconds = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  uint32 bandwidth_bps = 8;
+}
+
+message LadderResult {
+  optional MediaRef master_playlist = 1;
+  repeated RenditionResult renditions = 2;
+}
+
 message OpResult {
   oneof op {
     ConcatResult concat = 1;
@@ -185,5 +209,6 @@ message OpResult {
     PackageResult package = 7;
     BatchResult batch = 8;
     GraphResult graph = 9;
+    LadderResult ladder = 10;
   }
 }

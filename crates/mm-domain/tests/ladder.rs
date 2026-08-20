@@ -1,6 +1,6 @@
 use mm_domain::{
-    LadderResult, LadderSpec, MAX_LADDER_RUNGS, MediaRef, OpResultError, OpSpecError,
-    OutputProfile, RenditionResult,
+    BatchSpec, LadderResult, LadderSpec, MAX_LADDER_RUNGS, MediaRef, OpKind, OpResultError, OpSpec,
+    OpSpecError, OutputProfile, RenditionResult, UnsupportedOp,
 };
 
 fn input() -> MediaRef {
@@ -283,4 +283,42 @@ fn a_ladder_result_rung_with_a_playlist_carries_its_segments() {
         result.playlist(),
         Some(&object("renditions/0/playlist.m3u8"))
     );
+}
+
+#[test]
+fn a_ladder_spec_names_one_input() {
+    let spec = OpSpec::Ladder(LadderSpec::new(input(), three_rungs()).unwrap());
+    assert_eq!(spec.kind(), OpKind::Ladder);
+    assert_eq!(spec.inputs().len(), 1);
+    assert_eq!(
+        spec.inputs()[0].media().unwrap().media().to_uri(),
+        "s3://bucket/in.mp4"
+    );
+}
+
+#[test]
+fn a_ladder_is_not_executable_until_the_worker_runs_it() {
+    assert_eq!(
+        OpSpec::Ladder(LadderSpec::new(input(), three_rungs()).unwrap())
+            .kind()
+            .ensure_executable()
+            .unwrap_err(),
+        UnsupportedOp {
+            kind: OpKind::Ladder
+        }
+    );
+}
+
+#[test]
+fn a_ladder_validates_its_input_under_the_transcode_policy() {
+    let policy = OpKind::Ladder.input_policy().expect("a ladder takes video");
+    assert_eq!(policy.min_inputs, 1);
+    assert!(!policy.cross_input_checks);
+}
+
+#[test]
+fn a_ladder_inside_a_batch_keeps_its_input_in_the_batch_order() {
+    let ladder = OpSpec::Ladder(LadderSpec::new(input(), three_rungs()).unwrap());
+    let batch = OpSpec::Batch(BatchSpec::new(vec![ladder.clone()], true).unwrap());
+    assert_eq!(batch.inputs().len(), 1);
 }

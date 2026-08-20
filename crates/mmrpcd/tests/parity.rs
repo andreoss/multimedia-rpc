@@ -1851,9 +1851,7 @@ async fn p16_reference_facade_answers_the_reference_job_shape() {
         })
         .await
         .expect("get succeeds")
-        .into_inner()
-        .job
-        .expect("the reference answers the job");
+        .into_inner();
     assert_eq!(read.request_id, "req-p16");
     assert_eq!(
         read.requester,

@@ -6,9 +6,8 @@ use mm_domain::{
 
 use crate::v1;
 use crate::vm::v1::{
-    CancelJobResponse, CreateJobRequest, CreateJobResponse, GetJobResponse, InputFile,
-    ListUserJobsRequest, ListUserJobsResponse, OutputProfile as MergeProfile, Requester,
-    VideoMergeJob,
+    CancelJobResponse, CreateJobRequest, CreateJobResponse, InputFile, ListUserJobsRequest,
+    ListUserJobsResponse, OutputProfile as MergeProfile, Requester, VideoMergeJob,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -225,10 +224,8 @@ pub fn created_response(record: &JobRecord, created: bool) -> CreateJobResponse 
     }
 }
 
-pub fn get_response(record: &JobRecord) -> GetJobResponse {
-    GetJobResponse {
-        job: Some(to_proto(record)),
-    }
+pub fn get_response(record: &JobRecord) -> VideoMergeJob {
+    to_proto(record)
 }
 
 pub fn cancel_response(record: &JobRecord, accepted: bool) -> CancelJobResponse {

@@ -81,10 +81,6 @@ message ListUserJobsRequest {
   string page_token = 5;
 }
 
-message GetJobResponse {
-  VideoMergeJob job = 1;
-}
-
 message ListUserJobsResponse {
   repeated VideoMergeJob jobs = 1;
   string next_page_token = 2;
@@ -93,6 +89,6 @@ message ListUserJobsResponse {
 service VideoMergeService {
   rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
-  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  rpc GetJob(GetJobRequest) returns (VideoMergeJob);
   rpc ListUserJobs(ListUserJobsRequest) returns (ListUserJobsResponse);
 }

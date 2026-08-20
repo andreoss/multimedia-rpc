@@ -1663,9 +1663,7 @@ async fn the_reference_facade_creates_reads_and_lists_a_job() {
         })
         .await
         .expect("get succeeds")
-        .into_inner()
-        .job
-        .expect("the reference answers the job");
+        .into_inner();
 
     assert_eq!(read.request_id, "req-merge-1");
     assert_eq!(read.requester, vm::Requester::ChatMessage as i32);
@@ -1936,9 +1934,7 @@ async fn the_reference_facade_answers_the_output_profile_it_accepted() {
         })
         .await
         .expect("get succeeds")
-        .into_inner()
-        .job
-        .expect("the reference answers the job");
+        .into_inner();
 
     let output = read
         .output

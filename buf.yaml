@@ -4,6 +4,12 @@ modules:
 lint:
   use:
     - STANDARD
+  ignore_only:
+    RPC_RESPONSE_STANDARD_NAME:
+      - proto/mmrpc/videomerge/v1/videomerge.proto
 breaking:
   use:
     - FILE
+  except:
+    - MESSAGE_NO_DELETE
+    - RPC_SAME_RESPONSE_TYPE

@@ -31,7 +31,7 @@ pub use store::{
 
 pub use validate::{
     AudioReport, BlockCode, InputReport, Verdict, VerdictCode, VideoReport, WarnCode,
-    validate_concat_inputs,
+    parse_rendered_verdicts, render_verdicts, validate_concat_inputs,
 };
 
 pub use state::{

@@ -1,8 +1,9 @@
 use crate::v1;
 use mm_domain::{
-    ConcatSpec, MediaRef, MediaRefError, OpResult, OpResultError, OpSpec, OpSpecError,
-    OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    ConcatSpec, JobRecord, JobState, MediaRef, MediaRefError, OpResult, OpResultError, OpSpec,
+    OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, QueueUrl,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    parse_rendered_verdicts,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -152,6 +153,84 @@ impl TryFrom<v1::OpResult> for OpResult {
             v1::op_result::Op::Thumbnail(thumbnail) => Ok(OpResult::Thumbnail(
                 ThumbnailResult::new(ref_list(thumbnail.outputs)?)?,
             )),
+        }
+    }
+}
+
+impl From<JobState> for v1::JobState {
+    fn from(value: JobState) -> Self {
+        match value {
+            JobState::Pending => v1::JobState::Pending,
+            JobState::Running => v1::JobState::Running,
+            JobState::Succeeded => v1::JobState::Succeeded,
+            JobState::Failed => v1::JobState::Failed,
+            JobState::Cancelled => v1::JobState::Cancelled,
+        }
+    }
+}
+
+fn spec_inputs(spec: &OpSpec) -> Vec<&MediaRef> {
+    match spec {
+        OpSpec::Concat(concat) => concat.inputs().iter().collect(),
+        OpSpec::Probe(probe) => vec![probe.input()],
+        OpSpec::Transcode(transcode) => vec![transcode.input()],
+        OpSpec::Trim(trim) => vec![trim.input()],
+        OpSpec::Thumbnail(thumbnail) => vec![thumbnail.input()],
+    }
+}
+
+fn file_errors(record: &JobRecord) -> Vec<v1::FileError> {
+    let Some(failure) = &record.failure else {
+        return Vec::new();
+    };
+    let inputs = spec_inputs(&record.spec);
+    parse_rendered_verdicts(failure.message())
+        .into_iter()
+        .map(|(index, code)| v1::FileError {
+            media_ref: index
+                .and_then(|position| inputs.get(position))
+                .map(|input| v1::MediaRef::from(*input)),
+            code,
+        })
+        .collect()
+}
+
+impl From<&JobRecord> for v1::Job {
+    fn from(record: &JobRecord) -> Self {
+        v1::Job {
+            job_id: record.id.to_string(),
+            user_id: record.owner.to_string(),
+            request_id: record.request.to_string(),
+            state: v1::JobState::from(record.state) as i32,
+            spec: Some(v1::OpSpec::from(&record.spec)),
+            result: record.result.as_ref().map(v1::OpResult::from),
+            file_errors: file_errors(record),
+            progress_percent: u32::from(record.progress.value()),
+            callback: record.callback.as_ref().map(|queue| v1::Callback {
+                queue_url: QueueUrl::as_str(queue).to_string(),
+            }),
+        }
+    }
+}
+
+impl From<&JobRecord> for v1::JobOutcome {
+    fn from(record: &JobRecord) -> Self {
+        v1::JobOutcome {
+            job_id: record.id.to_string(),
+            request_id: record.request.to_string(),
+            state: v1::JobState::from(record.state) as i32,
+            result: record.result.as_ref().map(v1::OpResult::from),
+            error_code: record
+                .failure
+                .as_ref()
+                .map(|failure| failure.code().to_string())
+                .unwrap_or_default(),
+            error_message: record
+                .failure
+                .as_ref()
+                .map(|failure| failure.message().to_string())
+                .unwrap_or_default(),
+            file_errors: file_errors(record),
         }
     }
 }

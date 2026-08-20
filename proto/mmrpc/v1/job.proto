@@ -32,3 +32,13 @@ message JobEvent {
     uint32 progress_percent = 2;
   }
 }
+
+message JobOutcome {
+  string job_id = 1;
+  string request_id = 2;
+  JobState state = 3;
+  OpResult result = 4;
+  string error_code = 5;
+  string error_message = 6;
+  repeated FileError file_errors = 7;
+}

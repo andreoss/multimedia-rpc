@@ -2,12 +2,19 @@ use std::time::Duration;
 
 use crate::op::OpKind;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Video,
+    Image,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputReport {
     pub container: String,
     pub duration: Duration,
     pub size_bytes: Option<u64>,
     pub drm: bool,
+    pub kind: MediaKind,
     pub video: Vec<VideoReport>,
     pub audio: Vec<AudioReport>,
 }
@@ -41,6 +48,7 @@ pub enum BlockCode {
     NoVideoStream,
     TooFewInputs,
     TotalDurationTooLong,
+    MediaKindMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -91,10 +99,10 @@ fn warn(input: Option<usize>, code: WarnCode) -> Verdict {
     }
 }
 
-fn container_is_supported(container: &str) -> bool {
+fn container_is_supported(container: &str, supported: &[&str]) -> bool {
     container
         .split(',')
-        .any(|token| SUPPORTED_CONTAINERS.contains(&token.trim()))
+        .any(|token| supported.contains(&token.trim()))
 }
 
 fn display_aspect(video: &VideoReport) -> Option<f64> {
@@ -117,9 +125,18 @@ fn push_unique(verdicts: &mut Vec<Verdict>, verdict: Verdict) {
     }
 }
 
-fn check_one(index: usize, report: &InputReport, verdicts: &mut Vec<Verdict>) {
+fn check_one(
+    index: usize,
+    report: &InputReport,
+    policy: &InputPolicy,
+    verdicts: &mut Vec<Verdict>,
+) {
     let input = Some(index);
-    if !container_is_supported(&report.container) {
+    if !policy.kinds.contains(&report.kind) {
+        verdicts.push(block(input, BlockCode::MediaKindMismatch));
+        return;
+    }
+    if !container_is_supported(&report.container, policy.containers) {
         verdicts.push(block(input, BlockCode::UnsupportedContainer));
     }
     if report.drm {
@@ -135,7 +152,7 @@ fn check_one(index: usize, report: &InputReport, verdicts: &mut Vec<Verdict>) {
         verdicts.push(block(input, BlockCode::NoVideoStream));
     }
     for video in &report.video {
-        if !SUPPORTED_VIDEO_CODECS.contains(&video.codec.as_str()) {
+        if !policy.video_codecs.contains(&video.codec.as_str()) {
             push_unique(verdicts, block(input, BlockCode::UnsupportedVideoCodec));
         }
         if let (Some(avg), Some(real)) = (video.avg_fps, video.real_fps)
@@ -156,7 +173,7 @@ fn check_one(index: usize, report: &InputReport, verdicts: &mut Vec<Verdict>) {
         }
     }
     for audio in &report.audio {
-        if !SUPPORTED_AUDIO_CODECS.contains(&audio.codec.as_str()) {
+        if !policy.audio_codecs.contains(&audio.codec.as_str()) {
             push_unique(verdicts, block(input, BlockCode::UnsupportedAudioCodec));
         }
     }
@@ -214,7 +231,13 @@ fn check_drift(inputs: &[InputReport], verdicts: &mut Vec<Verdict>) {
 pub struct InputPolicy {
     pub min_inputs: usize,
     pub cross_input_checks: bool,
+    pub kinds: &'static [MediaKind],
+    pub containers: &'static [&'static str],
+    pub video_codecs: &'static [&'static str],
+    pub audio_codecs: &'static [&'static str],
 }
+
+const VIDEO_KINDS: &[MediaKind] = &[MediaKind::Video];
 
 impl OpKind {
     pub fn input_policy(self) -> Option<InputPolicy> {
@@ -222,10 +245,18 @@ impl OpKind {
             OpKind::Concat => Some(InputPolicy {
                 min_inputs: MIN_CONCAT_INPUTS,
                 cross_input_checks: true,
+                kinds: VIDEO_KINDS,
+                containers: &SUPPORTED_CONTAINERS,
+                video_codecs: &SUPPORTED_VIDEO_CODECS,
+                audio_codecs: &SUPPORTED_AUDIO_CODECS,
             }),
             OpKind::Transcode | OpKind::Trim | OpKind::Thumbnail => Some(InputPolicy {
                 min_inputs: 1,
                 cross_input_checks: false,
+                kinds: VIDEO_KINDS,
+                containers: &SUPPORTED_CONTAINERS,
+                video_codecs: &SUPPORTED_VIDEO_CODECS,
+                audio_codecs: &SUPPORTED_AUDIO_CODECS,
             }),
             OpKind::Probe => None,
         }
@@ -245,7 +276,7 @@ pub fn validate_inputs(kind: OpKind, inputs: &[InputReport]) -> Vec<Verdict> {
         verdicts.push(block(None, BlockCode::TotalDurationTooLong));
     }
     for (index, report) in inputs.iter().enumerate() {
-        check_one(index, report, &mut verdicts);
+        check_one(index, report, &policy, &mut verdicts);
     }
     if policy.cross_input_checks {
         check_drift(inputs, &mut verdicts);

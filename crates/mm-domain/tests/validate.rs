@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use mm_domain::{
-    AudioReport, BlockCode, InputReport, OpKind, Verdict, VerdictCode, VideoReport, WarnCode,
-    validate_concat_inputs, validate_inputs,
+    AudioReport, BlockCode, InputReport, MediaKind, OpKind, Verdict, VerdictCode, VideoReport,
+    WarnCode, validate_concat_inputs, validate_inputs,
 };
 
 fn video() -> VideoReport {
@@ -32,6 +32,7 @@ fn input() -> InputReport {
         duration: Duration::from_secs(20),
         size_bytes: Some(5 * 1024 * 1024),
         drm: false,
+        kind: MediaKind::Video,
         video: vec![video()],
         audio: vec![audio()],
     }
@@ -533,4 +534,42 @@ fn free_form_messages_parse_to_no_verdicts() {
     ] {
         assert_eq!(parse_rendered_verdicts(text), Vec::new(), "{text:?}");
     }
+}
+
+fn image_input() -> InputReport {
+    InputReport {
+        container: "png_pipe".to_string(),
+        duration: Duration::ZERO,
+        size_bytes: Some(1024),
+        drm: false,
+        kind: MediaKind::Image,
+        video: vec![VideoReport {
+            codec: "png".to_string(),
+            width: 640,
+            height: 480,
+            avg_fps: None,
+            real_fps: None,
+            rotation: 0,
+            sample_aspect_ratio: None,
+            interlaced: false,
+        }],
+        audio: Vec::new(),
+    }
+}
+
+#[test]
+fn an_image_input_blocks_a_video_op_with_the_media_kind_code() {
+    let verdicts = validate_inputs(OpKind::Transcode, &[image_input()]);
+
+    assert_eq!(
+        blocks(&verdicts),
+        vec![(Some(0), BlockCode::MediaKindMismatch)]
+    );
+}
+
+#[test]
+fn a_video_input_still_passes_a_video_op() {
+    let verdicts = validate_inputs(OpKind::Transcode, &[input()]);
+
+    assert!(blocks(&verdicts).is_empty(), "{verdicts:?}");
 }

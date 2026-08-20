@@ -10,8 +10,8 @@ mod trim;
 
 pub use concat::{ConcatError, build_concat_args};
 pub use parse::{
-    AudioStream, MediaInfo, ParseError, StillInfo, VideoStream, parse_keyframe_times,
-    parse_media_info, parse_still_info,
+    AudioStream, MediaInfo, MediaKind, ParseError, StillInfo, VideoStream, media_kind,
+    parse_keyframe_times, parse_media_info, parse_still_info,
 };
 pub use probe::{ProbeError, ProbeLimits, Prober};
 pub use profile::TargetProfile;

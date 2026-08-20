@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use mm_ffmpeg::{ParseError, parse_keyframe_times, parse_media_info, parse_still_info};
+use mm_ffmpeg::{
+    MediaKind, ParseError, media_kind, parse_keyframe_times, parse_media_info, parse_still_info,
+};
 
 fn mp4_probe_json() -> String {
     r#"{
@@ -338,4 +340,14 @@ fn a_still_report_without_a_format_section_is_an_error() {
         parse_still_info(json),
         Err(ParseError::MissingFormat)
     ));
+}
+
+#[test]
+fn a_container_name_carries_the_media_kind() {
+    assert_eq!(media_kind("png_pipe"), MediaKind::Image);
+    assert_eq!(media_kind("jpeg_pipe"), MediaKind::Image);
+    assert_eq!(media_kind("image2"), MediaKind::Image);
+    assert_eq!(media_kind("mov,mp4,m4a,3gp,3g2,mj2"), MediaKind::Video);
+    assert_eq!(media_kind("matroska,webm"), MediaKind::Video);
+    assert_eq!(media_kind(""), MediaKind::Video);
 }

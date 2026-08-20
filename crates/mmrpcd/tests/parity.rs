@@ -231,6 +231,15 @@ async fn upload_input(store: &S3ObjectStore, path: &Path, key: &str) -> String {
     format!("s3://{BUCKET}/{key}")
 }
 
+static SCENARIO_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+async fn scenario_slot() -> tokio::sync::SemaphorePermit<'static> {
+    SCENARIO_SLOTS
+        .acquire()
+        .await
+        .expect("the scenario gate stays open")
+}
+
 struct Daemon {
     child: Child,
 }
@@ -485,6 +494,22 @@ fn probe_limits() -> ProbeLimits {
     }
 }
 
+async fn settle_blocker(client: &mut MediaJobServiceClient<Channel>, user: &str, job_id: &str) {
+    client
+        .cancel_job(v1::CancelJobRequest {
+            user_id: user.to_string(),
+            job_id: job_id.to_string(),
+        })
+        .await
+        .expect("blocker cancel succeeds");
+    await_terminal(client, user, job_id, Duration::from_secs(30)).await;
+    let gone = Instant::now() + Duration::from_secs(10);
+    while find_process(job_id).is_some() {
+        assert!(Instant::now() < gone, "the blocker merge process survived");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn process_mentions(pid: u32, needle: &str) -> bool {
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
@@ -505,6 +530,7 @@ fn find_process(needle: &str) -> Option<u32> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p01_idempotent_create_replays_and_races_to_one_row() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -586,6 +612,7 @@ async fn p01_idempotent_create_replays_and_races_to_one_row() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p02_foreign_owner_get_is_not_found_like_an_absent_job() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -642,6 +669,7 @@ async fn p02_foreign_owner_get_is_not_found_like_an_absent_job() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let media = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -772,6 +800,7 @@ async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p04_a_blocked_container_fails_with_the_typed_code_in_file_errors() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let foreign = fixture("blocked.mkv", 2, 30, "matroska");
@@ -820,6 +849,7 @@ async fn p04_a_blocked_container_fails_with_the_typed_code_in_file_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p05_a_warn_drift_input_still_merges() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let main = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -868,6 +898,7 @@ async fn p05_a_warn_drift_input_still_merges() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p06_a_full_merge_lands_a_probe_valid_faststart_output() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -944,6 +975,7 @@ async fn p06_a_full_merge_lands_a_probe_valid_faststart_output() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("watch-a-30s.mp4", 30, 30, "mp4");
@@ -1047,6 +1079,7 @@ async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p08_a_mid_merge_cancel_leaves_no_output_and_no_process() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("cancel-a-60s.mp4", 60, 30, "mp4");
@@ -1133,6 +1166,7 @@ async fn p08_a_mid_merge_cancel_leaves_no_output_and_no_process() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;
@@ -1186,6 +1220,7 @@ async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;
@@ -1236,6 +1271,7 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;
@@ -1312,6 +1348,7 @@ async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
          touched it; one CANCELLED outcome delivered)",
         parked.job_id
     );
+    settle_blocker(&mut client, "owner-p11", &blocker.job_id).await;
     publisher.delete_queue(&queue).await.expect("queue removed");
     drop(daemon);
     db.dispose().await;
@@ -1319,6 +1356,7 @@ async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
+    let _slot = scenario_slot().await;
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;
@@ -1401,6 +1439,7 @@ async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
          outcome delivered)",
         parked.job_id
     );
+    settle_blocker(&mut client, "owner-p12", &blocker.job_id).await;
     publisher.delete_queue(&queue).await.expect("queue removed");
     drop(daemon);
     db.dispose().await;

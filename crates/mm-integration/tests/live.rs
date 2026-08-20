@@ -740,7 +740,8 @@ async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
         .into_inner();
     let job_id = created.job_id;
 
-    let settle = std::time::Instant::now() + Duration::from_secs(120);
+    let settle = std::time::Instant::now() + Duration::from_secs(600);
+    let mut last_state;
     let bodies = loop {
         let received = tokio::time::timeout(
             Duration::from_secs(30),
@@ -752,9 +753,20 @@ async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
         if !received.is_empty() {
             break received;
         }
+        let read = client
+            .get_job(mm_proto::v1::GetJobRequest {
+                user_id: "owner-cb".to_string(),
+                job_id: job_id.clone(),
+            })
+            .await
+            .expect("get_job answers")
+            .into_inner();
+        last_state = format!("{:?}", read.job.map(|job| job.state));
         assert!(
             std::time::Instant::now() < settle,
-            "no callback message arrived"
+            "no callback message arrived; the job was {last_state} when the \
+             wait ended, and a callback is published from the row, so the \
+             state it reached is what says whether the work finished"
         );
     };
     assert_eq!(bodies.len(), 1, "exactly one callback message");

@@ -35,7 +35,13 @@ impl WatchHub {
         poll: Duration,
     ) -> (Self, Option<JoinHandle<()>>) {
         match events {
-            None => (Self { changes: None, poll }, None),
+            None => (
+                Self {
+                    changes: None,
+                    poll,
+                },
+                None,
+            ),
             Some(events) => {
                 let (sender, _) = broadcast::channel(WATCH_FANOUT_CAPACITY);
                 let feeder = sender.clone();
@@ -162,7 +168,10 @@ async fn follow_job(
             return;
         }
         if current.progress != progress
-            && sink.send(Ok(progress_event(current.progress))).await.is_err()
+            && sink
+                .send(Ok(progress_event(current.progress)))
+                .await
+                .is_err()
         {
             return;
         }

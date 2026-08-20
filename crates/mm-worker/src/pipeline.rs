@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
     JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef, ObjectBody, ObjectRef,
     ObjectStoreError, OpResult, OpSpec, OutputKey, ProgressPercent, TimedOutput, WorkerId,
     resolve_media_ref, validate_concat_inputs,
 };
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use mm_ffmpeg::{MediaInfo, RunLimits, RunOutcome, build_concat_args};
 use prost::Message;
 use tokio::io::AsyncReadExt;
@@ -225,7 +225,10 @@ async fn publish_outcome(ctx: &WorkerConfig, record: &JobRecord) {
         match publisher.publish(queue, &body).await {
             Ok(()) => return,
             Err(error) if attempt < ctx.retry.max_attempts => {
-                println!("job {} callback attempt {attempt} failed: {error}", record.id);
+                println!(
+                    "job {} callback attempt {attempt} failed: {error}",
+                    record.id
+                );
                 tokio::time::sleep(ctx.retry.delay(attempt)).await;
             }
             Err(error) => {

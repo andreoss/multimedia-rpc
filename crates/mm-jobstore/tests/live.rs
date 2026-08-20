@@ -1182,9 +1182,13 @@ async fn state_and_progress_changes_notify_the_events_listener() {
         .expect("notification received");
     assert_eq!(changed, job.id);
 
-    repo.set_progress(job.id, &claimant, ProgressPercent::new(40).expect("progress"))
-        .await
-        .expect("progress persists");
+    repo.set_progress(
+        job.id,
+        &claimant,
+        ProgressPercent::new(40).expect("progress"),
+    )
+    .await
+    .expect("progress persists");
     let changed = tokio::time::timeout(Duration::from_secs(1), listener.changed())
         .await
         .expect("progress notifies within a second")

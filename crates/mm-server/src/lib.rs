@@ -121,12 +121,13 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
     ));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
     let (watch, watch_feed) = WatchHub::start(config.job_events, config.watch_poll_interval);
-    let router = Server::builder()
-        .add_service(health_service)
-        .add_service(MediaJobServiceServer::new(MediaJobs::new(
-            config.repository,
-            watch,
-        )));
+    let router =
+        Server::builder()
+            .add_service(health_service)
+            .add_service(MediaJobServiceServer::new(MediaJobs::new(
+                config.repository,
+                watch,
+            )));
     let server = tokio::spawn(router.serve_with_incoming_shutdown(
         TcpListenerStream::new(listener),
         async move {

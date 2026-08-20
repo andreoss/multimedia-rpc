@@ -602,7 +602,11 @@ async fn watch_follows_to_terminal(db: &TestDb, handle: &ServerHandle) {
 
     let claimant = WorkerId::from_str("w-watch").expect("worker id");
     let claimed = repository
-        .claim(&claimant, NonZeroU32::new(1).expect("limit"), Duration::from_secs(30))
+        .claim(
+            &claimant,
+            NonZeroU32::new(1).expect("limit"),
+            Duration::from_secs(30),
+        )
         .await
         .expect("claim succeeds");
     assert_eq!(claimed.len(), 1);
@@ -613,7 +617,11 @@ async fn watch_follows_to_terminal(db: &TestDb, handle: &ServerHandle) {
 
     for value in [25u8, 50, 75] {
         repository
-            .set_progress(id, &claimant, ProgressPercent::new(value).expect("progress"))
+            .set_progress(
+                id,
+                &claimant,
+                ProgressPercent::new(value).expect("progress"),
+            )
             .await
             .expect("progress persists");
         assert_eq!(

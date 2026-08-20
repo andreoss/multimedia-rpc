@@ -308,6 +308,45 @@ impl ObjectStore for S3ObjectStore {
         outcome
     }
 
+    async fn copy(
+        &self,
+        source: &ObjectRef,
+        destination: &ObjectRef,
+    ) -> Result<(), ObjectStoreError> {
+        self.client
+            .copy_object()
+            .bucket(destination.bucket())
+            .key(destination.key())
+            .copy_source(format!("{}/{}", source.bucket(), source.key()))
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(backend)
+    }
+
+    async fn identity(&self, object: &ObjectRef) -> Result<String, ObjectStoreError> {
+        let response = self
+            .client
+            .head_object()
+            .bucket(object.bucket())
+            .key(object.key())
+            .send()
+            .await
+            .map_err(|error| {
+                if error
+                    .as_service_error()
+                    .is_some_and(|service| service.is_not_found())
+                {
+                    not_found(object)
+                } else {
+                    backend(error)
+                }
+            })?;
+        let length = response.content_length().unwrap_or_default();
+        let etag = response.e_tag().unwrap_or_default();
+        Ok(format!("{length}:{etag}"))
+    }
+
     async fn head(&self, object: &ObjectRef) -> Result<u64, ObjectStoreError> {
         let response = self
             .client

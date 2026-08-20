@@ -4332,3 +4332,159 @@ async fn a_terminal_job_removes_its_journal_and_staged_files() {
     assert!(staged.is_empty(), "staged paths survived: {staged:?}");
     db.dispose().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_transcode_copies_the_cached_output_without_an_encoder() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("cache-transcode.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/cache-transcode.mp4").await;
+    let repository = db.repository();
+    let profile = OutputProfile::from_raw(24.0, 1200, 23, 128_000, 48_000, 0, 0).unwrap();
+    let spec = TranscodeSpec::new(input.clone(), profile).unwrap();
+    let first = repository
+        .create(single_input_job(OpSpec::Transcode(spec.clone())))
+        .await
+        .unwrap();
+    let config = base_config(&db, store.clone(), "worker-cache");
+    let metrics = config.metrics.clone();
+    let handle = start(config);
+    let first_record =
+        await_terminal(&repository, first.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    assert_eq!(
+        first_record.state,
+        JobState::Succeeded,
+        "{:?}",
+        first_record.failure
+    );
+    let OpResult::Transcode(first_result) = first_record.result.expect("result recorded") else {
+        panic!("expected a transcode result");
+    };
+    let MediaRef::Object(first_output) = first_result.output() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(first_output.key(), format!("jobs/{}/output.mp4", first.id));
+    assert_eq!(metrics.cache_hits.value(), 0);
+    assert_eq!(metrics.cache_misses.value(), 1);
+
+    let second = repository
+        .create(single_input_job(OpSpec::Transcode(spec.clone())))
+        .await
+        .unwrap();
+    let second_record =
+        await_terminal(&repository, second.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    assert_eq!(
+        second_record.state,
+        JobState::Succeeded,
+        "{:?}",
+        second_record.failure
+    );
+    let OpResult::Transcode(second_result) = second_record.result.expect("result recorded") else {
+        panic!("expected a transcode result");
+    };
+    let MediaRef::Object(second_output) = second_result.output() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(
+        second_output.key(),
+        format!("jobs/{}/output.mp4", second.id)
+    );
+    assert_ne!(second_output.key(), first_output.key());
+    assert_eq!(second_result.encoder(), first_result.encoder());
+    assert_eq!(metrics.cache_hits.value(), 1, "the second job did not hit");
+    assert_eq!(
+        metrics.cache_misses.value(),
+        1,
+        "the second job ran the encoder"
+    );
+
+    let changed = fixture("cache-transcode-changed.mp4", 4, 24, "mp4");
+    let changed_input = upload_input(&store, &changed, "inputs/cache-transcode-changed.mp4").await;
+    let changed_spec = TranscodeSpec::new(changed_input, profile).unwrap();
+    let third = repository
+        .create(single_input_job(OpSpec::Transcode(changed_spec)))
+        .await
+        .unwrap();
+    let third_record =
+        await_terminal(&repository, third.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+    assert_eq!(
+        third_record.state,
+        JobState::Succeeded,
+        "{:?}",
+        third_record.failure
+    );
+    assert_eq!(metrics.cache_hits.value(), 1);
+    assert_eq!(
+        metrics.cache_misses.value(),
+        2,
+        "a changed input hit the cache"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cache_row_whose_source_is_gone_is_removed_and_the_job_runs() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("cache-stale.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/cache-stale.mp4").await;
+    let repository = db.repository();
+    let profile = OutputProfile::from_raw(24.0, 1200, 23, 128_000, 48_000, 0, 0).unwrap();
+    let spec = TranscodeSpec::new(input, profile).unwrap();
+    let first = repository
+        .create(single_input_job(OpSpec::Transcode(spec.clone())))
+        .await
+        .unwrap();
+    let config = base_config(&db, store.clone(), "worker-cache-stale");
+    let metrics = config.metrics.clone();
+    let handle = start(config);
+    let first_record =
+        await_terminal(&repository, first.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    assert_eq!(
+        first_record.state,
+        JobState::Succeeded,
+        "{:?}",
+        first_record.failure
+    );
+    let OpResult::Transcode(first_result) = first_record.result.expect("result recorded") else {
+        panic!("expected a transcode result");
+    };
+    let MediaRef::Object(first_output) = first_result.output() else {
+        panic!("expected an object output");
+    };
+    store
+        .delete(first_output)
+        .await
+        .expect("cached output deletes");
+
+    let second = repository
+        .create(single_input_job(OpSpec::Transcode(spec)))
+        .await
+        .unwrap();
+    let second_record =
+        await_terminal(&repository, second.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+    assert_eq!(
+        second_record.state,
+        JobState::Succeeded,
+        "{:?}",
+        second_record.failure
+    );
+    assert_eq!(metrics.cache_hits.value(), 0);
+    assert_eq!(
+        metrics.cache_misses.value(),
+        2,
+        "the stale row was not counted as a miss"
+    );
+    let OpResult::Transcode(second_result) = second_record.result.expect("result recorded") else {
+        panic!("expected a transcode result");
+    };
+    let MediaRef::Object(second_output) = second_result.output() else {
+        panic!("expected an object output");
+    };
+    assert!(store.head(second_output).await.expect("output exists") > 0);
+    db.dispose().await;
+}

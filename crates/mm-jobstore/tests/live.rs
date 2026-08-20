@@ -5,10 +5,11 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use mm_domain::{
-    CancelNotifications, ConcatSpec, InputMetadata, InputOrder, JobEventNotifications, JobFailure,
-    JobId, JobNotifications, JobRepository, JobRequester, JobState, JobStoreError, MediaRef,
-    NewJob, OpResult, OpSpec, ProbeSpec, ProgressPercent, QueueUrl, RequestId, RequesterId,
-    RequesterType, Template, TimedOutput, TraceId, UserId, WorkerId,
+    CachedTranscode, CancelNotifications, ConcatSpec, InputMetadata, InputOrder,
+    JobEventNotifications, JobFailure, JobId, JobNotifications, JobRepository, JobRequester,
+    JobState, JobStoreError, MediaRef, NewJob, ObjectRef, OpResult, OpSpec, ProbeSpec,
+    ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType, Template, TimedOutput,
+    TraceId, UserId, VideoEncoder, WorkerId,
 };
 use mm_jobstore::{
     MIGRATOR, PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository,
@@ -1664,5 +1665,40 @@ async fn shared_input_metadata_round_trips_by_media_id() {
         "a second write replaces the row"
     );
 
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_derived_transcode_row_round_trips_and_is_removed() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let digest = "sha256:test-derived-row";
+    let cached = CachedTranscode::new(
+        vec![ObjectRef::new("mm", "jobs/source/output.mp4").unwrap()],
+        VideoEncoder::H264Nvenc,
+    )
+    .unwrap();
+
+    assert_eq!(
+        repo.cached_transcode(digest).await.expect("read succeeds"),
+        None,
+        "an unwritten digest reads nothing"
+    );
+    repo.put_cached_transcode(digest, &cached)
+        .await
+        .expect("write succeeds");
+    assert_eq!(
+        repo.cached_transcode(digest).await.expect("read succeeds"),
+        Some(cached),
+        "the row answers the outputs and encoder it was written with"
+    );
+    repo.delete_cached_transcode(digest)
+        .await
+        .expect("delete succeeds");
+    assert_eq!(
+        repo.cached_transcode(digest).await.expect("read succeeds"),
+        None,
+        "a deleted digest reads nothing"
+    );
     db.dispose().await;
 }

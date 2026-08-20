@@ -128,6 +128,8 @@ pub struct Metrics {
     pub tool_speed: Histogram,
     pub output_bytes: Counter,
     pub renditions: Counter,
+    pub cache_hits: Counter,
+    pub cache_misses: Counter,
 }
 
 impl Counter {
@@ -246,6 +248,14 @@ impl Registry {
             renditions: registry.counter(
                 "mm_renditions_total",
                 "ladder renditions that landed an output object",
+            ),
+            cache_hits: registry.counter(
+                "mm_cache_hits_total",
+                "transcode cache lookups answered by copied outputs",
+            ),
+            cache_misses: registry.counter(
+                "mm_cache_misses_total",
+                "transcode cache lookups that ran the encoder",
             ),
         };
         (registry, metrics)

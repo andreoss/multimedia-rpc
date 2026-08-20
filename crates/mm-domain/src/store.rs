@@ -51,6 +51,20 @@ pub trait ObjectStore: Send + Sync {
         body: ObjectBody,
     ) -> Result<(), ObjectStoreError>;
 
+    async fn identity(&self, object: &ObjectRef) -> Result<String, ObjectStoreError> {
+        Ok(self.head(object).await?.to_string())
+    }
+
+    async fn copy(
+        &self,
+        source: &ObjectRef,
+        destination: &ObjectRef,
+    ) -> Result<(), ObjectStoreError> {
+        let length = self.head(source).await?;
+        let body = self.get(source).await?;
+        self.put(destination, body, length).await
+    }
+
     async fn head(&self, object: &ObjectRef) -> Result<u64, ObjectStoreError>;
 
     async fn delete(&self, object: &ObjectRef) -> Result<(), ObjectStoreError>;

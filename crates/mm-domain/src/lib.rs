@@ -20,11 +20,11 @@ pub use id::{
     TraceId, TraceIdError, UserId, UserIdError, WorkerId, WorkerIdError,
 };
 pub use jobs::{
-    CancelNotifications, InputFailure, InputFailureError, InputMetadata, InputOrder,
-    InputOrderError, JobEventNotifications, JobFailure, JobFailureError, JobNotifications, JobPage,
-    JobRecord, JobRepository, JobRequester, JobStoreError, NewJob, PageCursor, ProgressError,
-    ProgressPercent, RequesterId, RequesterType, RequesterTypeError, RungProgress, RungState,
-    RungStateError,
+    CachedTranscode, CancelNotifications, InputFailure, InputFailureError, InputMetadata,
+    InputOrder, InputOrderError, JobEventNotifications, JobFailure, JobFailureError,
+    JobNotifications, JobPage, JobRecord, JobRepository, JobRequester, JobStoreError, NewJob,
+    PageCursor, ProgressError, ProgressPercent, RequesterId, RequesterType, RequesterTypeError,
+    RungProgress, RungState, RungStateError,
 };
 pub use op::{
     AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, Colour, ConcatSpec,

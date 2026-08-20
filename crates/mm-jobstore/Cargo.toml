@@ -9,6 +9,7 @@ mm-domain = { path = "../mm-domain" }
 mm-proto = { path = "../mm-proto" }
 async-trait.workspace = true
 prost.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["sync"] }

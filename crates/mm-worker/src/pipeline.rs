@@ -10,18 +10,18 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use mm_domain::{
-    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CaptionDocument, ConcatSpec,
-    GradeResult, GradeSpec, GraphResult, GraphSpec, ImageFormat as DomainImageFormat, ImageOp,
-    ImageResult, ImageSpec, InputFailure, InputMetadata, InputReport, InputSource, JobFailure,
-    JobId, JobRecord, JobRepository, JobState, JobStoreError, LadderResult, LadderSpec,
-    LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody,
-    ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
-    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
-    ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, SubtitleMode,
-    SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TitleResult,
-    TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoEncoder, VideoStreamInfo,
-    WorkerId, collect_body, resolve_media_ref, validate_inputs, validate_ladder_rungs,
-    verdict_code,
+    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CachedTranscode,
+    CaptionDocument, ConcatSpec, GradeResult, GradeSpec, GraphResult, GraphSpec,
+    ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
+    InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
+    LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome,
+    NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
+    OutputKey, OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
+    RenditionResult, ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState,
+    SubtitleMode, SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
+    TitleResult, TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoEncoder,
+    VideoStreamInfo, WorkerId, collect_body, resolve_media_ref, validate_inputs,
+    validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
     AudioTarget, GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo,
@@ -43,6 +43,7 @@ use mm_magick::{
 };
 use mm_observability::{Component, record};
 use prost::Message;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -2078,6 +2079,63 @@ async fn tool_profile(
     }
 }
 
+fn transcode_cache_digest(spec: &OpSpec, identity: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(mm_proto::v1::OpSpec::from(spec).encode_to_vec());
+    digest.update(identity.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+async fn transcode_cache_key(
+    ctx: &WorkerConfig,
+    spec: &OpSpec,
+    input: &InputSource,
+) -> Option<String> {
+    let MediaRef::Object(object) = input.media().map(|source| source.media())? else {
+        return None;
+    };
+    let identity = ctx.store.identity(object).await.ok()?;
+    Some(transcode_cache_digest(
+        spec,
+        &format!("{}:{}", object.key(), identity),
+    ))
+}
+
+async fn cached_transcode(
+    ctx: &WorkerConfig,
+    id: JobId,
+    scope: &Scope,
+    digest: &str,
+) -> Result<Option<OpResult>, Finish> {
+    let Some(cached) = ctx
+        .repository
+        .cached_transcode(digest)
+        .await
+        .unwrap_or(None)
+    else {
+        return Ok(None);
+    };
+    let Some(source) = cached.outputs().first() else {
+        let _ = ctx.repository.delete_cached_transcode(digest).await;
+        return Ok(None);
+    };
+    let output = output_object(ctx, id, &scope.prefix)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    match ctx.store.copy(source, &output).await {
+        Ok(()) => {
+            ctx.metrics.cache_hits.add(1);
+            Ok(Some(OpResult::Transcode(
+                TranscodeResult::new(MediaRef::Object(output)).with_encoder(cached.encoder()),
+            )))
+        }
+        Err(_) => {
+            let _ = ctx.repository.delete_cached_transcode(digest).await;
+            let _ = ctx.store.delete(&output).await;
+            Ok(None)
+        }
+    }
+}
+
 async fn transcode_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
@@ -2091,6 +2149,15 @@ async fn transcode_pipeline(
     check(signal)?;
     let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Transcode, &[input_report(&info)])?;
+
+    let cache_digest =
+        transcode_cache_key(ctx, &OpSpec::Transcode(spec.clone()), spec.input()).await;
+    if let Some(digest) = &cache_digest {
+        if let Some(cached) = cached_transcode(ctx, job.id, scope, digest).await? {
+            return Ok(cached);
+        }
+        ctx.metrics.cache_misses.add(1);
+    }
 
     let inputs = [spec.input().clone()];
     let infos = [info];
@@ -2161,6 +2228,12 @@ async fn transcode_pipeline(
     }
     let outcome = match transcoded {
         Ok(result) => {
+            if let (Some(digest), OpResult::Transcode(transcode)) = (&cache_digest, &result)
+                && let MediaRef::Object(output) = transcode.output()
+                && let Ok(cached) = CachedTranscode::new(vec![output.clone()], transcode.encoder())
+            {
+                let _ = ctx.repository.put_cached_transcode(digest, &cached).await;
+            }
             if let Some(poster) = spec.profile().poster() {
                 extract_poster(ctx, job, scope, &output_path, poster, deadline_at, signal).await?;
             }

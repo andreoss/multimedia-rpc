@@ -418,3 +418,36 @@ async fn prefix_delete_pages_past_the_first_listing() {
         "the first key survived a delete that claimed to remove it all"
     );
 }
+
+#[tokio::test]
+async fn copy_lands_the_same_bytes_under_a_second_key() {
+    let store = test_store().await;
+    let bucket = shared_bucket(&store).await;
+    let job_id = JobId::generate();
+    let source = OutputKey::new(&job_id, "source.bin")
+        .unwrap()
+        .into_object(&bucket)
+        .unwrap();
+    let destination = OutputKey::new(&job_id, "copy.bin")
+        .unwrap()
+        .into_object(&bucket)
+        .unwrap();
+    let payload = deterministic_payload(64 * 1024);
+    store
+        .put(
+            &source,
+            body_from_bytes(payload.clone()),
+            payload.len() as u64,
+        )
+        .await
+        .unwrap();
+    assert!(store.identity(&source).await.unwrap().starts_with("65536:"));
+    store.copy(&source, &destination).await.unwrap();
+    assert_eq!(store.head(&destination).await.unwrap(), 64 * 1024);
+    let copied = collect_body(store.get(&destination).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(copied, payload);
+    store.delete(&source).await.unwrap();
+    store.delete(&destination).await.unwrap();
+}

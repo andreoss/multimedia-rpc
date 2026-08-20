@@ -47,6 +47,7 @@ tonic-prost-build = "0.14"
 tokio-stream = "0.1"
 base64 = "0.22"
 proptest = "1"
+sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "postgres",

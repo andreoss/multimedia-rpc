@@ -2,7 +2,7 @@ use crate::callback::QueueUrl;
 use crate::id::{
     JobId, NodeId, RequestId, TemplateId, TextIdError, TraceId, UserId, WorkerId, parse_text_id,
 };
-use crate::op::{MediaRef, OpResult, OpSpec};
+use crate::op::{MediaRef, ObjectRef, OpResult, OpSpec, VideoEncoder};
 use crate::state::JobState;
 use crate::template::Template;
 use crate::validate::Verdict;
@@ -386,6 +386,31 @@ pub struct JobPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedTranscode {
+    outputs: Vec<ObjectRef>,
+    encoder: VideoEncoder,
+}
+
+impl CachedTranscode {
+    pub fn new(outputs: Vec<ObjectRef>, encoder: VideoEncoder) -> Result<Self, JobStoreError> {
+        if outputs.is_empty() {
+            return Err(JobStoreError::Backend(
+                "a cached transcode has no outputs".to_string(),
+            ));
+        }
+        Ok(Self { outputs, encoder })
+    }
+
+    pub fn outputs(&self) -> &[ObjectRef] {
+        &self.outputs
+    }
+
+    pub fn encoder(&self) -> VideoEncoder {
+        self.encoder
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct InputMetadata(Vec<u8>);
 
 impl InputMetadata {
@@ -538,6 +563,16 @@ pub trait JobRepository: Send + Sync {
         media: &MediaRef,
         metadata: &InputMetadata,
     ) -> Result<(), JobStoreError>;
+    async fn cached_transcode(
+        &self,
+        digest: &str,
+    ) -> Result<Option<CachedTranscode>, JobStoreError>;
+    async fn put_cached_transcode(
+        &self,
+        digest: &str,
+        cached: &CachedTranscode,
+    ) -> Result<(), JobStoreError>;
+    async fn delete_cached_transcode(&self, digest: &str) -> Result<(), JobStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -4,11 +4,11 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use mm_domain::{
-    CancelNotifications, InputFailure, InputMetadata, InputOrder, JobEventNotifications,
-    JobFailure, JobId, JobNotifications, JobPage, JobRecord, JobRepository, JobRequester, JobState,
-    JobStoreError, MediaRef, NewJob, OpResult, OpSpec, PageCursor, ParameterDeclaration,
-    ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType, RungProgress, RungState,
-    Template, TemplateId, UserId, WorkerId,
+    CachedTranscode, CancelNotifications, InputFailure, InputMetadata, InputOrder,
+    JobEventNotifications, JobFailure, JobId, JobNotifications, JobPage, JobRecord, JobRepository,
+    JobRequester, JobState, JobStoreError, MediaRef, NewJob, OpResult, OpSpec, PageCursor,
+    ParameterDeclaration, ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType,
+    RungProgress, RungState, Template, TemplateId, UserId, VideoEncoder, WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
@@ -1051,6 +1051,71 @@ impl JobRepository for PgJobRepository {
         .await
         .map_err(backend)?;
         Ok(row.map(|row| InputMetadata::from_bytes(row.metadata)))
+    }
+
+    async fn cached_transcode(
+        &self,
+        digest: &str,
+    ) -> Result<Option<CachedTranscode>, JobStoreError> {
+        let row = sqlx::query!(
+            "SELECT outputs, encoder FROM derived_cache WHERE digest = $1",
+            digest
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let values: Vec<String> = serde_json::from_value(row.outputs)
+            .map_err(|error| JobStoreError::Backend(error.to_string()))?;
+        let mut outputs = Vec::with_capacity(values.len());
+        for value in values {
+            let media = MediaRef::object_uri(&value)
+                .map_err(|error| JobStoreError::Backend(error.to_string()))?;
+            let MediaRef::Object(object) = media else {
+                return Err(JobStoreError::Backend(format!(
+                    "cached output {value} is not an object"
+                )));
+            };
+            outputs.push(object);
+        }
+        let encoder = VideoEncoder::parse(&row.encoder).unwrap_or(VideoEncoder::Libx264);
+        Ok(Some(CachedTranscode::new(outputs, encoder)?))
+    }
+
+    async fn put_cached_transcode(
+        &self,
+        digest: &str,
+        cached: &CachedTranscode,
+    ) -> Result<(), JobStoreError> {
+        let outputs: Vec<String> = cached
+            .outputs()
+            .iter()
+            .map(|object| format!("s3://{}/{}", object.bucket(), object.key()))
+            .collect();
+        let outputs = serde_json::to_value(outputs)
+            .map_err(|error| JobStoreError::Backend(error.to_string()))?;
+        sqlx::query!(
+            "INSERT INTO derived_cache (digest, outputs, encoder) VALUES ($1, $2, $3) \
+             ON CONFLICT (digest) DO UPDATE SET outputs = EXCLUDED.outputs, \
+             encoder = EXCLUDED.encoder, created_at = now()",
+            digest,
+            outputs,
+            cached.encoder().name()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn delete_cached_transcode(&self, digest: &str) -> Result<(), JobStoreError> {
+        sqlx::query!("DELETE FROM derived_cache WHERE digest = $1", digest)
+            .execute(&self.pool)
+            .await
+            .map_err(backend)?;
+        Ok(())
     }
 
     async fn put_input_metadata(

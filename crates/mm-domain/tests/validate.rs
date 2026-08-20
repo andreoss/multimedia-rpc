@@ -492,7 +492,7 @@ fn transcode_policy_keeps_the_total_duration_cap() {
 
 #[test]
 fn rendered_verdicts_round_trip_through_parse() {
-    use mm_domain::{parse_rendered_verdicts, render_verdicts};
+    use mm_domain::{InputFailure, parse_rendered_verdicts, render_verdicts};
     let verdicts = vec![
         Verdict {
             input: Some(0),
@@ -513,27 +513,59 @@ fn rendered_verdicts_round_trip_through_parse() {
         "input 0: UnsupportedContainer; inputs: TooFewInputs; input 2: FpsDrift"
     );
     assert_eq!(
-        parse_rendered_verdicts(&text),
+        parse_rendered_verdicts(&text).expect("the rendered grammar parses"),
         vec![
-            (Some(0), "UnsupportedContainer".to_string()),
-            (None, "TooFewInputs".to_string()),
-            (Some(2), "FpsDrift".to_string()),
+            InputFailure::new(None, None, Some(0), "UnsupportedContainer").expect("valid failure"),
+            InputFailure::new(None, None, None, "TooFewInputs").expect("valid failure"),
+            InputFailure::new(None, None, Some(2), "FpsDrift").expect("valid failure"),
         ]
     );
 }
 
 #[test]
-fn free_form_messages_parse_to_no_verdicts() {
-    use mm_domain::parse_rendered_verdicts;
+fn a_message_outside_the_grammar_answers_a_typed_refusal() {
+    use mm_domain::{InputFailureError, TextIdError, VerdictParseError, parse_rendered_verdicts};
     for text in [
         "",
         "connection reset by peer",
-        "input x: Broken",
-        "input 0: two words",
         "inputs TooFewInputs",
+        "input 0: UnsupportedContainer; connection reset by peer",
     ] {
-        assert_eq!(parse_rendered_verdicts(text), Vec::new(), "{text:?}");
+        assert_eq!(
+            parse_rendered_verdicts(text),
+            Err(VerdictParseError::Segment {
+                segment: text
+                    .split("; ")
+                    .find(|segment| !segment.contains(": "))
+                    .unwrap_or(text)
+                    .to_string()
+            }),
+            "{text:?}"
+        );
     }
+    assert_eq!(
+        parse_rendered_verdicts("input x: Broken"),
+        Err(VerdictParseError::Subject {
+            subject: "input x".to_string()
+        })
+    );
+    assert_eq!(
+        parse_rendered_verdicts("input 0: two words"),
+        Err(VerdictParseError::Code {
+            code: "two words".to_string()
+        })
+    );
+    let long = "A".repeat(65);
+    assert_eq!(
+        parse_rendered_verdicts(&format!("inputs: {long}")),
+        Err(VerdictParseError::Invalid {
+            code: long.clone(),
+            source: InputFailureError::Code(TextIdError::TooLong {
+                length: 65,
+                max: 64
+            }),
+        })
+    );
 }
 
 fn image_input() -> InputReport {

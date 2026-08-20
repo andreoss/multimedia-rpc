@@ -156,6 +156,27 @@ impl fmt::Display for RequestId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(String);
+
+pub type NodeIdError = TextIdError;
+
+impl NodeId {
+    pub const MAX_LENGTH: usize = 64;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = NodeIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_text_id(value, Self::MAX_LENGTH).map(Self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TraceId(Uuid);
 

@@ -1,6 +1,8 @@
 use std::time::Duration;
 
+use crate::jobs::{InputFailure, InputFailureError};
 use crate::op::OpKind;
+use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -68,6 +70,15 @@ pub enum WarnCode {
 pub enum VerdictCode {
     Block(BlockCode),
     Warn(WarnCode),
+}
+
+impl VerdictCode {
+    pub fn name(self) -> String {
+        match self {
+            VerdictCode::Block(code) => format!("{code:?}"),
+            VerdictCode::Warn(code) => format!("{code:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -320,10 +331,7 @@ pub fn render_verdicts(verdicts: &[Verdict]) -> String {
     verdicts
         .iter()
         .map(|verdict| {
-            let code = match verdict.code {
-                VerdictCode::Block(code) => format!("{code:?}"),
-                VerdictCode::Warn(code) => format!("{code:?}"),
-            };
+            let code = verdict.code.name();
             match verdict.input {
                 Some(index) => format!("input {index}: {code}"),
                 None => format!("inputs: {code}"),
@@ -333,26 +341,54 @@ pub fn render_verdicts(verdicts: &[Verdict]) -> String {
         .join("; ")
 }
 
-pub fn parse_rendered_verdicts(text: &str) -> Vec<(Option<usize>, String)> {
-    let mut parsed = Vec::new();
-    for segment in text.split("; ") {
-        let Some((subject, code)) = segment.split_once(": ") else {
-            return Vec::new();
-        };
-        if code.is_empty() || !code.chars().all(|letter| letter.is_ascii_alphanumeric()) {
-            return Vec::new();
-        }
-        let input = if subject == "inputs" {
-            None
-        } else if let Some(raw) = subject.strip_prefix("input ") {
-            match raw.parse::<usize>() {
-                Ok(index) => Some(index),
-                Err(_) => return Vec::new(),
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum VerdictParseError {
+    #[error("the segment {segment:?} is not a rendered verdict")]
+    Segment { segment: String },
+    #[error("the subject {subject:?} names no input")]
+    Subject { subject: String },
+    #[error("the code {code:?} is not a verdict code")]
+    Code { code: String },
+    #[error("the code {code:?} is not an input failure: {source}")]
+    Invalid {
+        code: String,
+        source: InputFailureError,
+    },
+}
+
+pub fn parse_rendered_verdicts(text: &str) -> Result<Vec<InputFailure>, VerdictParseError> {
+    text.split("; ")
+        .map(|segment| {
+            let Some((subject, code)) = segment.split_once(": ") else {
+                return Err(VerdictParseError::Segment {
+                    segment: segment.to_string(),
+                });
+            };
+            if code.is_empty() || !code.chars().all(|letter| letter.is_ascii_alphanumeric()) {
+                return Err(VerdictParseError::Code {
+                    code: code.to_string(),
+                });
             }
-        } else {
-            return Vec::new();
-        };
-        parsed.push((input, code.to_string()));
-    }
-    parsed
+            let input = if subject == "inputs" {
+                None
+            } else if let Some(raw) = subject.strip_prefix("input ") {
+                Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| VerdictParseError::Subject {
+                            subject: subject.to_string(),
+                        })?,
+                )
+            } else {
+                return Err(VerdictParseError::Subject {
+                    subject: subject.to_string(),
+                });
+            };
+            InputFailure::new(None, None, input, code).map_err(|source| {
+                VerdictParseError::Invalid {
+                    code: code.to_string(),
+                    source,
+                }
+            })
+        })
+        .collect()
 }

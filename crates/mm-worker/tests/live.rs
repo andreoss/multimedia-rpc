@@ -1120,6 +1120,15 @@ async fn blocking_validation_fails_the_job_with_input_codes() {
         "{}",
         failure.message()
     );
+    assert_eq!(
+        failure
+            .inputs()
+            .iter()
+            .map(|input| (input.input(), input.code().to_string()))
+            .collect::<Vec<_>>(),
+        vec![(Some(0), "UnsupportedContainer".to_string())],
+        "the per-input failure is read off the row, not back out of the message"
+    );
     assert_eq!(record.attempts, 1, "permanent failure was retried");
     assert!(record.next_attempt_at.is_none());
     db.dispose().await;
@@ -1276,6 +1285,28 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
     assert_eq!(
         outcome.file_errors[0].media_ref,
         Some(mm_proto::v1::MediaRef::from(&refs[0]))
+    );
+    assert_eq!(
+        outcome.file_errors[0],
+        mm_proto::v1::FileError {
+            media_ref: Some(mm_proto::v1::MediaRef::from(&refs[0])),
+            code: "UnsupportedContainer".to_string(),
+            step_index: None,
+            node_id: None,
+            input_index: Some(0),
+        }
+    );
+    let recorded = record
+        .failure
+        .as_ref()
+        .expect("failure recorded")
+        .inputs()
+        .iter()
+        .map(|input| (input.input(), input.code().to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        vec![(Some(0), "UnsupportedContainer".to_string())]
     );
     publisher.delete_queue(&queue).await.expect("queue removed");
     db.dispose().await;

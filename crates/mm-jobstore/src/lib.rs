@@ -4,9 +4,9 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use mm_domain::{
-    CancelNotifications, JobEventNotifications, JobFailure, JobId, JobNotifications, JobPage,
-    JobRecord, JobRepository, JobState, JobStoreError, NewJob, OpResult, OpSpec, PageCursor,
-    ProgressPercent, QueueUrl, RequestId, UserId, WorkerId,
+    CancelNotifications, InputFailure, JobEventNotifications, JobFailure, JobId, JobNotifications,
+    JobPage, JobRecord, JobRepository, JobState, JobStoreError, NewJob, OpResult, OpSpec,
+    PageCursor, ProgressPercent, QueueUrl, RequestId, UserId, WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
@@ -178,6 +178,7 @@ struct JobRow {
     cancel_requested: bool,
     callback_queue_url: Option<String>,
     trace_id: Option<String>,
+    input_failures: Option<Vec<u8>>,
 }
 
 fn backend(error: sqlx::Error) -> JobStoreError {
@@ -197,6 +198,16 @@ fn encode_spec(spec: &OpSpec) -> Vec<u8> {
 
 fn encode_result(result: &OpResult) -> Vec<u8> {
     mm_proto::v1::OpResult::from(result).encode_to_vec()
+}
+
+fn encode_input_failures(inputs: &[InputFailure]) -> Vec<u8> {
+    mm_proto::v1::InputFailureList::from(inputs).encode_to_vec()
+}
+
+fn decode_input_failures(id: JobId, bytes: &[u8]) -> Result<Vec<InputFailure>, JobStoreError> {
+    mm_proto::v1::InputFailureList::decode(bytes)
+        .map_err(|error| corrupt(id, error))
+        .and_then(|list| Vec::<InputFailure>::try_from(list).map_err(|error| corrupt(id, error)))
 }
 
 fn to_system(value: OffsetDateTime) -> SystemTime {
@@ -227,7 +238,14 @@ fn to_record(row: JobRow) -> Result<JobRecord, JobStoreError> {
     let failure = match (row.error_code, row.error_message) {
         (Some(code), message) => Some(
             JobFailure::new(&code, message.as_deref().unwrap_or(""))
-                .map_err(|error| corrupt(id, error))?,
+                .map_err(|error| corrupt(id, error))?
+                .with_inputs(
+                    row.input_failures
+                        .as_deref()
+                        .map(|bytes| decode_input_failures(id, bytes))
+                        .transpose()?
+                        .unwrap_or_default(),
+                ),
         ),
         (None, _) => None,
     };
@@ -321,7 +339,8 @@ impl JobRepository for PgJobRepository {
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id",
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures",
             job.id().as_uuid(),
             job.owner().as_str(),
             job.request().as_str(),
@@ -357,7 +376,8 @@ impl JobRepository for PgJobRepository {
             "SELECT id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id \
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures \
              FROM jobs WHERE id = $1",
             id.as_uuid()
         )
@@ -378,7 +398,8 @@ impl JobRepository for PgJobRepository {
             "SELECT id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id \
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures \
              FROM jobs WHERE id = $1 AND user_id = $2",
             id.as_uuid(),
             owner.as_str()
@@ -406,7 +427,8 @@ impl JobRepository for PgJobRepository {
             "SELECT id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id \
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures \
              FROM jobs \
              WHERE user_id = $1 \
                AND ($2::timestamptz IS NULL \
@@ -462,7 +484,8 @@ impl JobRepository for PgJobRepository {
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id",
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures",
             worker.as_str(),
             lease.as_secs_f64(),
             i64::from(limit.get())
@@ -572,13 +595,14 @@ impl JobRepository for PgJobRepository {
         let updated = sqlx::query!(
             "UPDATE jobs SET state = 'PENDING', claimed_by = NULL, \
              lease_expires_at = NULL, progress_percent = 0, \
-             error_code = $3, error_message = $4, \
-             next_attempt_at = now() + make_interval(secs => $5) \
+             error_code = $3, error_message = $4, input_failures = $5, \
+             next_attempt_at = now() + make_interval(secs => $6) \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING'",
             id.as_uuid(),
             worker.as_str(),
             failure.code(),
             failure.message(),
+            encode_input_failures(failure.inputs()),
             retry_after.as_secs_f64()
         )
         .execute(&self.pool)
@@ -626,12 +650,13 @@ impl JobRepository for PgJobRepository {
             JobRow,
             "UPDATE jobs SET state = 'SUCCEEDED', result = $3, \
              progress_percent = 100, finished_at = now(), lease_expires_at = NULL, \
-             error_code = NULL, error_message = NULL \
+             error_code = NULL, error_message = NULL, input_failures = NULL \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id",
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures",
             id.as_uuid(),
             worker.as_str(),
             encode_result(&result)
@@ -656,16 +681,19 @@ impl JobRepository for PgJobRepository {
         let row = sqlx::query_as!(
             JobRow,
             "UPDATE jobs SET state = 'FAILED', error_code = $3, error_message = $4, \
+             input_failures = $5, \
              finished_at = now(), lease_expires_at = NULL \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id",
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures",
             id.as_uuid(),
             worker.as_str(),
             failure.code(),
-            failure.message()
+            failure.message(),
+            encode_input_failures(failure.inputs())
         )
         .fetch_optional(&self.pool)
         .await
@@ -687,7 +715,8 @@ impl JobRepository for PgJobRepository {
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id",
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures",
             id.as_uuid()
         )
         .fetch_optional(&self.pool)
@@ -724,7 +753,8 @@ impl JobRepository for PgJobRepository {
             "SELECT id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
-             lease_expires_at, cancel_requested, callback_queue_url, trace_id \
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures \
              FROM jobs \
              WHERE state IN ('SUCCEEDED', 'FAILED', 'CANCELLED') \
                AND callback_queue_url IS NOT NULL \

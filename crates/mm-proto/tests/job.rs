@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use mm_domain::{
-    ConcatSpec, JobFailure, JobId, JobRecord, JobState, MediaRef, OpResult, OpSpec,
+    ConcatSpec, InputFailure, JobFailure, JobId, JobRecord, JobState, MediaRef, OpResult, OpSpec,
     ProgressPercent, QueueUrl, RequestId, TimedOutput, TraceId, UserId,
 };
 use mm_proto::v1;
@@ -45,11 +45,31 @@ fn record(state: JobState, failure: Option<JobFailure>, result: Option<OpResult>
 }
 
 fn blocked() -> JobFailure {
-    JobFailure::new(
-        "validation_blocked",
-        "input 0: UnsupportedContainer; inputs: TooFewInputs",
-    )
-    .expect("failure")
+    JobFailure::new("validation_blocked", "inputs rejected by the validator")
+        .expect("failure")
+        .with_inputs(vec![
+            InputFailure::new(None, None, Some(0), "UnsupportedContainer").expect("valid failure"),
+            InputFailure::new(None, None, None, "TooFewInputs").expect("valid failure"),
+        ])
+}
+
+fn file_error(
+    code: &str,
+    step: Option<u32>,
+    node: Option<&str>,
+    input: Option<u32>,
+) -> v1::FileError {
+    v1::FileError {
+        media_ref: Some(v1::MediaRef {
+            r#ref: Some(v1::media_ref::Ref::ObjectUri(
+                "s3://media/in/a.mp4".to_string(),
+            )),
+        }),
+        code: code.to_string(),
+        step_index: step,
+        node_id: node.map(str::to_string),
+        input_index: input,
+    }
 }
 
 #[test]
@@ -58,21 +78,80 @@ fn a_validation_failure_maps_file_errors_onto_the_spec_inputs() {
     assert_eq!(
         job.file_errors,
         vec![
-            v1::FileError {
-                media_ref: Some(v1::MediaRef {
-                    r#ref: Some(v1::media_ref::Ref::ObjectUri(
-                        "s3://media/in/a.mp4".to_string()
-                    )),
-                }),
-                code: "UnsupportedContainer".to_string(),
-            },
+            file_error("UnsupportedContainer", None, None, Some(0)),
             v1::FileError {
                 media_ref: None,
                 code: "TooFewInputs".to_string(),
+                step_index: None,
+                node_id: None,
+                input_index: None,
             },
         ]
     );
     assert_eq!(job.state, v1::JobState::Failed as i32);
+}
+
+#[test]
+fn file_errors_are_read_off_the_row_and_not_back_out_of_the_message() {
+    let failure = JobFailure::new("validation_blocked", "step 2: inputs: TooFewInputs")
+        .expect("failure")
+        .with_inputs(vec![
+            InputFailure::new(Some(2), Some("join"), Some(0), "UnsupportedContainer")
+                .expect("valid failure"),
+        ]);
+
+    let job = v1::Job::from(&record(JobState::Failed, Some(failure), None));
+
+    assert_eq!(
+        job.file_errors,
+        vec![file_error(
+            "UnsupportedContainer",
+            Some(2),
+            Some("join"),
+            Some(0)
+        )]
+    );
+}
+
+#[test]
+fn a_file_error_reads_back_into_the_input_failure_the_row_carries() {
+    let failure = InputFailure::try_from(&v1::FileError {
+        media_ref: None,
+        code: "UnsupportedContainer".to_string(),
+        step_index: Some(1),
+        node_id: Some("join".to_string()),
+        input_index: Some(0),
+    })
+    .expect("a rendered file error is a valid input failure");
+
+    assert_eq!(failure.step(), Some(1));
+    assert_eq!(failure.node().map(|node| node.as_str()), Some("join"));
+    assert_eq!(failure.input(), Some(0));
+    assert_eq!(failure.code(), "UnsupportedContainer");
+}
+
+#[test]
+fn a_file_error_that_names_no_valid_identity_is_refused() {
+    assert!(
+        InputFailure::try_from(&v1::FileError {
+            media_ref: None,
+            code: "UnsupportedContainer".to_string(),
+            step_index: None,
+            node_id: Some("join step".to_string()),
+            input_index: None,
+        })
+        .is_err()
+    );
+    assert!(
+        InputFailure::try_from(&v1::FileError {
+            media_ref: None,
+            code: String::new(),
+            step_index: None,
+            node_id: None,
+            input_index: None,
+        })
+        .is_err()
+    );
 }
 
 #[test]
@@ -125,8 +204,8 @@ fn a_failed_outcome_carries_the_error_and_file_errors() {
     assert_eq!(outcome.state, v1::JobState::Failed as i32);
     assert_eq!(outcome.error_code, "validation_blocked");
     assert_eq!(
-        outcome.error_message,
-        "input 0: UnsupportedContainer; inputs: TooFewInputs"
+        outcome.error_message, "inputs rejected by the validator",
+        "the message stays for a human while the file errors come off the row"
     );
     assert_eq!(outcome.result, None);
     assert_eq!(outcome.file_errors.len(), 2);

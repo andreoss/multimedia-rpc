@@ -9,13 +9,13 @@ mod validate;
 
 pub use callback::{CallbackError, CallbackPublisher, QueueUrl, QueueUrlError};
 pub use id::{
-    JobId, JobIdError, RequestId, RequestIdError, TextIdError, TraceId, TraceIdError, UserId,
-    UserIdError, WorkerId, WorkerIdError,
+    JobId, JobIdError, NodeId, NodeIdError, RequestId, RequestIdError, TextIdError, TraceId,
+    TraceIdError, UserId, UserIdError, WorkerId, WorkerIdError,
 };
 pub use jobs::{
-    CancelNotifications, JobEventNotifications, JobFailure, JobFailureError, JobNotifications,
-    JobPage, JobRecord, JobRepository, JobStoreError, NewJob, PageCursor, ProgressError,
-    ProgressPercent,
+    CancelNotifications, InputFailure, InputFailureError, JobEventNotifications, JobFailure,
+    JobFailureError, JobNotifications, JobPage, JobRecord, JobRepository, JobStoreError, NewJob,
+    PageCursor, ProgressError, ProgressPercent,
 };
 pub use op::{
     ConcatSpec, HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError,
@@ -32,8 +32,9 @@ pub use store::{
 };
 
 pub use validate::{
-    AudioReport, BlockCode, InputPolicy, InputReport, MediaKind, Verdict, VerdictCode, VideoReport,
-    WarnCode, parse_rendered_verdicts, render_verdicts, validate_concat_inputs, validate_inputs,
+    AudioReport, BlockCode, InputPolicy, InputReport, MediaKind, Verdict, VerdictCode,
+    VerdictParseError, VideoReport, WarnCode, parse_rendered_verdicts, render_verdicts,
+    validate_concat_inputs, validate_inputs,
 };
 
 pub use state::{

@@ -1,7 +1,8 @@
 use crate::callback::QueueUrl;
-use crate::id::{JobId, RequestId, TextIdError, TraceId, UserId, WorkerId, parse_text_id};
+use crate::id::{JobId, NodeId, RequestId, TextIdError, TraceId, UserId, WorkerId, parse_text_id};
 use crate::op::{OpResult, OpSpec};
 use crate::state::JobState;
+use crate::validate::Verdict;
 use async_trait::async_trait;
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime};
@@ -33,9 +34,93 @@ impl ProgressPercent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputFailure {
+    step: Option<usize>,
+    node: Option<NodeId>,
+    input: Option<usize>,
+    code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum InputFailureError {
+    #[error("input failure code is invalid: {0}")]
+    Code(TextIdError),
+    #[error("input failure node is invalid: {0}")]
+    Node(TextIdError),
+    #[error("input failure index {index} is not a position")]
+    Index { index: u32 },
+}
+
+impl InputFailure {
+    pub const CODE_MAX_LENGTH: usize = 64;
+
+    pub fn new(
+        step: Option<usize>,
+        node: Option<&str>,
+        input: Option<usize>,
+        code: &str,
+    ) -> Result<Self, InputFailureError> {
+        Ok(Self {
+            step,
+            node: node
+                .map(str::parse)
+                .transpose()
+                .map_err(InputFailureError::Node)?,
+            input,
+            code: parse_text_id(code, Self::CODE_MAX_LENGTH).map_err(InputFailureError::Code)?,
+        })
+    }
+
+    pub fn at_index(
+        step: Option<u32>,
+        node: Option<&str>,
+        input: Option<u32>,
+        code: &str,
+    ) -> Result<Self, InputFailureError> {
+        Self::new(index(step)?, node, index(input)?, code)
+    }
+
+    pub fn step(&self) -> Option<usize> {
+        self.step
+    }
+
+    pub fn node(&self) -> Option<&NodeId> {
+        self.node.as_ref()
+    }
+
+    pub fn input(&self) -> Option<usize> {
+        self.input
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+fn index(value: Option<u32>) -> Result<Option<usize>, InputFailureError> {
+    value
+        .map(|position| {
+            usize::try_from(position).map_err(|_| InputFailureError::Index { index: position })
+        })
+        .transpose()
+}
+
+impl From<&Verdict> for InputFailure {
+    fn from(verdict: &Verdict) -> Self {
+        Self {
+            step: None,
+            node: None,
+            input: verdict.input,
+            code: verdict.code.name(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobFailure {
     code: String,
     message: String,
+    inputs: Vec<InputFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -51,7 +136,13 @@ impl JobFailure {
         Ok(Self {
             code: parse_text_id(code, Self::CODE_MAX_LENGTH)?,
             message: message.to_string(),
+            inputs: Vec::new(),
         })
+    }
+
+    pub fn with_inputs(mut self, inputs: Vec<InputFailure>) -> Self {
+        self.inputs = inputs;
+        self
     }
 
     pub fn code(&self) -> &str {
@@ -60,6 +151,10 @@ impl JobFailure {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn inputs(&self) -> &[InputFailure] {
+        &self.inputs
     }
 }
 

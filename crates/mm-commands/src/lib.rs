@@ -20,9 +20,27 @@ pub struct Parameter {
     name: &'static str,
     kind: ParameterType,
     required: bool,
+    description: &'static str,
+    bounds: Option<&'static str>,
 }
 
 impl Parameter {
+    pub const fn new(
+        name: &'static str,
+        kind: ParameterType,
+        required: bool,
+        description: &'static str,
+        bounds: Option<&'static str>,
+    ) -> Self {
+        Self {
+            name,
+            kind,
+            required,
+            description,
+            bounds,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         self.name
     }
@@ -34,24 +52,111 @@ impl Parameter {
     pub fn is_required(&self) -> bool {
         self.required
     }
+
+    pub fn description(&self) -> &'static str {
+        self.description
+    }
+
+    pub fn bounds(&self) -> Option<&'static str> {
+        self.bounds
+    }
 }
 
-const SPEC: Parameter = Parameter {
-    name: "spec",
-    kind: ParameterType::Base64Spec,
-    required: true,
-};
+const SPEC: Parameter = Parameter::new(
+    "spec",
+    ParameterType::Base64Spec,
+    true,
+    "base64-encoded OpSpec protobuf",
+    None,
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     id: &'static str,
+    label: &'static str,
+    description: &'static str,
     parameters: &'static [Parameter],
     enabled: bool,
+    disabled_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MetadataError {
+    #[error("command {id} has no {field}")]
+    EmptyField { id: String, field: &'static str },
+    #[error("command {id} is disabled without a reason")]
+    DisabledWithoutReason { id: String },
+    #[error("command {id} is enabled but carries a disabled reason")]
+    ReasonOnEnabled { id: String },
+}
+
+fn validate_parts(
+    id: &str,
+    label: &str,
+    description: &str,
+    parameters: &[Parameter],
+    enabled: bool,
+    disabled_reason: Option<&str>,
+) -> Result<(), MetadataError> {
+    for (field, value) in [("id", id), ("label", label), ("description", description)] {
+        if value.is_empty() {
+            return Err(MetadataError::EmptyField {
+                id: id.to_string(),
+                field,
+            });
+        }
+    }
+    for parameter in parameters {
+        if parameter.name.is_empty() {
+            return Err(MetadataError::EmptyField {
+                id: id.to_string(),
+                field: "parameter name",
+            });
+        }
+        if parameter.description.is_empty() {
+            return Err(MetadataError::EmptyField {
+                id: id.to_string(),
+                field: "parameter description",
+            });
+        }
+    }
+    match (enabled, disabled_reason) {
+        (false, None) => Err(MetadataError::DisabledWithoutReason { id: id.to_string() }),
+        (true, Some(_)) => Err(MetadataError::ReasonOnEnabled { id: id.to_string() }),
+        _ => Ok(()),
+    }
 }
 
 impl Command {
+    pub fn from_parts(
+        id: &'static str,
+        label: &'static str,
+        description: &'static str,
+        parameters: &'static [Parameter],
+        enabled: bool,
+        disabled_reason: Option<&'static str>,
+    ) -> Result<Self, MetadataError> {
+        validate_parts(id, label, description, parameters, enabled, disabled_reason)?;
+        Ok(Self {
+            id,
+            label,
+            description,
+            parameters,
+            enabled,
+            disabled_reason,
+        })
+    }
+
     pub fn id(&self) -> &'static str {
         self.id
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.label
+    }
+
+    pub fn description(&self) -> &'static str {
+        self.description
     }
 
     pub fn parameters(&self) -> &'static [Parameter] {
@@ -60,6 +165,21 @@ impl Command {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub fn disabled_reason(&self) -> Option<&'static str> {
+        self.disabled_reason
+    }
+
+    pub fn validate_metadata(&self) -> Result<(), MetadataError> {
+        validate_parts(
+            self.id,
+            self.label,
+            self.description,
+            self.parameters,
+            self.enabled,
+            self.disabled_reason,
+        )
     }
 }
 
@@ -88,12 +208,41 @@ pub enum CommandError {
 pub fn registry() -> Vec<Command> {
     OpKind::ALL
         .into_iter()
-        .map(|kind| Command {
-            id: kind_name(kind),
-            parameters: &[SPEC],
-            enabled: kind.ensure_executable().is_ok(),
+        .map(|kind| {
+            let (label, description) = metadata(kind);
+            Command::from_parts(
+                kind_name(kind),
+                label,
+                description,
+                &[SPEC],
+                kind.ensure_executable().is_ok(),
+                None,
+            )
+            .expect("command metadata is complete")
         })
         .collect()
+}
+
+fn metadata(kind: OpKind) -> (&'static str, &'static str) {
+    match kind {
+        OpKind::Concat => ("Concat", "Join two or more inputs into one output"),
+        OpKind::Probe => ("Probe", "Read container and stream metadata"),
+        OpKind::Transcode => ("Transcode", "Encode one input to a profile"),
+        OpKind::Trim => ("Trim", "Cut a range from one input"),
+        OpKind::Thumbnail => ("Thumbnail", "Extract frames or a sprite"),
+        OpKind::Resize => ("Resize", "Resize a still image"),
+        OpKind::Convert => ("Convert", "Convert a still image format"),
+        OpKind::Composite => ("Composite", "Composite still images"),
+        OpKind::Package => ("Package", "Package one rendition as HLS"),
+        OpKind::Batch => ("Batch", "Run steps in order"),
+        OpKind::Graph => ("Graph", "Run nodes in dependency order"),
+        OpKind::Ladder => ("Ladder", "Encode and package ordered renditions"),
+        OpKind::Loudness => ("Loudness", "Measure or normalise loudness"),
+        OpKind::Subtitle => ("Subtitle", "Burn, mux or strip captions"),
+        OpKind::Grade => ("Grade", "Adjust colour and optionally land a scope"),
+        OpKind::Audio => ("Audio", "Process and mix audio"),
+        OpKind::Title => ("Title", "Render text as a still"),
+    }
 }
 
 fn kind_name(kind: OpKind) -> &'static str {

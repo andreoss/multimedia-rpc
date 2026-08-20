@@ -64,3 +64,82 @@ fn a_line_naming_another_arm_is_refused() {
         Err(CommandError::WrongArm { .. })
     ));
 }
+
+#[test]
+fn every_command_publishes_complete_metadata() {
+    let commands = registry();
+    assert_eq!(commands.len(), OpKind::ALL.len());
+    for command in &commands {
+        assert!(!command.label().is_empty(), "{} has no label", command.id());
+        assert!(
+            !command.description().is_empty(),
+            "{} has no description",
+            command.id()
+        );
+        command.validate_metadata().unwrap();
+        for parameter in command.parameters() {
+            assert!(!parameter.name().is_empty());
+            assert!(
+                !parameter.description().is_empty(),
+                "{} parameter {} has no description",
+                command.id(),
+                parameter.name()
+            );
+        }
+        if command.is_enabled() {
+            assert!(command.disabled_reason().is_none());
+        } else {
+            assert!(command.disabled_reason().is_some());
+        }
+    }
+}
+
+#[test]
+fn incomplete_metadata_is_refused() {
+    use mm_commands::{Command, MetadataError, Parameter, ParameterType};
+
+    static EMPTY_DESCRIPTION: Parameter =
+        Parameter::new("spec", ParameterType::Base64Spec, true, "", None);
+    static EMPTY_PARAMETERS: [Parameter; 1] = [EMPTY_DESCRIPTION];
+
+    assert!(matches!(
+        Command::from_parts("probe", "", "Read metadata", &[], true, None),
+        Err(MetadataError::EmptyField { field: "label", .. })
+    ));
+    assert!(matches!(
+        Command::from_parts("probe", "Probe", "", &[], true, None),
+        Err(MetadataError::EmptyField {
+            field: "description",
+            ..
+        })
+    ));
+    assert!(matches!(
+        Command::from_parts(
+            "probe",
+            "Probe",
+            "Read metadata",
+            &EMPTY_PARAMETERS,
+            true,
+            None
+        ),
+        Err(MetadataError::EmptyField {
+            field: "parameter description",
+            ..
+        })
+    ));
+    assert!(matches!(
+        Command::from_parts("probe", "Probe", "Read metadata", &[], false, None),
+        Err(MetadataError::DisabledWithoutReason { .. })
+    ));
+    assert!(matches!(
+        Command::from_parts(
+            "probe",
+            "Probe",
+            "Read metadata",
+            &[],
+            true,
+            Some("not ready")
+        ),
+        Err(MetadataError::ReasonOnEnabled { .. })
+    ));
+}

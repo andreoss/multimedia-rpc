@@ -89,3 +89,22 @@ pub async fn upload_object(
     }
     MediaRef::object_uri(&format!("s3://{bucket}/{key}")).expect("valid media ref")
 }
+
+/// Compares `actual` with a golden file, rewriting it only when
+/// `UPDATE_GOLDEN=1` is set.
+pub fn assert_golden(path: &Path, actual: &str) {
+    if std::env::var("UPDATE_GOLDEN").is_ok_and(|value| value == "1") {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("golden directory exists");
+        }
+        std::fs::write(path, actual).expect("golden file writes");
+        return;
+    }
+    let expected = std::fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!(
+            "golden {} cannot be read: {error}; rerun with UPDATE_GOLDEN=1 to write it",
+            path.display()
+        )
+    });
+    assert_eq!(expected, actual, "golden {} differs", path.display());
+}

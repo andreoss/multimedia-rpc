@@ -13,4 +13,5 @@ tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "s
 
 [dev-dependencies]
 libc.workspace = true
+proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }

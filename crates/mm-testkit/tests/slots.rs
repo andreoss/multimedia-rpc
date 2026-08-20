@@ -37,3 +37,22 @@ fn a_dropped_slot_frees_its_lock_for_the_next_holder() {
     let again = mm_testkit::stack_slot();
     drop(again);
 }
+
+#[test]
+fn the_golden_helper_compares_and_updates_only_when_told() {
+    let path = mm_testkit::scratch_path("golden-helper").join("playlist.m3u8");
+    let _ = std::fs::remove_file(&path);
+    let actual = "#EXTM3U\n#EXT-X-ENDLIST\n";
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, actual).unwrap();
+    mm_testkit::assert_golden(&path, actual);
+    std::fs::write(&path, "stale\n").unwrap();
+    let outcome = std::panic::catch_unwind(|| mm_testkit::assert_golden(&path, actual));
+    assert!(outcome.is_err(), "a different golden was accepted");
+    // SAFETY: this test owns the process environment key while it runs.
+    unsafe { std::env::set_var("UPDATE_GOLDEN", "1") };
+    mm_testkit::assert_golden(&path, actual);
+    // SAFETY: this test owns the process environment key while it runs.
+    unsafe { std::env::remove_var("UPDATE_GOLDEN") };
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), actual);
+}

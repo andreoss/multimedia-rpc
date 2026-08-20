@@ -37,3 +37,12 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 proptest = "1"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "uuid",
+    "time",
+    "migrate",
+    "macros",
+] }
+time = "0.3"

@@ -196,8 +196,12 @@ fn parse_request_id(value: &str) -> Result<RequestId, Status> {
 
 fn parse_spec(value: Option<v1::OpSpec>) -> Result<OpSpec, Status> {
     let spec = value.ok_or_else(|| Status::invalid_argument("spec is required"))?;
-    OpSpec::try_from(spec)
-        .map_err(|error| Status::invalid_argument(format!("spec is invalid: {error}")))
+    let spec = OpSpec::try_from(spec)
+        .map_err(|error| Status::invalid_argument(format!("spec is invalid: {error}")))?;
+    spec.kind()
+        .ensure_executable()
+        .map_err(|error| Status::unimplemented(error.to_string()))?;
+    Ok(spec)
 }
 
 fn parse_callback(value: Option<v1::Callback>) -> Result<Option<QueueUrl>, Status> {

@@ -253,4 +253,9 @@ pub trait JobRepository: Send + Sync {
     ) -> Result<JobRecord, JobStoreError>;
     async fn mark_cancelled(&self, id: JobId) -> Result<JobRecord, JobStoreError>;
     async fn request_cancel(&self, id: JobId) -> Result<(), JobStoreError>;
+    async fn claim_callback(&self, id: JobId) -> Result<bool, JobStoreError>;
+    async fn unpublished_callbacks(
+        &self,
+        limit: NonZeroU32,
+    ) -> Result<Vec<JobRecord>, JobStoreError>;
 }

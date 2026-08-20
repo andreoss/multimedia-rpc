@@ -1218,3 +1218,112 @@ async fn state_and_progress_changes_notify_the_events_listener() {
     assert_eq!(changed, job.id);
     db.dispose().await;
 }
+
+#[tokio::test]
+async fn unpublished_callbacks_cover_terminal_rows_with_a_queue_only() {
+    let db = fresh_db().await;
+    let repository = db.repository();
+    let queue = QueueUrl::new("http://127.0.0.1:9324/queue/outcomes").expect("valid url");
+
+    let plain = repository
+        .create(new_job("owner-1", "req-plain"))
+        .await
+        .expect("create succeeds");
+    let waiting = repository
+        .create(new_job("owner-1", "req-waiting-cb").with_callback(queue.clone()))
+        .await
+        .expect("create succeeds");
+    let cancelled = repository
+        .create(new_job("owner-1", "req-cancelled-cb").with_callback(queue.clone()))
+        .await
+        .expect("create succeeds");
+    repository
+        .mark_cancelled(cancelled.id)
+        .await
+        .expect("cancel succeeds");
+    repository
+        .mark_cancelled(plain.id)
+        .await
+        .expect("cancel succeeds");
+
+    let unpublished = repository
+        .unpublished_callbacks(limit(10))
+        .await
+        .expect("listing succeeds");
+    let ids: Vec<JobId> = unpublished.iter().map(|record| record.id).collect();
+    assert_eq!(ids, vec![cancelled.id]);
+
+    assert!(
+        repository
+            .claim_callback(cancelled.id)
+            .await
+            .expect("claim succeeds"),
+        "the first claim wins"
+    );
+    assert!(
+        !repository
+            .claim_callback(cancelled.id)
+            .await
+            .expect("claim succeeds"),
+        "a second claim must lose"
+    );
+    assert!(
+        repository
+            .unpublished_callbacks(limit(10))
+            .await
+            .expect("listing succeeds")
+            .is_empty()
+    );
+    assert!(
+        !repository
+            .claim_callback(waiting.id)
+            .await
+            .expect("claim succeeds"),
+        "a non-terminal job is not publishable"
+    );
+    assert!(
+        !repository
+            .claim_callback(plain.id)
+            .await
+            .expect("claim succeeds"),
+        "a job without a callback is not publishable"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_reaped_job_with_a_callback_becomes_publishable() {
+    let db = fresh_db().await;
+    let repository = db.repository();
+    let queue = QueueUrl::new("http://127.0.0.1:9324/queue/outcomes").expect("valid url");
+
+    let overdue = repository
+        .create(
+            new_job_due(
+                "owner-1",
+                "req-overdue-cb",
+                Some(SystemTime::now() - Duration::from_secs(1)),
+            )
+            .with_callback(queue),
+        )
+        .await
+        .expect("create succeeds");
+    let reaped = repository.fail_overdue().await.expect("reap succeeds");
+    assert_eq!(reaped, vec![overdue.id]);
+
+    let unpublished = repository
+        .unpublished_callbacks(limit(10))
+        .await
+        .expect("listing succeeds");
+    assert_eq!(unpublished.len(), 1);
+    assert_eq!(unpublished[0].id, overdue.id);
+    assert_eq!(unpublished[0].state, JobState::Failed);
+    assert_eq!(
+        unpublished[0]
+            .failure
+            .as_ref()
+            .map(|failure| failure.code()),
+        Some("timeout")
+    );
+    db.dispose().await;
+}

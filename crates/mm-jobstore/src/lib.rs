@@ -692,6 +692,46 @@ impl JobRepository for PgJobRepository {
         }
     }
 
+    async fn claim_callback(&self, id: JobId) -> Result<bool, JobStoreError> {
+        let updated = sqlx::query!(
+            "UPDATE jobs SET callback_published_at = now() \
+             WHERE id = $1 AND callback_published_at IS NULL \
+               AND callback_queue_url IS NOT NULL \
+               AND state IN ('SUCCEEDED', 'FAILED', 'CANCELLED')",
+            id.as_uuid()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(updated.rows_affected() > 0)
+    }
+
+    async fn unpublished_callbacks(
+        &self,
+        limit: NonZeroU32,
+    ) -> Result<Vec<JobRecord>, JobStoreError> {
+        sqlx::query_as!(
+            JobRow,
+            "SELECT id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested, callback_queue_url \
+             FROM jobs \
+             WHERE state IN ('SUCCEEDED', 'FAILED', 'CANCELLED') \
+               AND callback_queue_url IS NOT NULL \
+               AND callback_published_at IS NULL \
+             ORDER BY finished_at \
+             LIMIT $1",
+            i64::from(limit.get())
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?
+        .into_iter()
+        .map(to_record)
+        .collect()
+    }
+
     async fn request_cancel(&self, id: JobId) -> Result<(), JobStoreError> {
         let updated = sqlx::query!(
             "UPDATE jobs SET cancel_requested = true \

@@ -90,8 +90,6 @@ pub async fn upload_object(
     MediaRef::object_uri(&format!("s3://{bucket}/{key}")).expect("valid media ref")
 }
 
-/// Compares `actual` with a golden file, rewriting it only when
-/// `UPDATE_GOLDEN=1` is set.
 pub fn assert_golden(path: &Path, actual: &str) {
     if std::env::var("UPDATE_GOLDEN").is_ok_and(|value| value == "1") {
         if let Some(parent) = path.parent() {

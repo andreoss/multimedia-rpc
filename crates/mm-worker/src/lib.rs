@@ -203,13 +203,6 @@ async fn job_ready(notifications: Option<&dyn JobNotifications>) {
     }
 }
 
-/// A permit is held while the row it claimed still says Running, so the
-/// semaphore bounds the rows and not only the tasks. Every terminal write in
-/// the worker is written so that a refused write leaves the row Running, and a
-/// released permit then lets the next claim put one row too many in Running
-/// under a bound of two. The reaper owns such a row from then on, so this waits
-/// for it to leave Running, bounded by twice the lease because that is how long
-/// it can stay Running before the reaper is bound to have taken it.
 async fn wait_while_running(ctx: &Arc<WorkerConfig>, job_id: JobId) {
     let step = ctx.reconcile_interval.min(Duration::from_millis(250));
     let limit = ctx.lease * 2;

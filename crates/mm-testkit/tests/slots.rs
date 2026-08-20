@@ -49,10 +49,8 @@ fn the_golden_helper_compares_and_updates_only_when_told() {
     std::fs::write(&path, "stale\n").unwrap();
     let outcome = std::panic::catch_unwind(|| mm_testkit::assert_golden(&path, actual));
     assert!(outcome.is_err(), "a different golden was accepted");
-    // SAFETY: this test owns the process environment key while it runs.
     unsafe { std::env::set_var("UPDATE_GOLDEN", "1") };
     mm_testkit::assert_golden(&path, actual);
-    // SAFETY: this test owns the process environment key while it runs.
     unsafe { std::env::remove_var("UPDATE_GOLDEN") };
     assert_eq!(std::fs::read_to_string(&path).unwrap(), actual);
 }

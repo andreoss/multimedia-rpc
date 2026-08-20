@@ -89,7 +89,6 @@ pub async fn start(
     Ok(stop)
 }
 
-/// Reclaims a terminal job's paths and drops its entry.
 pub async fn finish(ctx: &WorkerConfig, id: JobId, state: Option<JobState>) {
     match state {
         Some(JobState::Succeeded) => {

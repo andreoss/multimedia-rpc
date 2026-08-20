@@ -360,4 +360,21 @@ impl ObjectStore for S3ObjectStore {
             .map_err(backend)?;
         Ok(presigned.uri().to_string())
     }
+
+    async fn presign_put(
+        &self,
+        object: &ObjectRef,
+        expires_in: Duration,
+    ) -> Result<String, ObjectStoreError> {
+        let config = PresigningConfig::expires_in(expires_in).map_err(backend)?;
+        let presigned = self
+            .client
+            .put_object()
+            .bucket(object.bucket())
+            .key(object.key())
+            .presigned(config)
+            .await
+            .map_err(backend)?;
+        Ok(presigned.uri().to_string())
+    }
 }

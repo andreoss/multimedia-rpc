@@ -60,6 +60,16 @@ pub trait ObjectStore: Send + Sync {
         object: &ObjectRef,
         expires_in: Duration,
     ) -> Result<String, ObjectStoreError>;
+
+    async fn presign_put(
+        &self,
+        _object: &ObjectRef,
+        _expires_in: Duration,
+    ) -> Result<String, ObjectStoreError> {
+        Err(ObjectStoreError::Backend {
+            message: "presigned put is not implemented by this store".to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

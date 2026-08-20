@@ -58,7 +58,8 @@ deprecated_owner!(
     v1::GetTemplateRequest,
     v1::ListTemplatesRequest,
     v1::DeleteTemplateRequest,
-    v1::RenderTemplateRequest
+    v1::RenderTemplateRequest,
+    v1::CreateUploadTargetRequest
 );
 
 #[derive(Clone)]
@@ -298,6 +299,15 @@ impl<T: MediaJobService> MediaJobService for Interceptor<T> {
     ) -> Result<Response<v1::RenderTemplateResponse>, Status> {
         self.inner
             .render_template(self.identify(request, "render_template")?)
+            .await
+    }
+
+    async fn create_upload_target(
+        &self,
+        request: Request<v1::CreateUploadTargetRequest>,
+    ) -> Result<Response<v1::CreateUploadTargetResponse>, Status> {
+        self.inner
+            .create_upload_target(self.identify(request, "create_upload_target")?)
             .await
     }
 }

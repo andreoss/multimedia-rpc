@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use mm_domain::{
     JobEventNotifications, JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
-    OpSpec, ParameterDeclaration, ParameterName, ParameterValue, ProgressPercent, QueueUrl,
-    RequestId, Template, TemplateError, TemplateId, render,
+    ObjectRef, ObjectStore, OpSpec, ParameterDeclaration, ParameterName, ParameterValue,
+    ProgressPercent, QueueUrl, RequestId, Template, TemplateError, TemplateId, render,
 };
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
@@ -72,11 +72,23 @@ impl WatchHub {
 pub(crate) struct MediaJobs {
     repository: Arc<dyn JobRepository>,
     watch: WatchHub,
+    store: Arc<dyn ObjectStore>,
+    bucket: String,
 }
 
 impl MediaJobs {
-    pub(crate) fn new(repository: Arc<dyn JobRepository>, watch: WatchHub) -> Self {
-        Self { repository, watch }
+    pub(crate) fn new(
+        repository: Arc<dyn JobRepository>,
+        watch: WatchHub,
+        store: Arc<dyn ObjectStore>,
+        bucket: String,
+    ) -> Self {
+        Self {
+            repository,
+            watch,
+            store,
+            bucket,
+        }
     }
 
     async fn refetch(&self, id: JobId) -> Result<JobRecord, Status> {
@@ -556,5 +568,29 @@ impl MediaJobService for MediaJobs {
             }
             Err(error) => Err(store_failure(error)),
         }
+    }
+
+    async fn create_upload_target(
+        &self,
+        request: Request<v1::CreateUploadTargetRequest>,
+    ) -> Result<Response<v1::CreateUploadTargetResponse>, Status> {
+        let _owner = crate::interceptor::owner_of(&request)?;
+        let message = request.into_inner();
+        let expires = if message.expires_seconds == 0 {
+            900
+        } else {
+            message.expires_seconds.min(3600)
+        };
+        let object = ObjectRef::new(&self.bucket, &format!("uploads/{}", JobId::generate()))
+            .map_err(|error| Status::internal(format!("upload key is invalid: {error}")))?;
+        let upload_url = self
+            .store
+            .presign_put(&object, Duration::from_secs(u64::from(expires)))
+            .await
+            .map_err(|error| Status::internal(format!("object store failed: {error}")))?;
+        Ok(Response::new(v1::CreateUploadTargetResponse {
+            upload_url,
+            media_id: format!("s3://{}/{}", object.bucket(), object.key()),
+        }))
     }
 }

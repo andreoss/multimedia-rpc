@@ -7,5 +7,3 @@ lint:
 breaking:
   use:
     - FILE
-  except:
-    - FIELD_SAME_TYPE

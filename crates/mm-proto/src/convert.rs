@@ -1,17 +1,17 @@
 use crate::v1;
 use mm_domain::{
-    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CaptionFormat, ConcatSpec,
-    GradeAdjustments, GradeResult, GradeScope, GradeSpec, GraphNode, GraphResult, GraphSpec,
-    ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder,
-    InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, LadderResult,
-    LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, MediaSource,
-    NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, OutputRange, PackageResult, PackageSpec, ParameterDeclaration,
-    ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl,
-    RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome, StepState,
-    SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
-    ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
-    TrimSpec, VideoStreamInfo, failure_code, verdict_code,
+    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CaptionFormat, Colour,
+    ConcatSpec, GradeAdjustments, GradeResult, GradeScope, GradeSpec, GraphNode, GraphResult,
+    GraphSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError,
+    InputOrder, InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState,
+    LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef,
+    MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec,
+    OpSpecError, OutputProfile, OutputProfileError, OutputRange, PackageResult, PackageSpec,
+    ParameterDeclaration, ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec,
+    QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome,
+    StepState, SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
+    ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TitleResult, TitleSpec, TranscodeResult,
+    TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo, failure_code, verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -415,6 +415,39 @@ impl From<&LoudnessSpec> for v1::LoudnessSpec {
     }
 }
 
+impl TryFrom<v1::TitleSpec> for TitleSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::TitleSpec) -> Result<Self, Self::Error> {
+        TitleSpec::new(
+            value.text,
+            value.width,
+            value.height,
+            value.point_size,
+            Colour::parse("text", &value.colour)?,
+            value
+                .background
+                .map(|background| Colour::parse("background", &background))
+                .transpose()?,
+            image_format_from_raw(value.format).unwrap_or(ImageFormat::Png),
+        )
+    }
+}
+
+impl From<&TitleSpec> for v1::TitleSpec {
+    fn from(value: &TitleSpec) -> Self {
+        Self {
+            text: value.text().to_string(),
+            width: value.width(),
+            height: value.height(),
+            point_size: value.point_size(),
+            colour: value.colour().hex(),
+            background: value.background().map(Colour::hex),
+            format: image_format_to_raw(Some(value.format())),
+        }
+    }
+}
+
 impl TryFrom<v1::AudioSpec> for AudioSpec {
     type Error = OpSpecError;
 
@@ -593,6 +626,7 @@ impl TryFrom<v1::OpSpec> for OpSpec {
             }
             v1::op_spec::Op::Grade(grade) => Ok(OpSpec::Grade(GradeSpec::try_from(grade)?)),
             v1::op_spec::Op::Audio(audio) => Ok(OpSpec::Audio(AudioSpec::try_from(audio)?)),
+            v1::op_spec::Op::Title(title) => Ok(OpSpec::Title(TitleSpec::try_from(title)?)),
         }
     }
 }
@@ -646,6 +680,7 @@ impl From<&OpSpec> for v1::OpSpec {
             }
             OpSpec::Grade(grade) => v1::op_spec::Op::Grade(v1::GradeSpec::from(grade)),
             OpSpec::Audio(audio) => v1::op_spec::Op::Audio(v1::AudioSpec::from(audio)),
+            OpSpec::Title(title) => v1::op_spec::Op::Title(v1::TitleSpec::from(title)),
         };
         v1::OpSpec { op: Some(op) }
     }
@@ -671,6 +706,22 @@ impl From<&LoudnessResult> for v1::LoudnessResult {
             integrated_lufs: value.integrated_lufs(),
             true_peak_db: value.true_peak_db(),
             loudness_range_lu: value.loudness_range_lu(),
+        }
+    }
+}
+
+impl TryFrom<v1::TitleResult> for TitleResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::TitleResult) -> Result<Self, Self::Error> {
+        Ok(TitleResult::new(required_ref(value.output)?))
+    }
+}
+
+impl From<&TitleResult> for v1::TitleResult {
+    fn from(value: &TitleResult) -> Self {
+        Self {
+            output: Some(v1::MediaRef::from(value.output())),
         }
     }
 }
@@ -803,6 +854,7 @@ impl TryFrom<v1::OpResult> for OpResult {
             }
             v1::op_result::Op::Grade(grade) => Ok(OpResult::Grade(GradeResult::try_from(grade)?)),
             v1::op_result::Op::Audio(audio) => Ok(OpResult::Audio(AudioResult::try_from(audio)?)),
+            v1::op_result::Op::Title(title) => Ok(OpResult::Title(TitleResult::try_from(title)?)),
         }
     }
 }
@@ -1308,6 +1360,7 @@ impl From<&OpResult> for v1::OpResult {
             }
             OpResult::Grade(grade) => v1::op_result::Op::Grade(v1::GradeResult::from(grade)),
             OpResult::Audio(audio) => v1::op_result::Op::Audio(v1::AudioResult::from(audio)),
+            OpResult::Title(title) => v1::op_result::Op::Title(v1::TitleResult::from(title)),
         };
         v1::OpResult { op: Some(op) }
     }

@@ -266,6 +266,15 @@ fn op_spec_oneof_carries_every_arm() {
                 }),
             }],
         }),
+        v1::op_spec::Op::Title(v1::TitleSpec {
+            text: "Hello".to_string(),
+            width: 320,
+            height: 120,
+            point_size: 24,
+            colour: "#ffffff".to_string(),
+            background: Some("#112233".to_string()),
+            format: v1::ImageFormat::Png as i32,
+        }),
         v1::op_spec::Op::Audio(v1::AudioSpec {
             inputs: vec![media()],
             gain_db: 6.0,
@@ -324,7 +333,7 @@ fn op_spec_oneof_carries_every_arm() {
             poster_seconds: None,
         }),
     ];
-    assert_eq!(arms.len(), 14);
+    assert_eq!(arms.len(), 15);
     for arm in arms {
         assert!(OpSpec::try_from(v1::OpSpec { op: Some(arm) }).is_ok());
     }

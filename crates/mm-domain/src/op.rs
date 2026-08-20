@@ -376,6 +376,22 @@ pub enum OpSpecError {
     InvalidGamma { value: f64 },
     #[error("grade has no adjustment and no lookup table")]
     EmptyGrade,
+    #[error("title text is empty")]
+    EmptyTitle,
+    #[error("title text has {length} characters, above the {max} allowed")]
+    TitleTooLong { length: usize, max: usize },
+    #[error("title {dimension} {value} is not between 1 and {max}")]
+    TitleDimension {
+        dimension: &'static str,
+        value: u32,
+        max: u32,
+    },
+    #[error("title point size {value} is not between 1 and {max}")]
+    InvalidPointSize { value: u32, max: u32 },
+    #[error("title {field} colour {value:?} is not hex")]
+    InvalidColour { field: &'static str, value: String },
+    #[error("a jpeg title cannot have a transparent background")]
+    TransparentJpeg,
     #[error("audio has no inputs")]
     EmptyAudioInputs,
     #[error("audio has {count} inputs, above the {max} allowed")]
@@ -960,6 +976,162 @@ impl AudioSpec {
 
     pub fn limiter_true_peak_db(&self) -> Option<f64> {
         self.limiter_true_peak_db
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Colour {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+}
+
+impl Colour {
+    pub fn parse(field: &'static str, value: &str) -> Result<Self, OpSpecError> {
+        let text = value.strip_prefix('#').unwrap_or(value);
+        let digits = |slice: &str| u8::from_str_radix(slice, 16).ok();
+        let (red, green, blue, alpha) = match text.len() {
+            3 => {
+                let expand = |slice: &str| digits(slice).map(|value| value * 16 + value);
+                (
+                    expand(&text[0..1]),
+                    expand(&text[1..2]),
+                    expand(&text[2..3]),
+                    Some(255),
+                )
+            }
+            6 => (
+                digits(&text[0..2]),
+                digits(&text[2..4]),
+                digits(&text[4..6]),
+                Some(255),
+            ),
+            8 => (
+                digits(&text[0..2]),
+                digits(&text[2..4]),
+                digits(&text[4..6]),
+                digits(&text[6..8]),
+            ),
+            _ => (None, None, None, None),
+        };
+        match (red, green, blue, alpha) {
+            (Some(red), Some(green), Some(blue), Some(alpha)) => Ok(Self {
+                red,
+                green,
+                blue,
+                alpha,
+            }),
+            _ => Err(OpSpecError::InvalidColour {
+                field,
+                value: value.to_string(),
+            }),
+        }
+    }
+
+    pub fn hex(self) -> String {
+        if self.alpha == 255 {
+            format!("#{:02x}{:02x}{:02x}", self.red, self.green, self.blue)
+        } else {
+            format!(
+                "#{:02x}{:02x}{:02x}{:02x}",
+                self.red, self.green, self.blue, self.alpha
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleSpec {
+    text: String,
+    width: u32,
+    height: u32,
+    point_size: u32,
+    colour: Colour,
+    background: Option<Colour>,
+    format: ImageFormat,
+}
+
+impl TitleSpec {
+    pub const MAX_TEXT_CHARS: usize = 1024;
+    pub const MAX_POINT_SIZE: u32 = 512;
+    pub const MAX_DIMENSION: u32 = 8192;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        text: impl Into<String>,
+        width: u32,
+        height: u32,
+        point_size: u32,
+        colour: Colour,
+        background: Option<Colour>,
+        format: ImageFormat,
+    ) -> Result<Self, OpSpecError> {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return Err(OpSpecError::EmptyTitle);
+        }
+        if text.chars().count() > Self::MAX_TEXT_CHARS {
+            return Err(OpSpecError::TitleTooLong {
+                length: text.chars().count(),
+                max: Self::MAX_TEXT_CHARS,
+            });
+        }
+        for (dimension, value) in [("width", width), ("height", height)] {
+            if value == 0 || value > Self::MAX_DIMENSION {
+                return Err(OpSpecError::TitleDimension {
+                    dimension,
+                    value,
+                    max: Self::MAX_DIMENSION,
+                });
+            }
+        }
+        if point_size == 0 || point_size > Self::MAX_POINT_SIZE {
+            return Err(OpSpecError::InvalidPointSize {
+                value: point_size,
+                max: Self::MAX_POINT_SIZE,
+            });
+        }
+        if format == ImageFormat::Jpeg && background.is_none() {
+            return Err(OpSpecError::TransparentJpeg);
+        }
+        Ok(Self {
+            text,
+            width,
+            height,
+            point_size,
+            colour,
+            background,
+            format,
+        })
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn point_size(&self) -> u32 {
+        self.point_size
+    }
+
+    pub fn colour(&self) -> Colour {
+        self.colour
+    }
+
+    pub fn background(&self) -> Option<Colour> {
+        self.background
+    }
+
+    pub fn format(&self) -> ImageFormat {
+        self.format
     }
 }
 
@@ -1705,6 +1877,7 @@ pub enum OpSpec {
     Subtitle(SubtitleSpec),
     Grade(GradeSpec),
     Audio(AudioSpec),
+    Title(TitleSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1725,6 +1898,7 @@ pub enum OpKind {
     Subtitle,
     Grade,
     Audio,
+    Title,
 }
 
 impl std::fmt::Display for OpKind {
@@ -1746,6 +1920,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Subtitle => "subtitle",
             OpKind::Grade => "grade",
             OpKind::Audio => "audio",
+            OpKind::Title => "title",
         };
         formatter.write_str(name)
     }
@@ -1781,7 +1956,8 @@ impl OpKind {
             | OpKind::Loudness
             | OpKind::Subtitle
             | OpKind::Grade
-            | OpKind::Audio => Ok(()),
+            | OpKind::Audio
+            | OpKind::Title => Ok(()),
         }
     }
 }
@@ -1803,6 +1979,7 @@ impl OpSpec {
             OpSpec::Subtitle(_) => OpKind::Subtitle,
             OpSpec::Grade(_) => OpKind::Grade,
             OpSpec::Audio(_) => OpKind::Audio,
+            OpSpec::Title(_) => OpKind::Title,
         }
     }
 
@@ -1838,6 +2015,7 @@ impl OpSpec {
                 inputs
             }
             OpSpec::Audio(audio) => audio.inputs().iter().collect(),
+            OpSpec::Title(_) => Vec::new(),
         }
     }
 
@@ -2227,6 +2405,21 @@ impl RenditionResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TitleResult {
+    output: MediaRef,
+}
+
+impl TitleResult {
+    pub fn new(output: MediaRef) -> Self {
+        Self { output }
+    }
+
+    pub fn output(&self) -> &MediaRef {
+        &self.output
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioResult {
     output: MediaRef,
     duration_seconds: f64,
@@ -2378,6 +2571,7 @@ pub enum OpResult {
     Subtitle(SubtitleResult),
     Grade(GradeResult),
     Audio(AudioResult),
+    Title(TitleResult),
 }
 
 impl OpResult {
@@ -2396,6 +2590,7 @@ impl OpResult {
             OpResult::Subtitle(result) => Some(result.output()),
             OpResult::Grade(result) => Some(result.output()),
             OpResult::Audio(result) => Some(result.output()),
+            OpResult::Title(result) => Some(result.output()),
             OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
         }
     }

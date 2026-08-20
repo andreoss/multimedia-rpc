@@ -136,6 +136,16 @@ message SubtitleSpec {
   SubtitleMode mode = 4;
 }
 
+message TitleSpec {
+  string text = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 point_size = 4;
+  string colour = 5;
+  optional string background = 6;
+  ImageFormat format = 7;
+}
+
 message AudioSpec {
   repeated InputSource inputs = 1;
   double gain_db = 2;
@@ -162,6 +172,7 @@ message OpSpec {
     SubtitleSpec subtitle = 12;
     GradeSpec grade = 13;
     AudioSpec audio = 14;
+    TitleSpec title = 15;
   }
 }
 
@@ -279,6 +290,10 @@ message SubtitleResult {
   MediaRef output = 1;
 }
 
+message TitleResult {
+  MediaRef output = 1;
+}
+
 message AudioResult {
   MediaRef output = 1;
   double duration_seconds = 2;
@@ -300,5 +315,6 @@ message OpResult {
     SubtitleResult subtitle = 12;
     GradeResult grade = 13;
     AudioResult audio = 14;
+    TitleResult title = 15;
   }
 }

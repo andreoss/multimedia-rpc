@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    AudioSpec, BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, ConcatSpec,
+    AudioSpec, BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, Colour, ConcatSpec,
     GradeAdjustments, GradeScope, GradeSpec, GraphNode, GraphSpec, ImageFormat, ImageOp, ImageSpec,
     InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec, LoudnessSpec,
     LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore,
     ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
-    ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks,
+    ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks, TitleSpec,
     TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_ffmpeg::{
@@ -3949,4 +3949,127 @@ fn window_mean_db(path: &Path, start: f64, duration: f64) -> f64 {
         .nth(1)
         .and_then(|rest| rest.trim().trim_end_matches(" dB").parse().ok())
         .expect("the mean is a number")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_lands_a_transparent_still_at_the_box_dimensions() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let repository = db.repository();
+    let spec = TitleSpec::new(
+        "Hello",
+        320,
+        120,
+        32,
+        Colour::parse("text", "#ffffff").unwrap(),
+        None,
+        ImageFormat::Png,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Title(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-title"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Title(result) = record.result.expect("result recorded") else {
+        panic!("expected a title result");
+    };
+    let MediaRef::Object(object) = result.output() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/title.png", job.id));
+    let path = scratch_dir("title").join(format!("{}-title.png", job.id));
+    write_object(&store, object, &path).await;
+    let (width, height, format) = identify_frame(&store, object).await;
+    assert_eq!((width, height), (320, 120));
+    assert_eq!(format, "PNG");
+    assert_eq!(magick_format(&path, "%[opaque]"), "False");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_graph_composes_a_title_onto_a_frame() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let base = image_fixture("title-base.png", 400, 300, "white");
+    let base_ref = upload_input(&store, &base, "inputs/title-base.png").await;
+    let repository = db.repository();
+    let title = TitleSpec::new(
+        "Hello",
+        200,
+        100,
+        32,
+        Colour::parse("text", "#000000").unwrap(),
+        None,
+        ImageFormat::Png,
+    )
+    .unwrap();
+    let composite = ImageSpec::new(
+        vec![
+            InputSource::from(NodeRef::new("title", 0).unwrap()),
+            InputSource::from(base_ref),
+        ],
+        ImageOp::Composite,
+        0,
+        0,
+        ResizeMode::Fit,
+        Some(ImageFormat::Jpeg),
+    )
+    .unwrap();
+    let graph = GraphSpec::new(vec![
+        GraphNode::new("title", OpSpec::Title(title)).unwrap(),
+        GraphNode::new("comp", OpSpec::Image(composite)).unwrap(),
+    ])
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Graph(graph)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-title-graph"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Graph(graph) = record.result.expect("result recorded") else {
+        panic!("expected a graph result");
+    };
+    let node = graph
+        .nodes()
+        .iter()
+        .find(|node| node.id().as_str() == "comp")
+        .expect("the composite node recorded");
+    let StepState::Result(OpResult::Image(image)) = node.state() else {
+        panic!("expected the composite image result");
+    };
+    let MediaRef::Object(object) = &image.outputs()[0] else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("title").join(format!("{}-graph.jpg", job.id));
+    write_object(&store, object, &path).await;
+    let (width, height, format) = identify_frame(&store, object).await;
+    assert_eq!((width, height), (400, 300));
+    assert_eq!(format, "JPEG");
+    assert!(
+        mean_luma(&path) < 0.999,
+        "the title was not laid over the white frame"
+    );
+    db.dispose().await;
+}
+
+fn magick_format(path: &Path, format: &str) -> String {
+    let output = Command::new("magick")
+        .arg(path)
+        .arg("-format")
+        .arg(format)
+        .arg("info:")
+        .output()
+        .expect("the image tool must be runnable");
+    assert!(output.status.success(), "image inspection failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }

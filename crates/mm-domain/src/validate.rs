@@ -311,6 +311,7 @@ impl OpKind {
                 video_codecs: &SUPPORTED_VIDEO_CODECS,
                 audio_codecs: &SUPPORTED_AUDIO_CODECS,
             }),
+            OpKind::Title => None,
             OpKind::Resize | OpKind::Convert => Some(InputPolicy {
                 min_inputs: 1,
                 cross_input_checks: false,

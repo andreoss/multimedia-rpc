@@ -94,3 +94,42 @@ pub fn composite_args(overlay: &str, base: &str, format: ImageFormat, output: &s
     .map(str::to_string)
     .collect()
 }
+
+fn annotate_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('@', "\\@")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn title_args(
+    text: &str,
+    width: u32,
+    height: u32,
+    point_size: u32,
+    colour: &str,
+    background: Option<&str>,
+    format: ImageFormat,
+    output: &str,
+) -> Vec<String> {
+    let canvas = match background {
+        Some(colour) => format!("xc:{colour}"),
+        None => "xc:none".to_string(),
+    };
+    [
+        "-size".to_string(),
+        format!("{width}x{height}"),
+        canvas,
+        "-gravity".to_string(),
+        "center".to_string(),
+        "-font".to_string(),
+        "DejaVu-Sans".to_string(),
+        "-pointsize".to_string(),
+        point_size.to_string(),
+        "-fill".to_string(),
+        colour.to_string(),
+        "-annotate".to_string(),
+        "+0+0".to_string(),
+        annotate_text(text),
+        written(format, output),
+    ]
+    .to_vec()
+}

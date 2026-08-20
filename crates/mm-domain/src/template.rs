@@ -343,6 +343,7 @@ fn substitute_spec(
                 .collect::<Result<Vec<_>, _>>()?;
             OpSpec::Graph(GraphSpec::new(nodes)?)
         }
+        OpSpec::Title(title) => OpSpec::Title(title.clone()),
         OpSpec::Audio(audio) => OpSpec::Audio(AudioSpec::new(
             audio
                 .inputs()

@@ -1,9 +1,9 @@
 use mm_domain::{
-    AudioSpec, ConcatSpec, GradeAdjustments, GradeResult, GradeScope, GradeSpec, ImageFormat,
-    ImageOp, ImageResult, ImageSpec, InputSource, LoudnessResult, LoudnessSpec, LoudnessTarget,
-    MediaRef, MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, Ticks,
-    TimedOutput, TranscodeSpec, TrimSpec, UnsupportedOp,
+    AudioSpec, Colour, ConcatSpec, GradeAdjustments, GradeResult, GradeScope, GradeSpec,
+    ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, LoudnessResult, LoudnessSpec,
+    LoudnessTarget, MediaRef, MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError,
+    OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult,
+    ThumbnailSpec, Ticks, TimedOutput, TitleSpec, TranscodeSpec, TrimSpec, UnsupportedOp,
 };
 
 fn object() -> MediaRef {
@@ -662,4 +662,52 @@ fn an_audio_spec_mixes_inputs_and_keeps_fades_exact() {
     assert_eq!(spec.high_pass_hz(), Some(80));
     assert_eq!(spec.limiter_true_peak_db(), Some(-1.0));
     assert_eq!(OpSpec::Audio(spec).kind(), OpKind::Audio);
+}
+
+#[test]
+fn a_title_refuses_empty_text_a_bad_box_and_a_bad_colour_by_name() {
+    let colour = Colour::parse("text", "#ffffff").unwrap();
+    assert!(matches!(
+        TitleSpec::new("  ", 320, 120, 24, colour, None, ImageFormat::Png),
+        Err(OpSpecError::EmptyTitle)
+    ));
+    assert!(matches!(
+        TitleSpec::new("Hello", 0, 120, 24, colour, None, ImageFormat::Png),
+        Err(OpSpecError::TitleDimension {
+            dimension: "width",
+            ..
+        })
+    ));
+    assert!(matches!(
+        TitleSpec::new("Hello", 320, 120, 0, colour, None, ImageFormat::Png),
+        Err(OpSpecError::InvalidPointSize { .. })
+    ));
+    assert!(matches!(
+        Colour::parse("text", "not-a-colour"),
+        Err(OpSpecError::InvalidColour { field: "text", .. })
+    ));
+    assert!(matches!(
+        TitleSpec::new("Hello", 320, 120, 24, colour, None, ImageFormat::Jpeg),
+        Err(OpSpecError::TransparentJpeg)
+    ));
+}
+
+#[test]
+fn a_title_keeps_its_colours_and_background() {
+    let colour = Colour::parse("text", "#abc").unwrap();
+    let background = Colour::parse("background", "#11223344").unwrap();
+    let spec = TitleSpec::new(
+        "Hello",
+        640,
+        240,
+        48,
+        colour,
+        Some(background),
+        ImageFormat::Png,
+    )
+    .unwrap();
+    assert_eq!(spec.width(), 640);
+    assert_eq!(spec.colour().hex(), "#aabbcc");
+    assert_eq!(spec.background().unwrap().hex(), "#11223344");
+    assert_eq!(OpSpec::Title(spec).kind(), OpKind::Title);
 }

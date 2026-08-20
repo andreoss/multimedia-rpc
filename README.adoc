@@ -42,6 +42,7 @@ and no media bytes cross the API.
 |`subtitle` |Burn captions in, mux them as a track, or strip subtitle tracks.
 |`grade` |Adjust colour, apply a lookup table, and land a scope still.
 |`audio` |Gain, fade, filter, limit and mix the audio of several inputs.
+|`title` |Render text as a transparent still a graph can compose onto a frame.
 |`batch` |Steps in order, a later one reading an earlier result.
 |`graph` |Named nodes in dependency order, references inside the graph.
 |===

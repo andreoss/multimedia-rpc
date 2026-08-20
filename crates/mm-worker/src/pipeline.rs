@@ -17,9 +17,9 @@ use mm_domain::{
     ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
     PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
     ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, SubtitleMode,
-    SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId, collect_body,
-    resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
+    SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TitleResult,
+    TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId,
+    collect_body, resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
     AudioTarget, GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo,
@@ -37,7 +37,7 @@ use mm_gst::{
 };
 use mm_magick::{
     ImageFormat as ToolImageFormat, ResizeMode as ToolResizeMode, ToolError as ImageToolError,
-    composite_args, convert_args, resize_args, sprite_args,
+    composite_args, convert_args, resize_args, sprite_args, title_args,
 };
 use mm_observability::{Component, record};
 use prost::Message;
@@ -74,8 +74,9 @@ pub mod codes {
     pub const CAPTION_INVALID: &str = "caption_invalid";
     pub const GRADE_INVALID: &str = "grade_invalid";
     pub const AUDIO_INVALID: &str = "audio_invalid";
+    pub const TITLE_FAILED: &str = "title_failed";
 
-    pub const ALL: [&str; 19] = [
+    pub const ALL: [&str; 20] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -95,6 +96,7 @@ pub mod codes {
         CAPTION_INVALID,
         GRADE_INVALID,
         AUDIO_INVALID,
+        TITLE_FAILED,
     ];
 }
 
@@ -709,6 +711,7 @@ async fn run_leaf(
         }
         OpSpec::Grade(spec) => grade_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
         OpSpec::Audio(spec) => audio_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
+        OpSpec::Title(spec) => title_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
     };
     scope.done.fetch_add(1, Ordering::Relaxed);
     Ok(result)
@@ -808,6 +811,7 @@ fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
         }
         OpResult::Subtitle(subtitle) => push(subtitle.output()),
         OpResult::Audio(audio) => push(audio.output()),
+        OpResult::Title(title) => push(title.output()),
         OpResult::Grade(grade) => {
             push(grade.output());
             if let Some(scope) = grade.scope() {
@@ -871,6 +875,7 @@ fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
         OpResult::Loudness(loudness) => (index == 0).then(|| loudness.output()).flatten(),
         OpResult::Subtitle(subtitle) => (index == 0).then_some(subtitle.output()),
         OpResult::Audio(audio) => (index == 0).then_some(audio.output()),
+        OpResult::Title(title) => (index == 0).then_some(title.output()),
         OpResult::Grade(grade) => {
             if index == 0 {
                 Some(grade.output())
@@ -2083,6 +2088,64 @@ async fn transcode_pipeline(
     };
     let _ = tokio::fs::remove_file(&output_path).await;
     outcome
+}
+
+async fn title_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &TitleSpec,
+    scope: &Scope,
+    _deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let _reservation = admit_or_release(ctx, job.id, 2 * 1024 * 1024).await?;
+    let format = image_format(spec.format());
+    let extension = spec.format().extension();
+    let output_path = ctx
+        .staging_dir
+        .join(format!("{}-title.{extension}", job.id));
+    let args = title_args(
+        spec.text(),
+        spec.width(),
+        spec.height(),
+        spec.point_size(),
+        &spec.colour().hex(),
+        spec.background().map(|colour| colour.hex()).as_deref(),
+        format,
+        &output_path.to_string_lossy(),
+    );
+    check(signal)?;
+    ctx.image_tool
+        .run(&args, &ctx.image_limits)
+        .await
+        .map_err(|error| failed(codes::TITLE_FAILED, error))?;
+    let info = ctx
+        .image_tool
+        .identify(&output_path.to_string_lossy(), &ctx.image_limits)
+        .await
+        .map_err(|error| failed(codes::TITLE_FAILED, error))?;
+    if (info.width, info.height) != (spec.width(), spec.height()) {
+        return Err(failed(
+            codes::OUTPUT_INVALID,
+            format!(
+                "the title is {}x{}, not {}x{}",
+                info.width,
+                info.height,
+                spec.width(),
+                spec.height()
+            ),
+        ));
+    }
+    let object =
+        artifact_object_named(ctx, job.id, &scope.prefix, &format!("title.{extension}")).await?;
+    upload_object(ctx, &object, &output_path).await?;
+    let _ = tokio::fs::remove_file(&output_path).await;
+    if let Err(finish) = check(signal) {
+        let _ = ctx.store.delete(&object).await;
+        return Err(finish);
+    }
+    Ok(OpResult::Title(TitleResult::new(MediaRef::Object(object))))
 }
 
 async fn audio_pipeline(

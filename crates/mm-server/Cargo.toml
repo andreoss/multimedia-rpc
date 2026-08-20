@@ -8,6 +8,7 @@ rust-version.workspace = true
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 mm-proto = { path = "../mm-proto" }
+base64.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-stream = { workspace = true, features = ["net"] }

@@ -644,3 +644,170 @@ async fn cancel_is_owner_scoped() {
     handle.shutdown().await;
     db.dispose().await;
 }
+
+async fn list(
+    client: &mut MediaJobServiceClient<tonic::transport::Channel>,
+    user: &str,
+    statuses: Vec<i32>,
+    page_size: u32,
+    page_token: &str,
+) -> v1::ListJobsResponse {
+    client
+        .list_jobs(v1::ListJobsRequest {
+            user_id: user.to_string(),
+            statuses,
+            page_size,
+            page_token: page_token.to_string(),
+        })
+        .await
+        .expect("list succeeds")
+        .into_inner()
+}
+
+#[tokio::test]
+async fn list_jobs_pages_stably_newest_first_for_the_owner_only() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut created = Vec::new();
+    for index in 0..7 {
+        created.push(create_job_id(&mut client, "owner-1", &format!("req-{index}")).await);
+    }
+    create_job_id(&mut client, "owner-2", "req-foreign").await;
+    created.reverse();
+    let mut seen = Vec::new();
+    let mut token = String::new();
+    let mut pages = 0;
+    loop {
+        let page = list(&mut client, "owner-1", vec![], 3, &token).await;
+        assert!(page.jobs.len() <= 3);
+        seen.extend(page.jobs.iter().map(|job| job.job_id.clone()));
+        pages += 1;
+        if page.next_page_token.is_empty() {
+            break;
+        }
+        token = page.next_page_token;
+    }
+    assert!(pages >= 3);
+    assert_eq!(seen, created);
+    let repeat = list(&mut client, "owner-1", vec![], 3, "").await;
+    assert_eq!(
+        repeat
+            .jobs
+            .iter()
+            .map(|job| job.job_id.clone())
+            .collect::<Vec<_>>(),
+        created[..3]
+    );
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn list_jobs_filters_by_status() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let kept = create_job_id(&mut client, "owner-1", "req-1").await;
+    let dropped = create_job_id(&mut client, "owner-1", "req-2").await;
+    cancel(&mut client, "owner-1", &dropped).await;
+    let cancelled = list(
+        &mut client,
+        "owner-1",
+        vec![v1::JobState::Cancelled as i32],
+        0,
+        "",
+    )
+    .await;
+    assert_eq!(
+        cancelled
+            .jobs
+            .iter()
+            .map(|job| job.job_id.clone())
+            .collect::<Vec<_>>(),
+        vec![dropped]
+    );
+    let pending = list(
+        &mut client,
+        "owner-1",
+        vec![v1::JobState::Pending as i32],
+        0,
+        "",
+    )
+    .await;
+    assert_eq!(
+        pending
+            .jobs
+            .iter()
+            .map(|job| job.job_id.clone())
+            .collect::<Vec<_>>(),
+        vec![kept]
+    );
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn list_jobs_defaults_and_caps_the_page_size() {
+    let (db, handle) = healthy_server().await;
+    let repo = db.repository();
+    for index in 0..101 {
+        repo.create(mm_domain::NewJob::new(
+            mm_domain::JobId::generate(),
+            "owner-1".parse().expect("valid user id"),
+            format!("req-{index}").parse().expect("valid request id"),
+            OpSpec::try_from(concat_spec()).expect("valid spec"),
+            None,
+        ))
+        .await
+        .expect("create succeeds");
+    }
+    let mut client = job_client(&handle).await;
+    let defaulted = list(&mut client, "owner-1", vec![], 0, "").await;
+    assert_eq!(defaulted.jobs.len(), 20);
+    assert!(!defaulted.next_page_token.is_empty());
+    let capped = list(&mut client, "owner-1", vec![], 1000, "").await;
+    assert_eq!(capped.jobs.len(), 100);
+    assert!(!capped.next_page_token.is_empty());
+    let rest = list(
+        &mut client,
+        "owner-1",
+        vec![],
+        1000,
+        &capped.next_page_token,
+    )
+    .await;
+    assert_eq!(rest.jobs.len(), 1);
+    assert!(rest.next_page_token.is_empty());
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn invalid_list_arguments_are_rejected() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    for token in ["not a token!", "AAAA", "####"] {
+        let status = client
+            .list_jobs(v1::ListJobsRequest {
+                user_id: "owner-1".to_string(),
+                statuses: vec![],
+                page_size: 0,
+                page_token: token.to_string(),
+            })
+            .await
+            .expect_err("bad cursor rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{token:?}");
+        assert!(status.message().contains("page token"));
+    }
+    let unknown = client
+        .list_jobs(v1::ListJobsRequest {
+            user_id: "owner-1".to_string(),
+            statuses: vec![v1::JobState::Unspecified as i32, 99],
+            page_size: 0,
+            page_token: String::new(),
+        })
+        .await
+        .expect_err("unknown status rejected");
+    assert_eq!(unknown.code(), tonic::Code::InvalidArgument);
+    handle.shutdown().await;
+    db.dispose().await;
+}

@@ -13,6 +13,7 @@ mm-jobstore = { path = "../mm-jobstore" }
 mm-proto = { path = "../mm-proto" }
 mm-server = { path = "../mm-server" }
 mm-storage = { path = "../mm-storage" }
+mm-testkit = { path = "../mm-testkit" }
 mm-worker = { path = "../mm-worker" }
 base64.workspace = true
 bytes.workspace = true

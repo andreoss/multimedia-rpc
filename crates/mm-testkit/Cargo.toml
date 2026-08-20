@@ -1,0 +1,16 @@
+[package]
+name = "mm-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mm-domain = { path = "../mm-domain" }
+bytes.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+tokio = { workspace = true, features = ["fs", "time"] }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

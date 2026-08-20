@@ -5,6 +5,7 @@ members = [
     "crates/mm-proto",
     "crates/mm-ffmpeg",
     "crates/mm-storage",
+    "crates/mm-testkit",
     "crates/mm-integration",
     "crates/mm-jobstore",
     "crates/mm-server",

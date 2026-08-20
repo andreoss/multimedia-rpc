@@ -78,7 +78,7 @@ test:
   before_script:
     - apt-get update && apt-get install -y protobuf-compiler
   script:
-    - cargo test --workspace
+    - cargo test --workspace --no-fail-fast
 
 coverage:
   stage: test
@@ -91,4 +91,4 @@ coverage:
   script:
     - rustup component add llvm-tools-preview
     - cargo install cargo-llvm-cov --locked
-    - cargo llvm-cov --workspace --fail-under-lines 85
+    - cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 85

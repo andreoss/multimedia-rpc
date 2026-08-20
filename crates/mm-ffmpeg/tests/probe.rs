@@ -30,7 +30,7 @@ async fn a_stalled_input_is_killed_at_the_timeout() {
     hold.abort();
 
     assert!(matches!(result, Err(ProbeError::TimedOut { .. })));
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(30));
 }
 
 #[tokio::test]

@@ -175,10 +175,18 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
         }
         Err(Finish::LeaseLost) | Err(Finish::Released) => {}
         Err(Finish::Failed(failure)) => {
-            let _ = ctx
-                .repository
-                .mark_failed(job.id, &ctx.worker_id, failure)
-                .await;
+            if crate::retry::is_transient(failure.code()) && job.attempts < ctx.retry.max_attempts {
+                let delay = ctx.retry.delay(job.attempts);
+                let _ = ctx
+                    .repository
+                    .retry(job.id, &ctx.worker_id, failure, delay)
+                    .await;
+            } else {
+                let _ = ctx
+                    .repository
+                    .mark_failed(job.id, &ctx.worker_id, failure)
+                    .await;
+            }
         }
     }
 }

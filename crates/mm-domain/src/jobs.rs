@@ -202,6 +202,13 @@ pub trait JobRepository: Send + Sync {
         worker: &WorkerId,
         retry_after: Duration,
     ) -> Result<(), JobStoreError>;
+    async fn retry(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        failure: JobFailure,
+        retry_after: Duration,
+    ) -> Result<(), JobStoreError>;
     async fn set_progress(
         &self,
         id: JobId,

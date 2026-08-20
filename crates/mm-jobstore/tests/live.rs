@@ -787,6 +787,102 @@ async fn release_returns_a_claimed_job_to_pending_with_a_retry_delay() {
 }
 
 #[tokio::test]
+async fn retry_requeues_with_failure_and_schedule_keeping_attempts() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let job = repo
+        .create(new_job("owner-1", "req-retry"))
+        .await
+        .expect("create succeeds");
+    let claimant = worker("w-retry");
+    let claimed = repo
+        .claim(&claimant, limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed.len(), 1);
+    let failure = JobFailure::new("output_upload_failed", "store unreachable").expect("valid");
+    repo.retry(
+        job.id,
+        &claimant,
+        failure.clone(),
+        Duration::from_millis(400),
+    )
+    .await
+    .expect("retry succeeds");
+
+    let record = repo
+        .get(job.id)
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(record.state, JobState::Pending);
+    assert_eq!(record.attempts, 1);
+    assert!(record.claimed_by.is_none());
+    assert!(record.lease_expires_at.is_none());
+    assert_eq!(record.progress, ProgressPercent::ZERO);
+    assert_eq!(record.failure, Some(failure));
+    let due = record.next_attempt_at.expect("retry scheduled");
+    assert!(due > SystemTime::now());
+    assert!(due < SystemTime::now() + Duration::from_secs(5));
+
+    assert!(
+        repo.claim(&claimant, limit(1), Duration::from_secs(30))
+            .await
+            .expect("claim succeeds")
+            .is_empty(),
+        "retry was claimable before its schedule"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let reclaimed = repo
+        .claim(&claimant, limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].attempts, 2);
+    let done = repo
+        .mark_succeeded(job.id, &claimant, concat_result())
+        .await
+        .expect("mark succeeded succeeds");
+    assert!(done.failure.is_none(), "stale failure kept after success");
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn retry_is_rejected_for_unclaimed_jobs_and_foreign_claimants() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let job = repo
+        .create(new_job("owner-1", "req-retry-guard"))
+        .await
+        .expect("create succeeds");
+    let failure = JobFailure::new("merge_failed", "exit 1").expect("valid");
+    assert!(matches!(
+        repo.retry(
+            job.id,
+            &worker("w-a"),
+            failure.clone(),
+            Duration::from_secs(1)
+        )
+        .await
+        .expect_err("pending job cannot retry"),
+        JobStoreError::InvalidTransition { .. }
+    ));
+    repo.claim(&worker("w-a"), limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(
+        repo.retry(job.id, &worker("w-b"), failure, Duration::from_secs(1))
+            .await
+            .expect_err("foreign retry rejected"),
+        JobStoreError::LeaseNotHeld {
+            id: job.id,
+            worker: worker("w-b"),
+        }
+    );
+    db.dispose().await;
+}
+
+#[tokio::test]
 async fn job_insert_and_requeue_notify_listeners() {
     let db = fresh_db().await;
     let listener = PgJobListener::connect(&db.url)

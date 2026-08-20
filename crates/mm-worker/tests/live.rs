@@ -7,13 +7,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use mm_domain::{
-    ConcatSpec, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob, ObjectRef,
-    ObjectStore, OpResult, OpSpec, ProbeSpec, RequestId, UserId, WorkerId,
+    ConcatSpec, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob, ObjectBody, ObjectRef,
+    ObjectStore, ObjectStoreError, OpResult, OpSpec, ProbeSpec, RequestId, UserId, WorkerId,
 };
 use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
-use mm_worker::{DiskBudget, WorkerConfig, codes, start};
+use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, codes, start};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -223,7 +224,7 @@ fn concat_job(inputs: Vec<MediaRef>) -> NewJob {
     )
 }
 
-fn base_config(db: &TestDb, store: Arc<S3ObjectStore>, name: &str) -> WorkerConfig {
+fn base_config(db: &TestDb, store: Arc<dyn ObjectStore>, name: &str) -> WorkerConfig {
     let mut config = WorkerConfig::new(
         db.repository(),
         store,
@@ -467,6 +468,117 @@ async fn blocking_validation_fails_the_job_with_input_codes() {
         "{}",
         failure.message()
     );
+    assert_eq!(record.attempts, 1, "permanent failure was retried");
+    assert!(record.next_attempt_at.is_none());
+    db.dispose().await;
+}
+
+struct FailingUploads {
+    inner: Arc<S3ObjectStore>,
+}
+
+#[async_trait]
+impl ObjectStore for FailingUploads {
+    async fn get(&self, object: &ObjectRef) -> Result<ObjectBody, ObjectStoreError> {
+        self.inner.get(object).await
+    }
+
+    async fn put(
+        &self,
+        object: &ObjectRef,
+        body: ObjectBody,
+        length: u64,
+    ) -> Result<(), ObjectStoreError> {
+        self.inner.put(object, body, length).await
+    }
+
+    async fn put_multipart(
+        &self,
+        _object: &ObjectRef,
+        _body: ObjectBody,
+    ) -> Result<(), ObjectStoreError> {
+        Err(ObjectStoreError::Backend {
+            message: "injected upload outage".to_string(),
+        })
+    }
+
+    async fn head(&self, object: &ObjectRef) -> Result<u64, ObjectStoreError> {
+        self.inner.head(object).await
+    }
+
+    async fn delete(&self, object: &ObjectRef) -> Result<(), ObjectStoreError> {
+        self.inner.delete(object).await
+    }
+
+    async fn presign_get(
+        &self,
+        object: &ObjectRef,
+        expires_in: Duration,
+    ) -> Result<String, ObjectStoreError> {
+        self.inner.presign_get(object, expires_in).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transient_upload_failure_retries_with_growing_gaps_until_failed() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let first = fixture("retry-a-1s.mp4", 1, 30, "mp4");
+    let second = fixture("retry-b-1s.mp4", 1, 30, "mp4");
+    let refs = vec![
+        upload_input(&store, &first, "inputs/retry-a-1s.mp4").await,
+        upload_input(&store, &second, "inputs/retry-b-1s.mp4").await,
+    ];
+    let repository = db.repository();
+    let job = repository.create(concat_job(refs)).await.unwrap();
+
+    let flaky = Arc::new(FailingUploads {
+        inner: store.clone(),
+    });
+    let mut config = base_config(&db, flaky, "worker-flaky");
+    config.retry = RetryPolicy {
+        max_attempts: 3,
+        base: Duration::from_secs(1),
+        cap: Duration::from_secs(60),
+    };
+    config.reconcile_interval = Duration::from_millis(100);
+    let handle = start(config);
+
+    let mut gaps: Vec<Duration> = Vec::new();
+    let mut seen = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let record = loop {
+        let record = repository.get(job.id).await.unwrap().unwrap();
+        if record.state == JobState::Pending
+            && record.attempts > seen
+            && let Some(due) = record.next_attempt_at
+        {
+            seen = record.attempts;
+            gaps.push(
+                due.duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default(),
+            );
+        }
+        if record.state.is_terminal() {
+            break record;
+        }
+        assert!(Instant::now() < deadline, "job never reached FAILED");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::OUTPUT_UPLOAD_FAILED);
+    assert!(
+        failure.message().contains("injected"),
+        "{}",
+        failure.message()
+    );
+    assert_eq!(record.attempts, 3);
+    assert_eq!(gaps.len(), 2, "observed retry gaps: {gaps:?}");
+    assert!(gaps[1] > gaps[0], "gaps never grew: {gaps:?}");
+    assert!(gaps[0] >= Duration::from_secs(1), "{gaps:?}");
     db.dispose().await;
 }
 

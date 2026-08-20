@@ -427,6 +427,36 @@ impl JobRepository for PgJobRepository {
         Ok(())
     }
 
+    async fn retry(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        failure: JobFailure,
+        retry_after: Duration,
+    ) -> Result<(), JobStoreError> {
+        let updated = sqlx::query!(
+            "UPDATE jobs SET state = 'PENDING', claimed_by = NULL, \
+             lease_expires_at = NULL, progress_percent = 0, \
+             error_code = $3, error_message = $4, \
+             next_attempt_at = now() + make_interval(secs => $5) \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING'",
+            id.as_uuid(),
+            worker.as_str(),
+            failure.code(),
+            failure.message(),
+            retry_after.as_secs_f64()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        if updated.rows_affected() == 0 {
+            return Err(self
+                .transition_conflict(id, JobState::Pending, Some(worker))
+                .await);
+        }
+        Ok(())
+    }
+
     async fn set_progress(
         &self,
         id: JobId,
@@ -460,7 +490,8 @@ impl JobRepository for PgJobRepository {
         let row = sqlx::query_as!(
             JobRow,
             "UPDATE jobs SET state = 'SUCCEEDED', result = $3, \
-             progress_percent = 100, finished_at = now(), lease_expires_at = NULL \
+             progress_percent = 100, finished_at = now(), lease_expires_at = NULL, \
+             error_code = NULL, error_message = NULL \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
              RETURNING id, user_id, request_id, spec, state, progress_percent, \
              error_code, error_message, result, created_at, started_at, \

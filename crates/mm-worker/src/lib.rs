@@ -1,6 +1,7 @@
 mod budget;
 mod pipeline;
 mod report;
+mod retry;
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use tokio::task::{JoinHandle, JoinSet};
 pub use budget::{DiskBudget, admits};
 pub use pipeline::codes;
 pub use report::{blocks, input_report, render_verdicts, target_profile, warnings};
+pub use retry::{RetryPolicy, is_transient};
 
 pub struct WorkerConfig {
     pub repository: Arc<dyn JobRepository>,
@@ -35,6 +37,7 @@ pub struct WorkerConfig {
     pub stderr_tail_bytes: usize,
     pub disk_budget: DiskBudget,
     pub release_retry: Duration,
+    pub retry: RetryPolicy,
     pub notifications: Option<Arc<dyn JobNotifications>>,
     reserved: std::sync::Mutex<u64>,
 }
@@ -66,6 +69,7 @@ impl WorkerConfig {
             stderr_tail_bytes: 4096,
             disk_budget: DiskBudget::Probe,
             release_retry: Duration::from_secs(30),
+            retry: RetryPolicy::default(),
             notifications: None,
             reserved: std::sync::Mutex::new(0),
         }

@@ -3,9 +3,11 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mm_domain::{JobRepository, ObjectStore};
+use mm_domain::{ConcatSpec, JobRepository, MediaRef, ObjectStore, OpSpec};
 use mm_ffmpeg::Prober;
 use mm_jobstore::{MIGRATOR, PgJobRepository};
+use mm_proto::v1;
+use mm_proto::v1::media_job_service_client::MediaJobServiceClient;
 use mm_server::{ServerConfig, ServerHandle};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use sqlx::PgPool;
@@ -186,6 +188,46 @@ async fn await_status(
     }
 }
 
+async fn job_client(handle: &ServerHandle) -> MediaJobServiceClient<tonic::transport::Channel> {
+    let channel = Endpoint::from_shared(format!("http://{}", handle.local_addr()))
+        .expect("valid endpoint")
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .connect()
+        .await
+        .expect("dial announced address");
+    MediaJobServiceClient::new(channel)
+}
+
+fn concat_spec() -> v1::OpSpec {
+    v1::OpSpec::from(&OpSpec::Concat(
+        ConcatSpec::new(
+            vec![
+                MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref"),
+                MediaRef::object_uri("s3://media/in/b.mp4").expect("valid ref"),
+            ],
+            None,
+        )
+        .expect("valid concat spec"),
+    ))
+}
+
+fn create_request(user: &str, key: &str) -> v1::CreateJobRequest {
+    v1::CreateJobRequest {
+        user_id: user.to_string(),
+        idempotency_key: key.to_string(),
+        spec: Some(concat_spec()),
+        callback: None,
+    }
+}
+
+async fn healthy_server() -> (TestDb, ServerHandle) {
+    let db = fresh_db().await;
+    let store = store_at(&store_endpoint()).await;
+    let handle = start_server(test_config(db.repository(), store, Prober::default())).await;
+    (db, handle)
+}
+
 #[tokio::test]
 async fn the_server_announces_a_port_zero_address_that_serves_health() {
     let db = fresh_db().await;
@@ -245,5 +287,147 @@ async fn an_empty_bucket_name_is_rejected_at_configuration() {
     let store = store_at(&store_endpoint()).await;
     let result = ServerConfig::new(db.repository(), store, String::new(), Prober::default());
     assert!(result.is_err());
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn create_job_persists_a_pending_job_and_replays_with_created_false() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let created = client
+        .create_job(create_request("owner-1", "req-1"))
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    assert!(created.created);
+    assert_eq!(created.request_id, "req-1");
+    let id: mm_domain::JobId = created.job_id.parse().expect("job id parses");
+    let record = db
+        .repository()
+        .get(id)
+        .await
+        .expect("get succeeds")
+        .expect("job persisted");
+    assert_eq!(record.state, mm_domain::JobState::Pending);
+    let replayed = client
+        .create_job(create_request("owner-1", "req-1"))
+        .await
+        .expect("replay succeeds")
+        .into_inner();
+    assert!(!replayed.created);
+    assert_eq!(replayed.job_id, created.job_id);
+    assert_eq!(replayed.request_id, "req-1");
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn two_concurrent_duplicate_creates_yield_one_job() {
+    let (db, handle) = healthy_server().await;
+    let mut first = job_client(&handle).await;
+    let mut second = job_client(&handle).await;
+    let (a, b) = tokio::join!(
+        first.create_job(create_request("owner-1", "req-race")),
+        second.create_job(create_request("owner-1", "req-race"))
+    );
+    let a = a.expect("first create succeeds").into_inner();
+    let b = b.expect("second create succeeds").into_inner();
+    assert_eq!(a.job_id, b.job_id);
+    assert_eq!(
+        [a.created, b.created].iter().filter(|flag| **flag).count(),
+        1
+    );
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+        .fetch_one(&db.pool)
+        .await
+        .expect("count succeeds");
+    assert_eq!(total, 1);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn an_invalid_spec_is_rejected_with_the_typed_message() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let mut request = create_request("owner-1", "req-1");
+    request.spec = Some(v1::OpSpec {
+        op: Some(v1::op_spec::Op::Concat(v1::ConcatSpec {
+            inputs: vec![v1::MediaRef {
+                r#ref: Some(v1::media_ref::Ref::ObjectUri(
+                    "s3://media/in/only.mp4".to_string(),
+                )),
+            }],
+            profile: None,
+        })),
+    });
+    let status = client
+        .create_job(request)
+        .await
+        .expect_err("invalid spec rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("concat"));
+    let missing = client
+        .create_job(v1::CreateJobRequest {
+            spec: None,
+            ..create_request("owner-1", "req-2")
+        })
+        .await
+        .expect_err("missing spec rejected");
+    assert_eq!(missing.code(), tonic::Code::InvalidArgument);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn malformed_identifiers_are_invalid_argument() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let bad_user = client
+        .create_job(create_request("owner one", "req-1"))
+        .await
+        .expect_err("malformed user rejected");
+    assert_eq!(bad_user.code(), tonic::Code::InvalidArgument);
+    assert!(bad_user.message().contains("user_id"));
+    let bad_key = client
+        .create_job(create_request("owner-1", ""))
+        .await
+        .expect_err("empty key rejected");
+    assert_eq!(bad_key.code(), tonic::Code::InvalidArgument);
+    assert!(bad_key.message().contains("idempotency_key"));
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_foreign_owner_replay_is_already_exists() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    client
+        .create_job(create_request("owner-1", "req-shared"))
+        .await
+        .expect("create succeeds");
+    let status = client
+        .create_job(create_request("owner-2", "req-shared"))
+        .await
+        .expect_err("foreign replay rejected");
+    assert_eq!(status.code(), tonic::Code::AlreadyExists);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn watch_job_is_unimplemented() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let status = client
+        .watch_job(v1::WatchJobRequest {
+            user_id: "owner-1".to_string(),
+            job_id: mm_domain::JobId::generate().to_string(),
+        })
+        .await
+        .expect_err("watch is unimplemented");
+    assert_eq!(status.code(), tonic::Code::Unimplemented);
+    handle.shutdown().await;
     db.dispose().await;
 }

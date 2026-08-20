@@ -5,14 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 mm-jobstore = { path = "../mm-jobstore" }
 mm-server = { path = "../mm-server" }
 mm-storage = { path = "../mm-storage" }
+mm-worker = { path = "../mm-worker" }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
+mm-domain = { path = "../mm-domain" }
+mm-proto = { path = "../mm-proto" }
 tonic.workspace = true
 tonic-health.workspace = true
 uuid.workspace = true

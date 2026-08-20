@@ -11,7 +11,7 @@ use mm_domain::{
     ConcatSpec, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob, ObjectRef,
     ObjectStore, OpResult, OpSpec, ProbeSpec, RequestId, UserId, WorkerId,
 };
-use mm_jobstore::{MIGRATOR, PgJobRepository};
+use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use mm_worker::{DiskBudget, WorkerConfig, codes, start};
 use sqlx::PgPool;
@@ -111,7 +111,6 @@ impl TestDb {
         Arc::new(PgJobRepository::new(self.pool.clone()))
     }
 
-    #[allow(dead_code)]
     fn url(&self) -> &str {
         &self.url
     }
@@ -579,5 +578,96 @@ async fn an_oversized_job_is_released_until_disk_frees() {
     roomy_handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_job_is_claimed_within_a_second_via_notify() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let repository = db.repository();
+
+    let mut config = base_config(&db, store, "worker-notified");
+    config.reconcile_interval = Duration::from_secs(60);
+    config.notifications = Some(Arc::new(
+        PgJobListener::connect(db.url())
+            .await
+            .expect("listener connects"),
+    ));
+    let handle = start(config);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let id = JobId::generate();
+    let created = Instant::now();
+    repository
+        .create(NewJob::new(
+            id,
+            owner(),
+            RequestId::from_str(&format!("req-{id}")).unwrap(),
+            OpSpec::Probe(ProbeSpec::new(
+                MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
+            )),
+            None,
+        ))
+        .await
+        .unwrap();
+    loop {
+        let record = repository.get(id).await.unwrap().unwrap();
+        if record.state != JobState::Pending {
+            break;
+        }
+        assert!(
+            created.elapsed() < Duration::from_secs(1),
+            "job was not claimed within a second"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        created.elapsed() < Duration::from_secs(1),
+        "claim took {:?}",
+        created.elapsed()
+    );
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_listener_a_job_still_starts_within_one_tick() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let repository = db.repository();
+
+    let mut config = base_config(&db, store, "worker-ticking");
+    config.reconcile_interval = Duration::from_secs(1);
+    config.notifications = None;
+    let handle = start(config);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let id = JobId::generate();
+    let created = Instant::now();
+    repository
+        .create(NewJob::new(
+            id,
+            owner(),
+            RequestId::from_str(&format!("req-{id}")).unwrap(),
+            OpSpec::Probe(ProbeSpec::new(
+                MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
+            )),
+            None,
+        ))
+        .await
+        .unwrap();
+    loop {
+        let record = repository.get(id).await.unwrap().unwrap();
+        if record.state != JobState::Pending {
+            break;
+        }
+        assert!(
+            created.elapsed() < Duration::from_millis(2500),
+            "job was not claimed within one reconcile tick"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    handle.shutdown().await;
     db.dispose().await;
 }

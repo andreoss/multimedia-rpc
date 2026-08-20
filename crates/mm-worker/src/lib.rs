@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mm_domain::{JobRepository, ObjectStore, WorkerId};
+use mm_domain::{JobNotifications, JobRepository, ObjectStore, WorkerId};
 use mm_ffmpeg::{ProbeLimits, Prober, Runner};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -35,6 +35,7 @@ pub struct WorkerConfig {
     pub stderr_tail_bytes: usize,
     pub disk_budget: DiskBudget,
     pub release_retry: Duration,
+    pub notifications: Option<Arc<dyn JobNotifications>>,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -65,6 +66,7 @@ impl WorkerConfig {
             stderr_tail_bytes: 4096,
             disk_budget: DiskBudget::Probe,
             release_retry: Duration::from_secs(30),
+            notifications: None,
             reserved: std::sync::Mutex::new(0),
         }
     }
@@ -111,10 +113,22 @@ async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
                 }
             }
             _ = wake.notified() => {}
+            _ = job_ready(ctx.notifications.as_deref()) => {}
             _ = tokio::time::sleep(ctx.reconcile_interval) => {}
         }
     }
     while jobs.join_next().await.is_some() {}
+}
+
+async fn job_ready(notifications: Option<&dyn JobNotifications>) {
+    match notifications {
+        Some(notifications) => {
+            if notifications.notified().await.is_err() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+        None => std::future::pending().await,
+    }
 }
 
 async fn claim_available(

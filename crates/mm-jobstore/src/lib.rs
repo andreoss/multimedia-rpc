@@ -4,16 +4,47 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use mm_domain::{
-    JobFailure, JobId, JobPage, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
-    OpResult, OpSpec, PageCursor, ProgressPercent, RequestId, UserId, WorkerId,
+    JobFailure, JobId, JobNotifications, JobPage, JobRecord, JobRepository, JobState,
+    JobStoreError, NewJob, OpResult, OpSpec, PageCursor, ProgressPercent, RequestId, UserId,
+    WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
+use sqlx::postgres::PgListener;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+pub const JOB_READY_CHANNEL: &str = "mm_job_ready";
+
+pub struct PgJobListener {
+    inner: tokio::sync::Mutex<PgListener>,
+}
+
+impl PgJobListener {
+    pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
+        let mut listener = PgListener::connect(url).await?;
+        listener.listen(JOB_READY_CHANNEL).await?;
+        Ok(Self {
+            inner: tokio::sync::Mutex::new(listener),
+        })
+    }
+}
+
+#[async_trait]
+impl JobNotifications for PgJobListener {
+    async fn notified(&self) -> Result<(), JobStoreError> {
+        self.inner
+            .lock()
+            .await
+            .recv()
+            .await
+            .map(|_| ())
+            .map_err(backend)
+    }
+}
 
 pub struct PgJobRepository {
     pool: PgPool,

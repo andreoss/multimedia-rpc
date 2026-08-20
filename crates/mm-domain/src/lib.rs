@@ -11,8 +11,8 @@ pub use id::{
     WorkerIdError,
 };
 pub use jobs::{
-    JobFailure, JobFailureError, JobPage, JobRecord, JobRepository, JobStoreError, NewJob,
-    PageCursor, ProgressError, ProgressPercent,
+    JobFailure, JobFailureError, JobNotifications, JobPage, JobRecord, JobRepository,
+    JobStoreError, NewJob, PageCursor, ProgressError, ProgressPercent,
 };
 pub use op::{
     ConcatSpec, HttpRef, MediaRef, MediaRefError, ObjectRef, OpResult, OpResultError, OpSpec,

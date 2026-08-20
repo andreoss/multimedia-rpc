@@ -17,6 +17,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [dev-dependencies]
 mm-domain = { path = "../mm-domain" }
 mm-proto = { path = "../mm-proto" }
+mm-testkit = { path = "../mm-testkit" }
 tonic.workspace = true
 tonic-health.workspace = true
 uuid.workspace = true

@@ -8,9 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use mm_domain::{
-    MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, QueueUrl,
-};
+use mm_domain::{MediaRef, ObjectRef, ObjectStore, ObjectStoreError, OpResult, QueueUrl};
 use mm_ffmpeg::{ProbeLimits, Prober};
 use mm_jobstore::MIGRATOR;
 use mm_proto::v1;
@@ -208,36 +206,8 @@ fn fixture(name: &str, seconds: u32, fps: u32, container: &str) -> PathBuf {
 }
 
 async fn upload_input(store: &S3ObjectStore, path: &Path, key: &str) -> String {
-    let payload = tokio::fs::read(path).await.unwrap();
-    let length = payload.len() as u64;
-    let object = ObjectRef::new(BUCKET, key).unwrap();
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let chunks: Vec<Result<bytes::Bytes, ObjectStoreError>> = payload
-            .chunks(64 * 1024)
-            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
-            .collect();
-        let body: ObjectBody = Box::pin(futures_util::stream::iter(chunks));
-        match store.put(&object, body, length).await {
-            Ok(()) => break,
-            Err(error) if attempt < 3 => {
-                eprintln!("fixture upload attempt {attempt} failed: {error}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(error) => panic!("fixture upload failed after {attempt} attempts: {error}"),
-        }
-    }
+    mm_testkit::upload_object(store, path, BUCKET, key).await;
     format!("s3://{BUCKET}/{key}")
-}
-
-static SCENARIO_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-
-async fn scenario_slot() -> tokio::sync::SemaphorePermit<'static> {
-    SCENARIO_SLOTS
-        .acquire()
-        .await
-        .expect("the scenario gate stays open")
 }
 
 struct Daemon {
@@ -445,10 +415,10 @@ async fn await_terminal(
 }
 
 async fn one_outcome(publisher: &SqsCallbackPublisher, queue: &QueueUrl) -> v1::JobOutcome {
-    let settle = Instant::now() + Duration::from_secs(60);
+    let settle = Instant::now() + mm_testkit::budget::QUEUE_SETTLE;
     let bodies = loop {
         let received = tokio::time::timeout(
-            Duration::from_secs(10),
+            mm_testkit::budget::QUEUE_RECEIVE,
             publisher.receive(queue, Duration::from_secs(2)),
         )
         .await
@@ -461,7 +431,7 @@ async fn one_outcome(publisher: &SqsCallbackPublisher, queue: &QueueUrl) -> v1::
     };
     assert_eq!(bodies.len(), 1, "exactly one callback message");
     let leftover = tokio::time::timeout(
-        Duration::from_secs(10),
+        mm_testkit::budget::QUEUE_RECEIVE,
         publisher.receive(queue, Duration::from_secs(1)),
     )
     .await
@@ -503,7 +473,7 @@ async fn settle_blocker(client: &mut MediaJobServiceClient<Channel>, user: &str,
         .await
         .expect("blocker cancel succeeds");
     await_terminal(client, user, job_id, Duration::from_secs(30)).await;
-    let gone = Instant::now() + Duration::from_secs(10);
+    let gone = Instant::now() + mm_testkit::budget::PROCESS_EXIT;
     while find_process(job_id).is_some() {
         assert!(Instant::now() < gone, "the blocker merge process survived");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -530,7 +500,7 @@ fn find_process(needle: &str) -> Option<u32> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p01_idempotent_create_replays_and_races_to_one_row() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -612,7 +582,7 @@ async fn p01_idempotent_create_replays_and_races_to_one_row() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p02_foreign_owner_get_is_not_found_like_an_absent_job() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -669,7 +639,7 @@ async fn p02_foreign_owner_get_is_not_found_like_an_absent_job() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let media = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -801,7 +771,7 @@ async fn p03_listing_pages_stably_filters_by_status_and_rejects_bad_cursors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p04_a_blocked_container_fails_with_the_typed_code_in_file_errors() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let foreign = fixture("blocked.mkv", 2, 30, "matroska");
@@ -850,7 +820,7 @@ async fn p04_a_blocked_container_fails_with_the_typed_code_in_file_errors() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p05_a_warn_drift_input_still_merges() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let main = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -899,7 +869,7 @@ async fn p05_a_warn_drift_input_still_merges() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p06_a_full_merge_lands_a_probe_valid_faststart_output() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("merge-a-6s.mp4", 6, 30, "mp4");
@@ -976,7 +946,7 @@ async fn p06_a_full_merge_lands_a_probe_valid_faststart_output() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("watch-a-30s.mp4", 30, 30, "mp4");
@@ -1110,7 +1080,7 @@ async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p08_a_mid_merge_cancel_leaves_no_output_and_no_process() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let first = fixture("cancel-a-60s.mp4", 60, 30, "mp4");
@@ -1165,15 +1135,15 @@ async fn p08_a_mid_merge_cancel_leaves_no_output_and_no_process() {
             break;
         }
         assert!(
-            cancel_sent.elapsed() < Duration::from_secs(15),
-            "cancel never propagated; job is {:?}",
+            cancel_sent.elapsed() < mm_testkit::budget::CANCEL,
+            "cancel never propagated inside the budget; job is {:?}",
             job.state()
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     let propagated = cancel_sent.elapsed();
 
-    let gone = Instant::now() + Duration::from_secs(5);
+    let gone = Instant::now() + mm_testkit::budget::PROCESS_EXIT;
     while process_mentions(pid, &created.job_id) {
         assert!(Instant::now() < gone, "merge process survived the cancel");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1197,7 +1167,7 @@ async fn p08_a_mid_merge_cancel_leaves_no_output_and_no_process() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;
@@ -1251,7 +1221,7 @@ async fn p09_a_succeeded_job_delivers_one_matching_callback_outcome() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;
@@ -1302,7 +1272,7 @@ async fn p10_a_blocked_job_delivers_its_error_and_file_errors_by_callback() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;
@@ -1387,7 +1357,7 @@ async fn p11_a_job_cancelled_while_pending_delivers_one_callback() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p12_a_deadline_reaped_job_delivers_one_timeout_callback() {
-    let _slot = scenario_slot().await;
+    let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
     let publisher = queue_publisher().await;

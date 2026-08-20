@@ -1,4 +1,5 @@
 use crate::profile::video_filter;
+use crate::timestamp::Timestamp;
 
 pub const IMAGE_QUALITY: u32 = 2;
 
@@ -24,11 +25,11 @@ pub struct ThumbnailTarget {
 
 pub fn build_thumbnail_args(
     input: &str,
-    offset_seconds: f64,
+    offset: Timestamp,
     target: &ThumbnailTarget,
     output: &str,
 ) -> Vec<String> {
-    let offset = format!("{offset_seconds:.3}");
+    let offset = offset.argument();
     [
         "-y",
         "-nostdin",

@@ -1,5 +1,5 @@
 use mm_ffmpeg::{
-    KEYFRAME_TOLERANCE_SECONDS, TargetProfile, TrimError, TrimStrategy, TrimTarget,
+    KEYFRAME_TOLERANCE_SECONDS, TargetProfile, Timestamp, TrimError, TrimStrategy, TrimTarget,
     aligned_to_keyframe, build_trim_args,
 };
 
@@ -15,18 +15,25 @@ fn target(strategy: TrimStrategy) -> TrimTarget {
 
 #[test]
 fn a_copy_trim_seeks_before_the_input_and_copies_streams() {
-    let args = build_trim_args(INPUT, &target(TrimStrategy::Copy), 2.0, 3.5, OUTPUT).unwrap();
+    let args = build_trim_args(
+        INPUT,
+        &target(TrimStrategy::Copy),
+        Timestamp::from_micros(2_000_000),
+        Timestamp::from_micros(3_500_000),
+        OUTPUT,
+    )
+    .unwrap();
 
     let expected: Vec<String> = [
         "-y",
         "-nostdin",
         "-hide_banner",
         "-ss",
-        "2.000",
+        "2.000000",
         "-i",
         INPUT,
         "-t",
-        "3.500",
+        "3.500000",
         "-c",
         "copy",
         "-avoid_negative_ts",
@@ -46,18 +53,25 @@ fn a_copy_trim_seeks_before_the_input_and_copies_streams() {
 
 #[test]
 fn a_reencoding_trim_normalizes_with_the_shared_profile() {
-    let args = build_trim_args(INPUT, &target(TrimStrategy::Reencode), 0.5, 2.0, OUTPUT).unwrap();
+    let args = build_trim_args(
+        INPUT,
+        &target(TrimStrategy::Reencode),
+        Timestamp::from_micros(500_000),
+        Timestamp::from_micros(2_000_000),
+        OUTPUT,
+    )
+    .unwrap();
 
     let expected: Vec<String> = [
         "-y",
         "-nostdin",
         "-hide_banner",
         "-ss",
-        "0.500",
+        "0.500000",
         "-i",
         INPUT,
         "-t",
-        "2.000",
+        "2.000000",
         "-vf",
         "fps=24,format=yuv420p",
         "-af",
@@ -93,7 +107,14 @@ fn a_reencoding_trim_normalizes_with_the_shared_profile() {
 
 #[test]
 fn a_copy_trim_carries_no_encoder_flags() {
-    let args = build_trim_args(INPUT, &target(TrimStrategy::Copy), 0.0, 1.0, OUTPUT).unwrap();
+    let args = build_trim_args(
+        INPUT,
+        &target(TrimStrategy::Copy),
+        Timestamp::ZERO,
+        Timestamp::from_micros(1_000_000),
+        OUTPUT,
+    )
+    .unwrap();
 
     assert!(!args.iter().any(|arg| arg == "-c:v"));
     assert!(!args.iter().any(|arg| arg == "-crf"));
@@ -145,7 +166,14 @@ fn an_unsupported_channel_count_is_rejected_before_argv() {
         },
     };
 
-    let error = build_trim_args(INPUT, &trim, 0.0, 1.0, OUTPUT).unwrap_err();
+    let error = build_trim_args(
+        INPUT,
+        &trim,
+        Timestamp::ZERO,
+        Timestamp::from_micros(1_000_000),
+        OUTPUT,
+    )
+    .unwrap_err();
 
     assert!(matches!(
         error,

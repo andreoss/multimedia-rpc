@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use mm_domain::OutputProfile;
+use mm_domain::{OutputProfile, Ticks};
 use mm_worker::{DiskBudget, admits, ladder_estimate_bytes};
 
 #[test]
@@ -72,7 +72,7 @@ fn a_ladder_is_admitted_on_what_it_writes_not_only_on_what_it_reads() {
 fn a_packaged_ladder_reserves_its_segments_on_top_of_its_encodes() {
     let rungs = vec![rung(640, 360, 1_000_000, 96_000)];
     let encoded_only = ladder_estimate_bytes(&rungs, 60.0, None, 0);
-    let packaged = ladder_estimate_bytes(&rungs, 60.0, Some(6.0), 0);
+    let packaged = ladder_estimate_bytes(&rungs, 60.0, Some(Ticks::from_seconds(6.0).unwrap()), 0);
     let segments = packaged - encoded_only;
     assert_eq!(
         segments,
@@ -89,7 +89,12 @@ fn a_six_rung_ladder_reserves_far_more_than_its_input() {
             rung(320 * step, 180 * step, 400_000 * step, 96_000)
         })
         .collect();
-    let estimate = ladder_estimate_bytes(&rungs, 600.0, Some(6.0), 50_000_000);
+    let estimate = ladder_estimate_bytes(
+        &rungs,
+        600.0,
+        Some(Ticks::from_seconds(6.0).unwrap()),
+        50_000_000,
+    );
     assert!(
         estimate > 50_000_000,
         "the estimate is the input's own size: {estimate}"

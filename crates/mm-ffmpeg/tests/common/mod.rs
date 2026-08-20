@@ -11,7 +11,11 @@ pub fn scratch_dir() -> PathBuf {
 }
 
 pub fn fixture(name: &str, seconds: u32, fps: u32, width: u32, height: u32) -> PathBuf {
-    generate(name, seconds, fps, width, height, None)
+    generate(name, seconds, &fps.to_string(), width, height, None)
+}
+
+pub fn rational_fixture(name: &str, seconds: u32, rate: &str, width: u32, height: u32) -> PathBuf {
+    generate(name, seconds, rate, width, height, None)
 }
 
 pub fn keyed_fixture(
@@ -22,13 +26,13 @@ pub fn keyed_fixture(
     height: u32,
     keyint: u32,
 ) -> PathBuf {
-    generate(name, seconds, fps, width, height, Some(keyint))
+    generate(name, seconds, &fps.to_string(), width, height, Some(keyint))
 }
 
 fn generate(
     name: &str,
     seconds: u32,
-    fps: u32,
+    fps: &str,
     width: u32,
     height: u32,
     keyint: Option<u32>,

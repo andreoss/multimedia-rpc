@@ -6,6 +6,7 @@ mod profile;
 mod progress;
 mod runner;
 mod thumbnail;
+mod timestamp;
 mod transcode;
 mod trim;
 
@@ -20,6 +21,7 @@ pub use profile::TargetProfile;
 pub use progress::{ProgressParser, ProgressUpdate};
 pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner};
 pub use thumbnail::{IMAGE_QUALITY, ImageFormat, ThumbnailTarget, build_thumbnail_args};
+pub use timestamp::Timestamp;
 pub use transcode::{
     AudioCodec, ScaleMode, SourceCut, TranscodeError, TranscodeTarget, VideoCodec,
     build_transcode_args,

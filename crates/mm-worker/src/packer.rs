@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use thiserror::Error;
 
-use mm_domain::JobId;
-use mm_ffmpeg::{HlsTarget, RunLimits, RunOutcome, Runner, TargetProfile, build_hls_args};
+use mm_domain::{JobId, Ticks};
+use mm_ffmpeg::{
+    HlsTarget, RunLimits, RunOutcome, Runner, TargetProfile, Timestamp, build_hls_args,
+};
 use mm_gst::{
     Element as GstElement, Link as GstLink, PackageOutcome as GstOutcome,
     PackageRequest as GstRequest, PipelineDescription as GstDescription, Property as GstProperty,
@@ -35,7 +37,7 @@ pub trait RungPacker: Send + Sync {
         rung: usize,
         media: &mm_domain::ObjectRef,
         staging_dir: &Path,
-        segment_seconds: f64,
+        segment: Ticks,
     ) -> Result<LadderPacked, LadderPackError>;
 }
 
@@ -54,7 +56,7 @@ impl RungPacker for FfmpegRungPacker {
         rung: usize,
         _media: &mm_domain::ObjectRef,
         staging_dir: &Path,
-        segment_seconds: f64,
+        segment: Ticks,
     ) -> Result<LadderPacked, LadderPackError> {
         let dir = staging_dir.to_path_buf();
         std::fs::create_dir_all(&dir)
@@ -63,7 +65,7 @@ impl RungPacker for FfmpegRungPacker {
             &dir.join("media.mp4").to_string_lossy(),
             &HlsTarget {
                 profile: TargetProfile::default(),
-                segment_seconds,
+                segment: Timestamp::from_micros(segment.micros()),
                 copy_streams: true,
             },
             &dir.to_string_lossy(),
@@ -145,7 +147,7 @@ impl RungPacker for GstRungPacker {
         _rung: usize,
         _media: &mm_domain::ObjectRef,
         staging_dir: &Path,
-        segment_seconds: f64,
+        segment: Ticks,
     ) -> Result<LadderPacked, LadderPackError> {
         std::fs::create_dir_all(staging_dir)
             .map_err(|error| LadderPackError::Launch(error.to_string()))?;
@@ -154,7 +156,7 @@ impl RungPacker for GstRungPacker {
             dir.join("media.mp4").to_string_lossy().into_owned(),
             dir.clone(),
             dir.join("stream"),
-            segment_seconds,
+            segment.seconds(),
         );
         let description = rung_packaging_description(&request);
         let outcome = tokio::task::spawn_blocking(move || {
@@ -167,7 +169,7 @@ impl RungPacker for GstRungPacker {
         .await
         .map_err(|error| LadderPackError::Launch(error.to_string()))?
         .map_err(|error| LadderPackError::Refused(error.to_string()))?;
-        split_packaged(&outcome, &dir, segment_seconds)
+        split_packaged(&outcome, &dir, segment)
     }
 }
 
@@ -193,7 +195,7 @@ pub fn rung_packaging_description(request: &GstRequest) -> GstDescription {
 fn split_packaged(
     outcome: &GstOutcome,
     dir: &Path,
-    segment_seconds: f64,
+    segment: Ticks,
 ) -> Result<LadderPacked, LadderPackError> {
     let bytes = std::fs::read(&outcome.stream)
         .map_err(|error| LadderPackError::Refused(error.to_string()))?;
@@ -207,7 +209,8 @@ fn split_packaged(
     let written = segmented
         .write_to(dir)
         .map_err(|error| LadderPackError::Refused(error.to_string()))?;
-    let playlist = mm_gst::render_playlist(Some("init.mp4"), segment_seconds, &segmented.names(0));
+    let playlist =
+        mm_gst::render_playlist(Some("init.mp4"), segment.seconds(), &segmented.names(0));
     let playlist_path = dir.join(mm_gst::playlist_name());
     std::fs::write(&playlist_path, playlist)
         .map_err(|error| LadderPackError::Refused(error.to_string()))?;

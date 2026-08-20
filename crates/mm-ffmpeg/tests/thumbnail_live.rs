@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use common::{fixture, scratch_dir};
 use mm_ffmpeg::{
-    ImageFormat, ProbeLimits, Prober, RunLimits, RunOutcome, Runner, ThumbnailTarget,
+    ImageFormat, ProbeLimits, Prober, RunLimits, RunOutcome, Runner, ThumbnailTarget, Timestamp,
     build_thumbnail_args,
 };
 
@@ -30,7 +30,7 @@ async fn extract(input: &std::path::Path, offset: f64, name: &str) -> std::path:
     let output = scratch_dir().join(name);
     let args = build_thumbnail_args(
         input.to_string_lossy().as_ref(),
-        offset,
+        Timestamp::from_micros((offset * 1_000_000.0).round() as u64),
         &target(160, 120),
         output.to_string_lossy().as_ref(),
     );
@@ -93,7 +93,7 @@ async fn a_thumbnail_at_a_size_larger_than_the_source_pads_it() {
     let output = scratch_dir().join("thumbnail-pad.jpg");
     let args = build_thumbnail_args(
         input.to_string_lossy().as_ref(),
-        1.0,
+        Timestamp::from_micros(1_000_000),
         &target(640, 480),
         output.to_string_lossy().as_ref(),
     );

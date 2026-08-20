@@ -1,4 +1,4 @@
-use mm_ffmpeg::{HlsError, HlsTarget, TargetProfile, build_hls_args};
+use mm_ffmpeg::{HlsError, HlsTarget, TargetProfile, Timestamp, build_hls_args};
 
 #[test]
 fn an_hls_pack_writes_a_media_playlist_and_its_segments() {
@@ -6,7 +6,7 @@ fn an_hls_pack_writes_a_media_playlist_and_its_segments() {
         "https://host/media.mp4",
         &HlsTarget {
             profile: TargetProfile::default(),
-            segment_seconds: 6.0,
+            segment: Timestamp::from_micros(6_000_000),
             copy_streams: false,
         },
         "scratch/out",
@@ -16,7 +16,7 @@ fn an_hls_pack_writes_a_media_playlist_and_its_segments() {
     assert_eq!(args[4], "https://host/media.mp4");
     assert_eq!(args[position(&args, "-f") + 1], "hls");
     assert_eq!(args[position(&args, "-hls_playlist_type") + 1], "vod");
-    assert_eq!(args[position(&args, "-hls_time") + 1], "6.000");
+    assert_eq!(args[position(&args, "-hls_time") + 1], "6.000000");
     assert_eq!(
         args[position(&args, "-hls_segment_filename") + 1],
         "scratch/out/seg%05d.m4s"
@@ -37,7 +37,7 @@ fn an_hls_pack_writes_the_rung_s_own_encode_targets() {
         "media.mp4",
         &HlsTarget {
             profile,
-            segment_seconds: 1.0,
+            segment: Timestamp::from_micros(1_000_000),
             copy_streams: false,
         },
         "out",
@@ -59,24 +59,22 @@ fn an_hls_pack_writes_the_rung_s_own_encode_targets() {
 
 #[test]
 fn an_hls_pack_refuses_a_segment_length_that_is_not_positive_and_finite() {
-    for value in [0.0, -1.0] {
-        let target = HlsTarget {
-            profile: TargetProfile::default(),
-            segment_seconds: value,
-            copy_streams: false,
-        };
-        assert_eq!(
-            build_hls_args("media.mp4", &target, "out").unwrap_err(),
-            HlsError::SegmentLength { value }
-        );
-    }
+    let target = HlsTarget {
+        profile: TargetProfile::default(),
+        segment: Timestamp::ZERO,
+        copy_streams: false,
+    };
+    assert_eq!(
+        build_hls_args("media.mp4", &target, "out").unwrap_err(),
+        HlsError::SegmentLength
+    );
 }
 
 #[test]
 fn an_hls_pack_refuses_an_output_dir_that_is_not_a_path() {
     let target = HlsTarget {
         profile: TargetProfile::default(),
-        segment_seconds: 6.0,
+        segment: Timestamp::from_micros(6_000_000),
         copy_streams: false,
     };
     assert_eq!(
@@ -101,7 +99,7 @@ fn an_hls_pack_can_carry_an_encode_it_was_given() {
         "media.mp4",
         &HlsTarget {
             profile,
-            segment_seconds: 6.0,
+            segment: Timestamp::from_micros(6_000_000),
             copy_streams: false,
         },
         "out",
@@ -117,7 +115,7 @@ fn an_hls_pack_can_package_media_it_was_given_without_re_encoding_it() {
         "media.mp4",
         &HlsTarget {
             profile: TargetProfile::default(),
-            segment_seconds: 6.0,
+            segment: Timestamp::from_micros(6_000_000),
             copy_streams: true,
         },
         "out",

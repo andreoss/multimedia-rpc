@@ -1,6 +1,7 @@
 use crate::profile::{
     Scaling, TargetProfile, audio_filter, channel_layout, encode_args, video_filter,
 };
+use crate::timestamp::Timestamp;
 use crate::trim::seconds_arg;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,15 +43,15 @@ pub struct TranscodeTarget {
     pub scale_mode: ScaleMode,
     pub profile: TargetProfile,
     pub cut: Option<SourceCut>,
-    pub range: Option<(f64, f64)>,
+    pub range: Option<(Timestamp, Timestamp)>,
     pub speed: Option<f64>,
     pub volume: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceCut {
-    pub start_seconds: f64,
-    pub duration_seconds: f64,
+    pub start: Timestamp,
+    pub duration: Timestamp,
 }
 
 impl Default for TranscodeTarget {
@@ -97,9 +98,9 @@ pub fn build_transcode_args(
         .collect();
     if let Some(cut) = target.cut {
         args.push("-ss".to_string());
-        args.push(seconds_arg(cut.start_seconds));
+        args.push(seconds_arg(cut.start));
         args.push("-t".to_string());
-        args.push(seconds_arg(cut.duration_seconds));
+        args.push(seconds_arg(cut.duration));
     }
     args.push("-i".to_string());
     args.push(input.to_string());

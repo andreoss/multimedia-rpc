@@ -1,6 +1,6 @@
 use mm_ffmpeg::{
-    AudioCodec, ScaleMode, SourceCut, TargetProfile, TranscodeError, TranscodeTarget, VideoCodec,
-    build_transcode_args,
+    AudioCodec, ScaleMode, SourceCut, TargetProfile, Timestamp, TranscodeError, TranscodeTarget,
+    VideoCodec, build_transcode_args,
 };
 
 const INPUT: &str = "http://127.0.0.1:9/in.mp4";
@@ -150,8 +150,8 @@ fn an_uncut_source_reads_the_input_without_seeking() {
 fn a_trimmed_source_bounds_what_it_reads_before_the_input() {
     let mut target = target(None, ScaleMode::PadToFit);
     target.cut = Some(SourceCut {
-        start_seconds: 1.0,
-        duration_seconds: 2.5,
+        start: Timestamp::from_micros(1_000_000),
+        duration: Timestamp::from_micros(2_500_000),
     });
     let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
 
@@ -164,9 +164,9 @@ fn a_trimmed_source_bounds_what_it_reads_before_the_input() {
             "-nostdin",
             "-hide_banner",
             "-ss",
-            "1.000",
+            "1.000000",
             "-t",
-            "2.500",
+            "2.500000",
             "-i",
             INPUT
         ]
@@ -206,15 +206,15 @@ fn a_quiet_source_scales_the_sound_only() {
 fn a_cut_a_speed_and_a_volume_travel_on_one_command() {
     let mut target = target(Some((640, 360)), ScaleMode::PadToFit);
     target.cut = Some(SourceCut {
-        start_seconds: 0.5,
-        duration_seconds: 3.0,
+        start: Timestamp::from_micros(500_000),
+        duration: Timestamp::from_micros(3_000_000),
     });
     target.speed = Some(2.0);
     target.volume = Some(1.5);
     let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
 
-    assert_eq!(argument_after(&args, "-ss"), "0.500");
-    assert_eq!(argument_after(&args, "-t"), "3.000");
+    assert_eq!(argument_after(&args, "-ss"), "0.500000");
+    assert_eq!(argument_after(&args, "-t"), "3.000000");
     assert!(argument_after(&args, "-vf").starts_with("setpts=PTS/2.0,"));
     assert!(argument_after(&args, "-af").ends_with(",atempo=2.0,volume=1.5"));
 }
@@ -222,11 +222,14 @@ fn a_cut_a_speed_and_a_volume_travel_on_one_command() {
 #[test]
 fn a_range_bounds_the_output_after_the_input() {
     let mut target = target(None, ScaleMode::PadToFit);
-    target.range = Some((1.0, 2.0));
+    target.range = Some((
+        Timestamp::from_micros(1_000_000),
+        Timestamp::from_micros(2_000_000),
+    ));
     let args = build_transcode_args(INPUT, &target, "scratch/out.mp4").unwrap();
     let input_position = args.iter().position(|arg| arg == "-i").unwrap();
     assert_eq!(
         &args[input_position + 2..input_position + 6],
-        &["-ss", "1.000", "-t", "2.000"]
+        &["-ss", "1.000000", "-t", "2.000000"]
     );
 }

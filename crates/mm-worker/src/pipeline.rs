@@ -16,12 +16,13 @@ use mm_domain::{
     ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
     PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
     ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo,
-    WorkerId, resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
+    ThumbnailSpec, Ticks, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, Verdict,
+    VideoStreamInfo, WorkerId, resolve_media_ref, validate_inputs, validate_ladder_rungs,
+    verdict_code,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
-    ThumbnailTarget, TranscodeTarget, TrimStrategy, TrimTarget, build_concat_args,
+    ThumbnailTarget, Timestamp, TranscodeTarget, TrimStrategy, TrimTarget, build_concat_args,
     build_thumbnail_args, build_transcode_args, build_trim_args,
 };
 use mm_gst::Written as GstWritten;
@@ -43,6 +44,10 @@ use crate::report::{
     blocks, input_report, render_verdicts, still_report, target_profile, warnings,
 };
 use crate::{RungPacker, WorkerConfig};
+
+fn timestamp(ticks: Ticks) -> Timestamp {
+    Timestamp::from_micros(ticks.micros())
+}
 
 pub mod codes {
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
@@ -867,7 +872,7 @@ async fn package_pipeline(
     let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Package, &[input_report(&info)])?;
 
-    let segments_expected = (info.duration.as_secs_f64() / spec.segment_seconds())
+    let segments_expected = (info.duration.as_secs_f64() / spec.segment().seconds())
         .ceil()
         .max(1.0) as u64;
     let inputs = [spec.input().clone()];
@@ -883,10 +888,10 @@ async fn package_pipeline(
         url.clone(),
         staging.clone(),
         staging.join("stream"),
-        spec.segment_seconds(),
+        spec.segment().seconds(),
     );
     let description = packaging_description(&request);
-    let seconds = spec.segment_seconds();
+    let seconds = spec.segment();
 
     check(signal)?;
     let produced = tokio::task::spawn_blocking(move || {
@@ -925,7 +930,7 @@ async fn upload_package(
     id: JobId,
     prefix: &str,
     produced: &GstOutcome,
-    segment_seconds: f64,
+    segment: Ticks,
 ) -> Result<OpResult, Finish> {
     let bytes = tokio::fs::read(&produced.stream)
         .await
@@ -947,7 +952,8 @@ async fn upload_package(
     let written = segmented
         .write_to(&dir)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
-    let playlist = mm_gst::render_playlist(Some("init.mp4"), segment_seconds, &segmented.names(0));
+    let playlist =
+        mm_gst::render_playlist(Some("init.mp4"), segment.seconds(), &segmented.names(0));
     let playlist_path = dir.join(mm_gst::playlist_name());
     std::fs::write(&playlist_path, playlist)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
@@ -1528,7 +1534,7 @@ async fn pack_rung(
     media: &ObjectRef,
     staged_media: &Path,
     prefix: &str,
-    segment_seconds: f64,
+    segment: Ticks,
     packer: &dyn RungPacker,
     landed: &mut Landed,
 ) -> Result<(ObjectRef, Vec<ObjectRef>, ObjectRef), Finish> {
@@ -1541,7 +1547,7 @@ async fn pack_rung(
         .await
         .map_err(|error| failed(codes::LADDER_PACK_FAILED, error))?;
     let packed = packer
-        .pack(job, rung, media, &staging, segment_seconds)
+        .pack(job, rung, media, &staging, segment)
         .await
         .map_err(|error| {
             failed(
@@ -1626,7 +1632,7 @@ async fn ladder_pipeline(
         &landed,
         &mut staged,
         &mut renditions,
-        spec.segment_seconds(),
+        spec.segment(),
         packer,
     )
     .await;
@@ -1636,10 +1642,10 @@ async fn ladder_pipeline(
     }
     match outcome {
         Ok(()) => {
-            if let (Some(poster_seconds), Some(path)) = (spec.poster_seconds(), highest) {
-                extract_poster(ctx, job, scope, &path, poster_seconds, deadline_at, signal).await?;
+            if let (Some(poster), Some(path)) = (spec.poster(), highest) {
+                extract_poster(ctx, job, scope, &path, poster, deadline_at, signal).await?;
             }
-            let master = match spec.segment_seconds() {
+            let master = match spec.segment() {
                 Some(_) => {
                     let mut ledger = landed.lock().await;
                     Some(
@@ -1675,7 +1681,7 @@ async fn encode_rungs(
     landed: &Arc<tokio::sync::Mutex<Landed>>,
     staged: &mut Vec<PathBuf>,
     renditions: &mut Vec<RenditionResult>,
-    segment_seconds: Option<f64>,
+    segment: Option<Ticks>,
     packer: &dyn RungPacker,
 ) -> Result<(), Finish> {
     let total = spec.rungs().len();
@@ -1698,7 +1704,7 @@ async fn encode_rungs(
             signal.clone(),
             landed.clone(),
             output_path,
-            segment_seconds,
+            segment,
             packer,
             aborted.clone(),
         ));
@@ -1746,7 +1752,7 @@ async fn encode_one_rung(
     signal: watch::Receiver<Signal>,
     landed: Arc<tokio::sync::Mutex<Landed>>,
     output_path: PathBuf,
-    segment_seconds: Option<f64>,
+    segment: Option<Ticks>,
     packer: &dyn RungPacker,
     aborted: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(usize, RenditionResult), Finish> {
@@ -1763,7 +1769,7 @@ async fn encode_one_rung(
         signal,
         landed,
         output_path,
-        segment_seconds,
+        segment,
         packer,
         aborted,
     )
@@ -1793,7 +1799,7 @@ async fn encode_one_rung_inner(
     mut signal: watch::Receiver<Signal>,
     landed: Arc<tokio::sync::Mutex<Landed>>,
     output_path: PathBuf,
-    segment_seconds: Option<f64>,
+    segment: Option<Ticks>,
     packer: &dyn RungPacker,
     aborted: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(usize, RenditionResult), Finish> {
@@ -1810,8 +1816,8 @@ async fn encode_one_rung_inner(
         profile: target_profile(Some(&profile)),
         cut: source.as_ref().and_then(|source| {
             source.trim().map(|trim| SourceCut {
-                start_seconds: trim.start_seconds(),
-                duration_seconds: trim.duration_seconds(),
+                start: timestamp(trim.start()),
+                duration: timestamp(trim.duration()),
             })
         }),
         speed: source.as_ref().and_then(|source| source.speed()),
@@ -1862,7 +1868,7 @@ async fn encode_one_rung_inner(
     landed.lock().await.record(media.clone());
     ctx.metrics.output_bytes.add(bytes);
     ctx.metrics.renditions.add(1);
-    let packed = match segment_seconds {
+    let packed = match segment {
         Some(seconds) => {
             let mut ledger = landed.lock().await;
             Some(
@@ -1918,7 +1924,7 @@ fn rung_failure_code(finish: &Finish) -> Option<&str> {
 pub fn ladder_estimate_bytes(
     rungs: &[OutputProfile],
     duration_seconds: f64,
-    segment_seconds: Option<f64>,
+    segment: Option<Ticks>,
     read: u64,
 ) -> u64 {
     let encoded: u64 = rungs
@@ -1927,8 +1933,8 @@ pub fn ladder_estimate_bytes(
             let bits = u64::from(rung.video_max_bitrate().unwrap_or(0))
                 + u64::from(rung.audio_bitrate().unwrap_or(0));
             let mut bytes = (bits as f64 / 8.0) * duration_seconds * ENCODED_HEADROOM;
-            if let Some(segment_seconds) = segment_seconds {
-                let segments = (duration_seconds / segment_seconds).ceil().max(1.0);
+            if let Some(segment) = segment {
+                let segments = (duration_seconds / segment.seconds()).ceil().max(1.0);
                 bytes += segments * SEGMENT_ESTIMATE_BYTES as f64;
             }
             bytes as u64
@@ -1941,7 +1947,7 @@ fn ladder_estimate(spec: &LadderSpec, info: &MediaInfo, read: u64) -> u64 {
     ladder_estimate_bytes(
         spec.rungs(),
         info.duration.as_secs_f64(),
-        spec.segment_seconds(),
+        spec.segment(),
         read,
     )
 }
@@ -1991,14 +1997,14 @@ async fn transcode_pipeline(
         profile: target_profile(Some(spec.profile())),
         cut: source.and_then(|source| {
             source.trim().map(|trim| SourceCut {
-                start_seconds: trim.start_seconds(),
-                duration_seconds: trim.duration_seconds(),
+                start: timestamp(trim.start()),
+                duration: timestamp(trim.duration()),
             })
         }),
         range: spec
             .profile()
             .range()
-            .map(|range| (range.start_seconds(), range.duration_seconds())),
+            .map(|range| (timestamp(range.start()), timestamp(range.duration()))),
         speed: source.and_then(|source| source.speed()),
         volume: source.and_then(|source| source.volume()),
         ..TranscodeTarget::default()
@@ -2022,17 +2028,8 @@ async fn transcode_pipeline(
     .await;
     let outcome = match transcoded {
         Ok(result) => {
-            if let Some(poster_seconds) = spec.profile().poster_seconds() {
-                extract_poster(
-                    ctx,
-                    job,
-                    scope,
-                    &output_path,
-                    poster_seconds,
-                    deadline_at,
-                    signal,
-                )
-                .await?;
+            if let Some(poster) = spec.profile().poster() {
+                extract_poster(ctx, job, scope, &output_path, poster, deadline_at, signal).await?;
             }
             Ok(result)
         }
@@ -2047,7 +2044,7 @@ async fn extract_poster(
     job: &JobRecord,
     scope: &Scope,
     output_path: &Path,
-    poster_seconds: f64,
+    poster: Ticks,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<(), Finish> {
@@ -2069,7 +2066,7 @@ async fn extract_poster(
     let poster_path = ctx.staging_dir.join(format!("{}-poster.jpg", job.id));
     let args = build_thumbnail_args(
         &output_path.to_string_lossy(),
-        poster_seconds,
+        timestamp(poster),
         &target,
         &poster_path.to_string_lossy(),
     );
@@ -2178,7 +2175,7 @@ async fn thumbnail_pipeline(
     let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Thumbnail, &[input_report(&info)])?;
 
-    let offsets = spec.offsets_seconds();
+    let offsets = spec.offsets();
     let estimate = estimate_bytes(ctx, &[spec.input().clone()], &[info]).await
         + staged_frame_bytes(offsets.len(), spec.width(), spec.height());
     let _reservation = admit_or_release(ctx, job.id, estimate).await?;
@@ -2194,7 +2191,9 @@ async fn thumbnail_pipeline(
     let runs: Vec<Vec<String>> = offsets
         .iter()
         .zip(staged.iter())
-        .map(|(offset, path)| build_thumbnail_args(&url, *offset, &target, &path.to_string_lossy()))
+        .map(|(offset, path)| {
+            build_thumbnail_args(&url, timestamp(*offset), &target, &path.to_string_lossy())
+        })
         .collect();
     let total = Duration::from_secs(u64::from(THUMBNAIL_RUN_SECONDS) * offsets.len() as u64);
     let limits = remaining_limits(ctx, total, deadline_at)?;
@@ -2429,8 +2428,8 @@ async fn trim_pipeline(
     let args = build_trim_args(
         &url,
         &target,
-        spec.start_seconds(),
-        spec.duration_seconds(),
+        timestamp(spec.start()),
+        timestamp(spec.duration()),
         &output_path.to_string_lossy(),
     )
     .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;

@@ -3,7 +3,8 @@ mod common;
 use std::time::Duration;
 
 use mm_ffmpeg::{
-    ProbeLimits, Prober, ScaleMode, SourceCut, TargetProfile, TranscodeTarget, build_transcode_args,
+    ProbeLimits, Prober, ScaleMode, SourceCut, TargetProfile, Timestamp, TranscodeTarget,
+    build_transcode_args,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -116,8 +117,8 @@ async fn a_trimmed_source_lands_the_requested_duration() {
 
     let target = TranscodeTarget {
         cut: Some(SourceCut {
-            start_seconds: 2.0,
-            duration_seconds: 3.0,
+            start: Timestamp::from_micros(2_000_000),
+            duration: Timestamp::from_micros(3_000_000),
         }),
         ..TranscodeTarget::default()
     };

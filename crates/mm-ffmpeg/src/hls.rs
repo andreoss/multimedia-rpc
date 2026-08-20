@@ -1,11 +1,12 @@
 use thiserror::Error;
 
 use crate::profile::{TargetProfile, encode_args};
+use crate::timestamp::Timestamp;
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum HlsError {
-    #[error("segment length {value} is not positive and finite")]
-    SegmentLength { value: f64 },
+    #[error("segment length is zero")]
+    SegmentLength,
     #[error("the output directory is empty")]
     OutputDir,
 }
@@ -13,16 +14,16 @@ pub enum HlsError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HlsTarget {
     pub profile: TargetProfile,
-    pub segment_seconds: f64,
+    pub segment: Timestamp,
     pub copy_streams: bool,
 }
 
-fn muxer_args(segment_seconds: f64, output_dir: &str) -> Vec<String> {
+fn muxer_args(segment: Timestamp, output_dir: &str) -> Vec<String> {
     let mut args = vec![
         "-f".to_string(),
         "hls".to_string(),
         "-hls_time".to_string(),
-        format!("{segment_seconds:.3}"),
+        segment.argument(),
         "-hls_playlist_type".to_string(),
         "vod".to_string(),
         "-hls_flags".to_string(),
@@ -43,10 +44,8 @@ pub fn build_hls_args(
     target: &HlsTarget,
     output_dir: &str,
 ) -> Result<Vec<String>, HlsError> {
-    if !target.segment_seconds.is_finite() || target.segment_seconds <= 0.0 {
-        return Err(HlsError::SegmentLength {
-            value: target.segment_seconds,
-        });
+    if target.segment.is_zero() {
+        return Err(HlsError::SegmentLength);
     }
     if output_dir.is_empty() {
         return Err(HlsError::OutputDir);
@@ -69,7 +68,7 @@ pub fn build_hls_args(
         encoded.truncate(muxed);
         args.extend(encoded);
     }
-    args.extend(muxer_args(target.segment_seconds, output_dir));
+    args.extend(muxer_args(target.segment, output_dir));
     args.push(format!("{output_dir}/playlist.m3u8"));
     Ok(args)
 }

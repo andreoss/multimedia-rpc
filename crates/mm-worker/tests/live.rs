@@ -13,7 +13,7 @@ use mm_domain::{
     ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec,
     MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult,
     OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, RungState,
-    StepState, ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    StepState, ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -2576,7 +2576,7 @@ async fn a_ladder_rung_above_the_source_blocks_naming_the_rung() {
 }
 
 struct RecordingPacker {
-    calls: tokio::sync::Mutex<Vec<(JobId, usize, f64)>>,
+    calls: tokio::sync::Mutex<Vec<(JobId, usize, Ticks)>>,
 }
 
 #[async_trait]
@@ -2591,9 +2591,9 @@ impl RungPacker for RecordingPacker {
         rung: usize,
         _media: &ObjectRef,
         staging_dir: &Path,
-        segment_seconds: f64,
+        segment: Ticks,
     ) -> Result<LadderPacked, LadderPackError> {
-        self.calls.lock().await.push((job, rung, segment_seconds));
+        self.calls.lock().await.push((job, rung, segment));
         Ok(stub_packed(staging_dir, rung))
     }
 }
@@ -2614,7 +2614,7 @@ impl RungPacker for FailingPacker {
         _rung: usize,
         _media: &ObjectRef,
         _staging_dir: &Path,
-        _segment_seconds: f64,
+        _segment: Ticks,
     ) -> Result<LadderPacked, LadderPackError> {
         let mut calls = self.calls.lock().await;
         *calls += 1;
@@ -2688,7 +2688,7 @@ async fn a_registered_packer_answers_a_ladder_end_to_end() {
     assert_eq!(calls[0].0, job.id);
     assert_eq!(calls[0].1, 0);
     assert_eq!(calls[1].1, 1);
-    assert_eq!(calls[0].2, 1.0);
+    assert_eq!(calls[0].2, Ticks::from_seconds(1.0).unwrap());
     let OpResult::Ladder(result) = record.result.expect("result recorded") else {
         panic!("expected a ladder result");
     };
@@ -2788,7 +2788,7 @@ impl RungPacker for MediaPacker {
         _rung: usize,
         _media: &ObjectRef,
         staging_dir: &Path,
-        _segment_seconds: f64,
+        _segment: Ticks,
     ) -> Result<LadderPacked, mm_worker::LadderPackError> {
         let init = staging_dir.join("init.mp4");
         std::fs::write(&init, b"init").expect("init staged");

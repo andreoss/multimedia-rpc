@@ -1,6 +1,7 @@
 use crate::profile::{
     Scaling, TargetProfile, audio_filter, channel_layout, encode_args, video_filter,
 };
+use crate::timestamp::Timestamp;
 
 pub const KEYFRAME_TOLERANCE_SECONDS: f64 = 0.02;
 
@@ -37,15 +38,15 @@ pub fn aligned_to_keyframe(keyframes: &[f64], start_seconds: f64) -> bool {
         .any(|keyframe| (keyframe - start_seconds).abs() <= KEYFRAME_TOLERANCE_SECONDS)
 }
 
-pub fn seconds_arg(value: f64) -> String {
-    format!("{value:.3}")
+pub fn seconds_arg(value: Timestamp) -> String {
+    value.argument()
 }
 
 pub fn build_trim_args(
     input: &str,
     target: &TrimTarget,
-    start_seconds: f64,
-    duration_seconds: f64,
+    start: Timestamp,
+    duration: Timestamp,
     output: &str,
 ) -> Result<Vec<String>, TrimError> {
     let head: Vec<String> = [
@@ -53,11 +54,11 @@ pub fn build_trim_args(
         "-nostdin",
         "-hide_banner",
         "-ss",
-        &seconds_arg(start_seconds),
+        &seconds_arg(start),
         "-i",
         input,
         "-t",
-        &seconds_arg(duration_seconds),
+        &seconds_arg(duration),
     ]
     .into_iter()
     .map(str::to_string)

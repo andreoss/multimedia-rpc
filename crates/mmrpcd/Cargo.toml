@@ -8,6 +8,7 @@ rust-version.workspace = true
 mm-auth = { path = "../mm-auth" }
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
+mm-observability = { path = "../mm-observability" }
 mm-jobstore = { path = "../mm-jobstore" }
 mm-server = { path = "../mm-server" }
 mm-storage = { path = "../mm-storage" }

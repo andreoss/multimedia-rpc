@@ -266,11 +266,13 @@ impl MediaJobService for MediaJobs {
         request: Request<v1::CreateJobRequest>,
     ) -> Result<Response<v1::CreateJobResponse>, Status> {
         let owner = crate::interceptor::owner_of(&request)?;
+        let trace = crate::interceptor::trace_of(&request);
         let message = request.into_inner();
         let request_id = parse_request_id(&message.idempotency_key)?;
         let spec = parse_spec(message.spec)?;
         let callback = parse_callback(message.callback)?;
-        let mut job = NewJob::new(JobId::generate(), owner.clone(), request_id, spec, None);
+        let mut job = NewJob::new(JobId::generate(), owner.clone(), request_id, spec, None)
+            .with_trace_id(trace);
         if let Some(queue) = callback {
             job = job.with_callback(queue);
         }

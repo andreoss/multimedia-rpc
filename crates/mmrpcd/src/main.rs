@@ -7,13 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mm_auth::Settings;
-use mm_domain::WorkerId;
+use mm_domain::{JobRepository, WorkerId};
 use mm_ffmpeg::Prober;
 use mm_jobstore::{PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository};
+use mm_observability::{Metrics, Registry, Scrape};
 use mm_server::{Auth, ServerConfig};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings, SqsCallbackPublisher, SqsSettings};
 use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, WorkerHandle};
 use sqlx::postgres::PgPoolOptions;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -47,6 +49,7 @@ struct ServerEnv {
     stack: StackEnv,
     notify: bool,
     auth: AuthSettings,
+    observability: Observability,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +72,7 @@ struct WorkerEnv {
     queue_endpoint: Option<String>,
     queue_region: Option<String>,
     queue_credentials: Option<(String, String)>,
+    observability: Observability,
 }
 
 fn stack_env(get: &dyn Fn(&str) -> Option<String>) -> Result<StackEnv, String> {
@@ -125,6 +129,7 @@ fn server_env(get: &dyn Fn(&str) -> Option<String>) -> Result<ServerEnv, String>
         stack: stack_env(get)?,
         notify: notify_var(get, "MM_SERVER_NOTIFY")?,
         auth: auth_settings(get)?,
+        observability: observability(get)?,
     })
 }
 
@@ -212,6 +217,7 @@ fn worker_env(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String>
         queue_endpoint: get("MM_QUEUE_ENDPOINT"),
         queue_region: get("MM_QUEUE_REGION"),
         queue_credentials,
+        observability: observability(get)?,
     })
 }
 
@@ -248,8 +254,53 @@ async fn connect_stack(
     Ok((repository, store))
 }
 
-async fn start_server(env: &ServerEnv) -> Result<mm_server::ServerHandle, String> {
-    let (repository, store) = connect_stack(&env.stack).await?;
+struct Telemetry {
+    metrics: Metrics,
+    scrape: Scrape,
+    sampler: JoinHandle<()>,
+}
+
+async fn start_telemetry(
+    repository: Arc<PgJobRepository>,
+    settings: &Observability,
+) -> Result<Telemetry, String> {
+    let (registry, metrics) = Registry::new();
+    let registry = Arc::new(registry);
+    let scrape = mm_observability::serve(registry, settings.bind)
+        .await
+        .map_err(|error| format!("the metrics endpoint failed: {error}"))?;
+    println!("metrics {}", scrape.local_addr());
+    let sampler = tokio::spawn(sample_queue_depth(
+        repository,
+        metrics.clone(),
+        settings.interval,
+    ));
+    Ok(Telemetry {
+        metrics,
+        scrape,
+        sampler,
+    })
+}
+
+async fn sample_queue_depth(
+    repository: Arc<PgJobRepository>,
+    metrics: Metrics,
+    interval: Duration,
+) {
+    loop {
+        if let Ok(pending) = repository.pending_count().await {
+            metrics.jobs_pending.set(pending);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+async fn start_server(
+    env: &ServerEnv,
+    repository: Arc<PgJobRepository>,
+    store: Arc<S3ObjectStore>,
+    metrics: Metrics,
+) -> Result<mm_server::ServerHandle, String> {
     let auth = build_auth(&env.auth)?;
     let mut config = ServerConfig::new(
         repository,
@@ -260,6 +311,7 @@ async fn start_server(env: &ServerEnv) -> Result<mm_server::ServerHandle, String
     .map_err(|error| error.to_string())?;
     config.bind = env.bind;
     config.auth = auth;
+    config.metrics = metrics;
     if env.notify {
         let events = PgJobEventListener::connect(&env.stack.database_url)
             .await
@@ -271,8 +323,12 @@ async fn start_server(env: &ServerEnv) -> Result<mm_server::ServerHandle, String
         .map_err(|error| error.to_string())
 }
 
-async fn start_worker(env: &WorkerEnv) -> Result<WorkerHandle, String> {
-    let (repository, store) = connect_stack(&env.stack).await?;
+async fn start_worker(
+    env: &WorkerEnv,
+    repository: Arc<PgJobRepository>,
+    store: Arc<S3ObjectStore>,
+    metrics: Metrics,
+) -> Result<WorkerHandle, String> {
     let worker_id = WorkerId::from_str(&env.worker_id)
         .map_err(|error| format!("MM_WORKER_ID is invalid: {error}"))?;
     let mut config = WorkerConfig::new(
@@ -298,6 +354,7 @@ async fn start_worker(env: &WorkerEnv) -> Result<WorkerHandle, String> {
         base: env.backoff_base,
         cap: env.backoff_cap,
     };
+    config.metrics = metrics;
     if env.notify {
         let listener = PgJobListener::connect(&env.stack.database_url)
             .await
@@ -330,19 +387,46 @@ async fn start_worker(env: &WorkerEnv) -> Result<WorkerHandle, String> {
 }
 
 async fn serve(env: ServerEnv) -> Result<(), String> {
-    let handle = start_server(&env).await?;
-    handle.wait().await.map_err(|error| error.to_string())
+    let (repository, store) = connect_stack(&env.stack).await?;
+    let telemetry = start_telemetry(repository.clone(), &env.observability).await?;
+    let handle = start_server(&env, repository, store, telemetry.metrics.clone()).await?;
+    wait_with_telemetry(handle.wait(), telemetry).await
 }
 
 async fn work(env: WorkerEnv) -> Result<(), String> {
-    let handle = start_worker(&env).await?;
+    let (repository, store) = connect_stack(&env.stack).await?;
+    let telemetry = start_telemetry(repository.clone(), &env.observability).await?;
+    let handle = start_worker(&env, repository, store, telemetry.metrics).await?;
     handle.wait().await;
+    telemetry.scrape.shutdown().await;
+    telemetry.sampler.abort();
     Ok(())
 }
 
 async fn combine(server: ServerEnv, worker: WorkerEnv) -> Result<(), String> {
-    let _worker_handle = start_worker(&worker).await?;
-    serve(server).await
+    let (repository, store) = connect_stack(&server.stack).await?;
+    let telemetry = start_telemetry(repository.clone(), &server.observability).await?;
+    let worker_handle = start_worker(
+        &worker,
+        repository.clone(),
+        store.clone(),
+        telemetry.metrics.clone(),
+    )
+    .await?;
+    let handle = start_server(&server, repository, store, telemetry.metrics.clone()).await?;
+    let outcome = wait_with_telemetry(handle.wait(), telemetry).await;
+    worker_handle.abort();
+    outcome
+}
+
+async fn wait_with_telemetry(
+    served: impl std::future::Future<Output = Result<(), mm_server::TransportError>>,
+    telemetry: Telemetry,
+) -> Result<(), String> {
+    let outcome = served.await.map_err(|error| error.to_string());
+    telemetry.scrape.shutdown().await;
+    telemetry.sampler.abort();
+    outcome
 }
 
 fn run<E, F>(
@@ -373,6 +457,12 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct Observability {
+    bind: SocketAddr,
+    interval: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthSettings {
     jwks_file: Option<PathBuf>,
     issuer: Option<String>,
@@ -387,6 +477,17 @@ impl Default for AuthSettings {
             leeway: Duration::from_secs(0),
         }
     }
+}
+
+fn observability(get: &dyn Fn(&str) -> Option<String>) -> Result<Observability, String> {
+    let raw_bind = get("MM_METRICS_BIND_ADDR").unwrap_or_else(|| String::from("127.0.0.1:0"));
+    let bind = raw_bind
+        .parse()
+        .map_err(|_| format!("MM_METRICS_BIND_ADDR is not a socket address: {raw_bind}"))?;
+    Ok(Observability {
+        bind,
+        interval: seconds_var(get, "MM_METRICS_INTERVAL_SECS", 5)?,
+    })
 }
 
 fn auth_settings(get: &dyn Fn(&str) -> Option<String>) -> Result<AuthSettings, String> {
@@ -698,6 +799,53 @@ mod tests {
         assert!(!env.notify);
         map.insert("MM_SERVER_NOTIFY".into(), "maybe".into());
         assert!(env_from(&map).unwrap_err().contains("MM_SERVER_NOTIFY"));
+    }
+
+    #[test]
+    fn the_observability_settings_default_to_a_loopback_port_and_a_five_second_tick() {
+        let env = env_from(&complete()).expect("environment parses");
+        assert_eq!(env.observability.bind.to_string(), "127.0.0.1:0");
+        assert_eq!(env.observability.interval, Duration::from_secs(5));
+        let worker = worker_from(&complete()).expect("environment parses");
+        assert_eq!(worker.observability.bind.to_string(), "127.0.0.1:0");
+        assert_eq!(worker.observability.interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_observability_settings_are_configurable() {
+        let mut map = complete();
+        map.insert("MM_METRICS_BIND_ADDR".into(), "0.0.0.0:9100".into());
+        map.insert("MM_METRICS_INTERVAL_SECS".into(), "2".into());
+        let env = env_from(&map).expect("environment parses");
+        assert_eq!(env.observability.bind.to_string(), "0.0.0.0:9100");
+        assert_eq!(env.observability.interval, Duration::from_secs(2));
+        let worker = worker_from(&map).expect("environment parses");
+        assert_eq!(worker.observability.bind.to_string(), "0.0.0.0:9100");
+        assert_eq!(worker.observability.interval, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_malformed_metrics_setting_is_rejected_by_both_roles() {
+        let mut map = complete();
+        map.insert("MM_METRICS_BIND_ADDR".into(), "nowhere".into());
+        assert!(env_from(&map).unwrap_err().contains("MM_METRICS_BIND_ADDR"));
+        assert!(
+            worker_from(&map)
+                .unwrap_err()
+                .contains("MM_METRICS_BIND_ADDR")
+        );
+        let mut map = complete();
+        map.insert("MM_METRICS_INTERVAL_SECS".into(), "soon".into());
+        assert!(
+            env_from(&map)
+                .unwrap_err()
+                .contains("MM_METRICS_INTERVAL_SECS")
+        );
+        assert!(
+            worker_from(&map)
+                .unwrap_err()
+                .contains("MM_METRICS_INTERVAL_SECS")
+        );
     }
 
     #[test]

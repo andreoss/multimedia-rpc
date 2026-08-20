@@ -18,12 +18,17 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::server::NamedService;
 use tonic::transport::Server;
 
+use mm_observability::{Metrics, Registry};
+
 use health::Dependencies;
 use service::{MediaJobs, WatchHub};
 
 pub use interceptor::{Auth, Interceptor, Owner};
 
-pub const SERVICE_NAME: &str = <MediaJobServiceServer<MediaJobs> as NamedService>::NAME;
+pub const SERVICE_NAME: &str =
+    <MediaJobServiceServer<Interceptor<MediaJobs>> as NamedService>::NAME;
+
+pub type TransportError = tonic::transport::Error;
 
 const DEFAULT_BIND: ([u8; 4], u16) = ([127, 0, 0, 1], 0);
 
@@ -34,6 +39,7 @@ pub struct ServerConfig {
     pub watch_poll_interval: Duration,
     pub job_events: Option<Arc<dyn JobEventNotifications>>,
     pub auth: Auth,
+    pub metrics: Metrics,
     repository: Arc<dyn JobRepository>,
     store: Arc<dyn ObjectStore>,
     store_probe: ObjectRef,
@@ -67,6 +73,7 @@ impl ServerConfig {
             watch_poll_interval: Duration::from_secs(1),
             job_events: None,
             auth: Auth::open(),
+            metrics: Registry::new().1,
             repository,
             store,
             store_probe,

@@ -7,11 +7,11 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
     ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputReport,
-    JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef, ObjectBody, ObjectRef,
-    ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult, PackageSpec,
-    ProbeResult, ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, WorkerId,
-    resolve_media_ref, validate_inputs,
+    JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError, MediaRef, ObjectBody,
+    ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult,
+    PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, StillInfo, ThumbnailTarget,
@@ -27,6 +27,7 @@ use mm_magick::{
     ImageFormat as ToolImageFormat, ResizeMode as ToolResizeMode, ToolError as ImageToolError,
     composite_args, convert_args, resize_args,
 };
+use mm_observability::{Component, record};
 use prost::Message;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
@@ -277,11 +278,68 @@ pub(crate) async fn publish_outcome(ctx: &WorkerConfig, record: &JobRecord) {
 }
 
 pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelRegistry) {
+    let trace = job.trace_id;
+    ctx.metrics.jobs_started.add(1);
+    ctx.metrics
+        .claim_latency
+        .observe(seconds_since(job.created_at));
+    record(
+        Component::Worker,
+        trace.as_ref(),
+        "job.claimed",
+        &[
+            ("job", job.id.to_string()),
+            ("worker", ctx.worker_id.as_str().to_string()),
+            (
+                "claim_latency_seconds",
+                format!("{:.3}", seconds_since(job.created_at)),
+            ),
+        ],
+    );
+    let outcome = run_job(ctx, &job, registry).await;
+    ctx.metrics.jobs_finished.add(1);
+    ctx.metrics
+        .job_duration
+        .observe(seconds_since(job.created_at));
+    let state = match &outcome {
+        Some(JobState::Succeeded) => "SUCCEEDED",
+        Some(JobState::Failed) => "FAILED",
+        Some(JobState::Cancelled) => "CANCELLED",
+        _ => "RELEASED",
+    };
+    record(
+        Component::Worker,
+        trace.as_ref(),
+        "job.finished",
+        &[
+            ("job", job.id.to_string()),
+            ("state", state.to_string()),
+            (
+                "duration_seconds",
+                format!("{:.3}", seconds_since(job.created_at)),
+            ),
+        ],
+    );
+}
+
+fn seconds_since(at: SystemTime) -> f64 {
+    SystemTime::now()
+        .duration_since(at)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or_default()
+}
+
+async fn run_job(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    registry: &CancelRegistry,
+) -> Option<JobState> {
     if job.cancel_requested {
         if let Ok(record) = ctx.repository.mark_cancelled(job.id).await {
             publish_outcome(ctx, &record).await;
+            return Some(record.state);
         }
-        return;
+        return None;
     }
     let deadline_at = job
         .deadline_at
@@ -293,8 +351,9 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
             .await
         {
             publish_outcome(ctx, &record).await;
+            return Some(record.state);
         }
-        return;
+        return None;
     }
     let (sender, mut signal) = watch::channel(Signal::Run);
     registry.register(job.id, sender.clone());
@@ -311,7 +370,7 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
         deadline_at,
         sender,
     );
-    let outcome = pipeline(ctx, &job, deadline_at, &mut signal).await;
+    let outcome = pipeline(ctx, job, deadline_at, &mut signal).await;
     drop(supervisor);
     drop(registered);
     match outcome {
@@ -322,14 +381,18 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
                 .await
             {
                 publish_outcome(ctx, &record).await;
+                return Some(record.state);
             }
+            None
         }
         Err(Finish::Cancelled) => {
             if let Ok(record) = ctx.repository.mark_cancelled(job.id).await {
                 publish_outcome(ctx, &record).await;
+                return Some(record.state);
             }
+            None
         }
-        Err(Finish::LeaseLost) | Err(Finish::Released) => {}
+        Err(Finish::LeaseLost) | Err(Finish::Released) => None,
         Err(Finish::TimedOut) => {
             if let Ok(record) = ctx
                 .repository
@@ -337,7 +400,9 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
                 .await
             {
                 publish_outcome(ctx, &record).await;
+                return Some(record.state);
             }
+            None
         }
         Err(Finish::Failed(failure)) => {
             if crate::retry::is_transient(failure.code()) && job.attempts < ctx.retry.max_attempts {
@@ -346,12 +411,16 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
                     .repository
                     .retry(job.id, &ctx.worker_id, failure, delay)
                     .await;
+                None
             } else if let Ok(record) = ctx
                 .repository
                 .mark_failed(job.id, &ctx.worker_id, failure)
                 .await
             {
                 publish_outcome(ctx, &record).await;
+                Some(record.state)
+            } else {
+                None
             }
         }
     }
@@ -539,13 +608,16 @@ async fn upload_object(
     object: &ObjectRef,
     path: &Path,
 ) -> Result<(), Finish> {
+    let bytes = file_bytes(path).await;
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
     ctx.store
         .put_multipart(object, file_body(file))
         .await
-        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.metrics.output_bytes.add(bytes);
+    Ok(())
 }
 
 async fn image_pipeline(
@@ -1109,6 +1181,7 @@ async fn upload_each(
             ));
         }
         let object = artifact_object(ctx, id, index)?;
+        let bytes = file_bytes(path).await;
         let file = tokio::fs::File::open(path)
             .await
             .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
@@ -1118,6 +1191,7 @@ async fn upload_each(
             .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
         landed.record(object.clone());
         outputs.push(MediaRef::Object(object));
+        ctx.metrics.output_bytes.add(bytes);
     }
     check(signal)?;
     Ok(outputs)
@@ -1215,6 +1289,7 @@ async fn supervise(
     completed: usize,
     total: usize,
 ) -> Result<(), Finish> {
+    let started = Instant::now();
     let mut run = ctx
         .runner
         .start(args, limits)
@@ -1272,6 +1347,21 @@ async fn supervise(
         }
     };
 
+    ctx.metrics
+        .tool_run
+        .observe(started.elapsed().as_secs_f64());
+    record(
+        Component::Worker,
+        None,
+        "tool.finished",
+        &[
+            ("job", id.to_string()),
+            (
+                "wall_seconds",
+                format!("{:.3}", started.elapsed().as_secs_f64()),
+            ),
+        ],
+    );
     match outcome {
         RunOutcome::Succeeded => Ok(()),
         RunOutcome::Cancelled => Err(interrupted.unwrap_or(Finish::Cancelled)),
@@ -1308,7 +1398,9 @@ async fn run_and_upload(
     signal: &mut watch::Receiver<Signal>,
     shape: OutputShape,
 ) -> Result<OpResult, Finish> {
+    let started = Instant::now();
     supervise(ctx, id, args, limits, signal, 0, 1).await?;
+    let wall_seconds = started.elapsed().as_secs_f64();
 
     check(signal)?;
     let info = ctx
@@ -1316,7 +1408,11 @@ async fn run_and_upload(
         .probe(&output_path.to_string_lossy(), &ctx.probe_limits)
         .await
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    ctx.metrics
+        .tool_speed
+        .observe(media_seconds(info.duration.as_secs_f64(), wall_seconds));
     let object = output_object(ctx, id).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let bytes = file_bytes(output_path).await;
     let file = tokio::fs::File::open(output_path)
         .await
         .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
@@ -1324,6 +1420,7 @@ async fn run_and_upload(
         .put_multipart(&object, file_body(file))
         .await
         .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.metrics.output_bytes.add(bytes);
     if let Err(finish) = check(signal) {
         let _ = ctx.store.delete(&object).await;
         return Err(finish);
@@ -1344,6 +1441,20 @@ async fn run_and_upload(
             Ok(OpResult::Trim(timed))
         }
     }
+}
+
+fn media_seconds(duration: f64, wall_seconds: f64) -> f64 {
+    if wall_seconds <= 0.0 {
+        return 0.0;
+    }
+    (duration / wall_seconds).max(0.0)
+}
+
+async fn file_bytes(path: &Path) -> u64 {
+    tokio::fs::metadata(path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or_default()
 }
 
 fn output_object(ctx: &WorkerConfig, id: JobId) -> Result<ObjectRef, String> {

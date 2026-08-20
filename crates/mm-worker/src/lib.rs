@@ -13,6 +13,7 @@ use mm_domain::{
 };
 use mm_ffmpeg::{ProbeLimits, Prober, Runner};
 use mm_magick::{Tool as ImageTool, ToolLimits as ImageLimits};
+use mm_observability::{Metrics, Registry};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -46,6 +47,7 @@ pub struct WorkerConfig {
     pub notifications: Option<Arc<dyn JobNotifications>>,
     pub cancellations: Option<Arc<dyn CancelNotifications>>,
     pub callbacks: Option<Arc<dyn CallbackPublisher>>,
+    pub metrics: Metrics,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -82,6 +84,7 @@ impl WorkerConfig {
             notifications: None,
             cancellations: None,
             callbacks: None,
+            metrics: Registry::new().1,
             reserved: std::sync::Mutex::new(0),
         }
     }

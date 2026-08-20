@@ -62,21 +62,32 @@ proto-breaking:
   name: postgres:16
   alias: db
 
+.queue-service: &queue-service
+  name: softwaremill/elasticmq-native:latest
+  alias: queue
+
 .stack-variables: &stack-variables
   MM_OBJECTSTORE_ENDPOINT: http://objectstore:8333
+  MM_OBJECTSTORE_REGION: us-east-1
+  MM_OBJECTSTORE_ACCESS_KEY: mm-test-access
+  MM_OBJECTSTORE_SECRET_KEY: mm-test-secret
+  MM_QUEUE_ENDPOINT: http://queue:9324
   MM_DATABASE_URL: postgres://mm:mm@db:5432/mm
   POSTGRES_USER: mm
   POSTGRES_PASSWORD: mm
   POSTGRES_DB: mm
+
+.test-before-script: &test-before-script
+  - apt-get update && apt-get install -y protobuf-compiler ffmpeg
 
 test:
   stage: test
   services:
     - *objectstore-service
     - *db-service
+    - *queue-service
   variables: *stack-variables
-  before_script:
-    - apt-get update && apt-get install -y protobuf-compiler
+  before_script: *test-before-script
   script:
     - cargo test --workspace --no-fail-fast
 
@@ -85,9 +96,9 @@ coverage:
   services:
     - *objectstore-service
     - *db-service
+    - *queue-service
   variables: *stack-variables
-  before_script:
-    - apt-get update && apt-get install -y protobuf-compiler
+  before_script: *test-before-script
   script:
     - rustup component add llvm-tools-preview
     - cargo install cargo-llvm-cov --locked

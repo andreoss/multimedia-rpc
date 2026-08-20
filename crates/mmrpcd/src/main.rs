@@ -60,6 +60,7 @@ struct WorkerEnv {
     staging_dir: PathBuf,
     max_concurrent: u32,
     claim_batch: u32,
+    ladder_packer: String,
     ladder_concurrency: u32,
     lease: Duration,
     heartbeat_interval: Duration,
@@ -135,6 +136,14 @@ fn server_env(get: &dyn Fn(&str) -> Option<String>) -> Result<ServerEnv, String>
     })
 }
 
+fn packer_var(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<String, String> {
+    match get(name) {
+        None => Ok(String::from("gst")),
+        Some(raw) if raw == "gst" || raw == "ffmpeg" => Ok(raw),
+        Some(raw) => Err(format!("{name} names no packer this build carries: {raw}")),
+    }
+}
+
 fn positive_var(
     get: &dyn Fn(&str) -> Option<String>,
     name: &str,
@@ -206,6 +215,7 @@ fn worker_env(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String>
         staging_dir,
         max_concurrent: positive_var(get, "MM_WORKER_MAX_CONCURRENT", 4)?,
         claim_batch: positive_var(get, "MM_WORKER_CLAIM_BATCH", 4)?,
+        ladder_packer: packer_var(get, "MM_WORKER_LADDER_PACKER")?,
         ladder_concurrency: positive_var(get, "MM_WORKER_LADDER_CONCURRENCY", 1)?,
         lease: seconds_var(get, "MM_WORKER_LEASE_SECS", 30)?,
         heartbeat_interval: seconds_var(get, "MM_WORKER_HEARTBEAT_SECS", 10)?,
@@ -387,6 +397,7 @@ async fn start_worker(
     config.claim_batch =
         NonZeroU32::new(env.claim_batch).ok_or("MM_WORKER_CLAIM_BATCH must be positive")?;
     config.ladder_concurrency = env.ladder_concurrency as usize;
+    config.ladder_packer_name = env.ladder_packer.clone();
     config.lease = env.lease;
     config.heartbeat_interval = env.heartbeat_interval;
     config.reconcile_interval = env.reconcile_interval;
@@ -738,6 +749,7 @@ mod tests {
         assert_eq!(env.max_concurrent, 4);
         assert_eq!(env.claim_batch, 4);
         assert_eq!(env.ladder_concurrency, 1);
+        assert_eq!(env.ladder_packer, "gst");
         assert_eq!(env.lease, Duration::from_secs(30));
         assert_eq!(env.heartbeat_interval, Duration::from_secs(10));
         assert_eq!(env.reconcile_interval, Duration::from_secs(30));

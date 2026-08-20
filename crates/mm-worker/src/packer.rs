@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use mm_domain::JobId;
+use mm_ffmpeg::{HlsTarget, RunLimits, RunOutcome, Runner, TargetProfile, build_hls_args};
 use mm_gst::{
     Element as GstElement, Link as GstLink, PackageOutcome as GstOutcome,
     PackageRequest as GstRequest, PipelineDescription as GstDescription, Property as GstProperty,
@@ -36,6 +37,97 @@ pub trait RungPacker: Send + Sync {
         staging_dir: &Path,
         segment_seconds: f64,
     ) -> Result<LadderPacked, LadderPackError>;
+}
+
+#[derive(Debug, Default)]
+pub struct FfmpegRungPacker;
+
+#[async_trait]
+impl RungPacker for FfmpegRungPacker {
+    fn name(&self) -> &'static str {
+        "ffmpeg"
+    }
+
+    async fn pack(
+        &self,
+        _job: JobId,
+        rung: usize,
+        _media: &mm_domain::ObjectRef,
+        staging_dir: &Path,
+        segment_seconds: f64,
+    ) -> Result<LadderPacked, LadderPackError> {
+        let dir = staging_dir.to_path_buf();
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| LadderPackError::Launch(error.to_string()))?;
+        let args = build_hls_args(
+            &dir.join("media.mp4").to_string_lossy(),
+            &HlsTarget {
+                profile: TargetProfile::default(),
+                segment_seconds,
+                copy_streams: true,
+            },
+            &dir.to_string_lossy(),
+        )
+        .map_err(|error| LadderPackError::Launch(error.to_string()))?;
+        let limits = RunLimits {
+            total_duration: crate::pipeline::PACKAGE_RUN_SECONDS,
+            deadline: crate::pipeline::PACKAGE_RUN_SECONDS,
+            stderr_tail_bytes: 4096,
+        };
+        let runner = Runner::default();
+        let run = runner
+            .start(&args, &limits)
+            .map_err(|error| LadderPackError::Launch(error.to_string()))?;
+        match run
+            .wait()
+            .await
+            .map_err(|error| LadderPackError::Launch(error.to_string()))?
+        {
+            RunOutcome::Succeeded => collect_hls_outputs(&dir, rung),
+            other => Err(LadderPackError::Refused(format!("rung {rung}: {other:?}"))),
+        }
+    }
+}
+
+fn collect_hls_outputs(dir: &Path, rung: usize) -> Result<LadderPacked, LadderPackError> {
+    let playlist = dir.join(mm_gst::playlist_name());
+    if !playlist.is_file() {
+        return Err(LadderPackError::Refused(format!(
+            "rung {rung} wrote no playlist at {}",
+            playlist.display()
+        )));
+    }
+    let init = dir.join("init.mp4");
+    let mut segments: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .map(|extension| extension == "m4s")
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    segments.sort();
+    if segments.is_empty() {
+        return Err(LadderPackError::Refused(format!(
+            "rung {rung} wrote no segment"
+        )));
+    }
+    if !init.is_file() {
+        return Err(LadderPackError::Refused(format!(
+            "rung {rung} wrote no init segment at {}",
+            init.display()
+        )));
+    }
+    Ok(LadderPacked {
+        init,
+        playlist,
+        segments,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -126,17 +218,19 @@ fn split_packaged(
     })
 }
 
-pub fn packer_name(packer: Option<&dyn RungPacker>) -> &'static str {
-    match packer {
-        Some(packer) => packer.name(),
-        None => GstRungPacker.name(),
-    }
-}
 static DEFAULT_PACKER: GstRungPacker = GstRungPacker;
 
 pub fn selected(ctx: &crate::WorkerConfig) -> &dyn RungPacker {
     match &ctx.ladder_packer {
         Some(packer) => packer.as_ref(),
-        None => &DEFAULT_PACKER,
+        None => default_for(ctx),
+    }
+}
+
+fn default_for(ctx: &crate::WorkerConfig) -> &dyn RungPacker {
+    static FFMPEG: std::sync::OnceLock<FfmpegRungPacker> = std::sync::OnceLock::new();
+    match ctx.ladder_packer_name.as_str() {
+        "ffmpeg" => FFMPEG.get_or_init(FfmpegRungPacker::default),
+        _ => &DEFAULT_PACKER,
     }
 }

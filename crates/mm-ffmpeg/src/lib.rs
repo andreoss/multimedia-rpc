@@ -1,4 +1,5 @@
 mod concat;
+mod hls;
 mod parse;
 mod probe;
 mod profile;
@@ -9,6 +10,7 @@ mod transcode;
 mod trim;
 
 pub use concat::{ConcatError, build_concat_args};
+pub use hls::{HlsError, HlsTarget, build_hls_args};
 pub use parse::{
     AudioStream, MediaInfo, MediaKind, ParseError, StillInfo, VideoStream, media_kind,
     parse_keyframe_times, parse_media_info, parse_still_info,

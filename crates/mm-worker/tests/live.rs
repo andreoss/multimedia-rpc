@@ -18,7 +18,8 @@ use mm_domain::{
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use mm_worker::{
-    DiskBudget, LadderPackError, LadderPacked, RetryPolicy, RungPacker, WorkerConfig, codes, start,
+    DiskBudget, FfmpegRungPacker, LadderPackError, LadderPacked, RetryPolicy, RungPacker,
+    WorkerConfig, codes, start,
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -3048,5 +3049,106 @@ async fn a_failing_rung_above_one_stops_the_others_and_leaves_no_key() {
         .unwrap();
         assert!(store.head(&key).await.is_err(), "key {index} survived");
     }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ffmpeg_packer_serves_the_same_verified_ladder_as_the_gst_one() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ffmpeg-packer-source.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ffmpeg-packer-source.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(master_ladder_job(&input)).await.unwrap();
+
+    let mut config = base_config(&db, store.clone(), "worker-ffmpeg-packer");
+    config.ladder_packer = Some(Arc::new(FfmpegRungPacker));
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Ladder(result) = record.result.expect("result recorded") else {
+        panic!("expected a ladder result");
+    };
+    assert_eq!(result.renditions().len(), 2);
+    let MediaRef::Object(master) = result.master_playlist().expect("a master playlist") else {
+        panic!("expected an object master playlist");
+    };
+    assert_eq!(master.key(), format!("jobs/{}/master.m3u8", job.id));
+    let body = store.get(master).await.expect("master playlist fetches");
+    let text = String::from_utf8(collect_body(body).await.unwrap()).expect("utf-8");
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("#EXT-X-STREAM-INF"))
+        .collect();
+    assert_eq!(rows.len(), 2, "{text}");
+    assert!(rows[0].contains("RESOLUTION=640x360"), "{text}");
+    assert!(rows[1].contains("RESOLUTION=1280x720"), "{text}");
+
+    for (index, rendition) in result.renditions().iter().enumerate() {
+        let MediaRef::Object(media) = rendition.media() else {
+            panic!("expected an object rendition");
+        };
+        assert_eq!(
+            media.key(),
+            format!("jobs/{}/renditions/{index}/output.mp4", job.id)
+        );
+        assert!(store.head(media).await.expect("rendition exists") > 0);
+        assert_eq!(rendition.width(), 640 * (index as u32 + 1));
+        assert_eq!(rendition.height(), 360 * (index as u32 + 1));
+        assert!(rendition.bandwidth_bps() > 0);
+
+        let MediaRef::Object(playlist) = rendition.playlist().expect("a media playlist") else {
+            panic!("expected an object playlist");
+        };
+        assert_eq!(
+            playlist.key(),
+            format!("jobs/{}/renditions/{index}/playlist.m3u8", job.id)
+        );
+        let body = store.get(playlist).await.expect("playlist fetches");
+        let media_playlist = String::from_utf8(collect_body(body).await.unwrap()).expect("utf-8");
+        assert!(media_playlist.starts_with("#EXTM3U"), "{media_playlist}");
+        assert!(
+            media_playlist.contains("#EXT-X-MAP:URI=\"init.mp4\""),
+            "{media_playlist}"
+        );
+        assert!(
+            !rendition.segments().is_empty(),
+            "rung {index} has no segments"
+        );
+        for (position, segment) in rendition.segments().iter().enumerate() {
+            let MediaRef::Object(segment) = segment else {
+                panic!("expected an object segment");
+            };
+            assert_eq!(
+                segment.key(),
+                format!("jobs/{}/renditions/{index}/seg{position:05}.m4s", job.id)
+            );
+            assert!(store.head(segment).await.expect("segment exists") > 0);
+        }
+        let init = ObjectRef::new(
+            BUCKET,
+            &format!("jobs/{}/renditions/{index}/init.mp4", job.id),
+        )
+        .unwrap();
+        assert!(store.head(&init).await.expect("init segment exists") > 0);
+    }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_packers_are_gst_and_the_configuration_can_name_the_other() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let mut config = base_config(&db, store.clone(), "worker-packer-default");
+    assert_eq!(config.ladder_packer_name, "gst");
+    assert!(
+        config.ladder_packer.is_none(),
+        "no packer is registered by default"
+    );
+    config.ladder_packer_name = String::from("ffmpeg");
+    assert_eq!(config.ladder_packer_name, "ffmpeg");
     db.dispose().await;
 }

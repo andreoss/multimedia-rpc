@@ -38,6 +38,16 @@ services:
       timeout: 3s
       retries: 12
 
+  queue:
+    image: softwaremill/elasticmq-native:latest
+    ports:
+      - "127.0.0.1:9324:9324"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9324/?Action=ListQueues || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
 volumes:
   db-data:
   store-data:

@@ -1,3 +1,4 @@
+mod callback;
 mod id;
 mod jobs;
 mod op;
@@ -6,6 +7,7 @@ mod state;
 mod store;
 mod validate;
 
+pub use callback::{CallbackError, CallbackPublisher, QueueUrl, QueueUrlError};
 pub use id::{
     JobId, JobIdError, RequestId, RequestIdError, TextIdError, UserId, UserIdError, WorkerId,
     WorkerIdError,

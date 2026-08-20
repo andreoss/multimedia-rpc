@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use mm_domain::{
     ConcatSpec, InputFailure, JobFailure, JobId, JobRecord, JobState, MediaRef, OpResult, OpSpec,
-    ProgressPercent, QueueUrl, RequestId, TimedOutput, TraceId, UserId,
+    ProbeResult, ProgressPercent, QueueUrl, RequestId, TimedOutput, TraceId, UserId,
 };
 use mm_proto::v1;
 use std::str::FromStr;
@@ -226,4 +226,85 @@ fn a_failed_outcome_carries_the_error_and_file_errors() {
     assert_eq!(outcome.result, None);
     assert_eq!(outcome.file_errors.len(), 2);
     assert_eq!(outcome.file_errors[1].code, "ERROR_TOO_FEW_INPUTS");
+}
+
+fn stitch_of(record: &JobRecord) -> v1::VideoStitchResult {
+    v1::JobCallback::from(record)
+        .stitch
+        .expect("a callback carries the reference stitch half")
+}
+
+#[test]
+fn a_succeeded_outcome_publishes_the_reference_stitch_shape() {
+    let result = OpResult::Concat(
+        TimedOutput::new(
+            MediaRef::object_uri("s3://media/jobs/x/output.mp4").expect("valid ref"),
+            4.25,
+        )
+        .expect("valid result"),
+    );
+    let sample = record(JobState::Succeeded, None, Some(result));
+    let callback = v1::JobCallback::from(&sample);
+    let stitch = stitch_of(&sample);
+
+    assert_eq!(stitch.request_id, "req-1");
+    assert_eq!(stitch.status, v1::StitchStatus::Completed as i32);
+    assert_eq!(
+        stitch.r2_uri,
+        Some("s3://media/jobs/x/output.mp4".to_string())
+    );
+    assert_eq!(stitch.asset_id, None);
+    assert_eq!(stitch.error_code, None);
+    assert!(stitch.file_errors.is_empty());
+    assert_eq!(
+        callback.outcome.map(|outcome| outcome.job_id),
+        Some(sample.id.to_string()),
+        "the reference half sits beside this service's own outcome"
+    );
+}
+
+#[test]
+fn a_failed_outcome_publishes_the_reference_codes() {
+    let sample = record(JobState::Failed, Some(blocked()), None);
+    let stitch = stitch_of(&sample);
+
+    assert_eq!(stitch.status, v1::StitchStatus::Failed as i32);
+    assert_eq!(
+        stitch.error_code,
+        Some("ERROR_UNSUPPORTED_CONTAINER".to_string())
+    );
+    assert_eq!(stitch.r2_uri, None);
+    assert_eq!(stitch.file_errors.len(), 2);
+    assert_eq!(stitch.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER");
+}
+
+#[test]
+fn a_cancelled_outcome_publishes_the_cancelled_status() {
+    let stitch = stitch_of(&record(JobState::Cancelled, None, None));
+
+    assert_eq!(stitch.status, v1::StitchStatus::Cancelled as i32);
+    assert_eq!(stitch.request_id, "req-1");
+}
+
+#[test]
+fn a_running_record_publishes_no_status_claim() {
+    let stitch = stitch_of(&record(JobState::Running, None, None));
+
+    assert_eq!(
+        stitch.status,
+        v1::StitchStatus::Unspecified as i32,
+        "a callback that is not terminal makes no claim"
+    );
+}
+
+#[test]
+fn a_probe_result_publishes_no_output_location() {
+    let result =
+        OpResult::Probe(ProbeResult::new(3.0, 1, 1, "mp4".to_string()).expect("valid result"));
+    let stitch = stitch_of(&record(JobState::Succeeded, None, Some(result)));
+
+    assert_eq!(
+        stitch.r2_uri, None,
+        "a probe lands no object, so the reference half names none"
+    );
 }

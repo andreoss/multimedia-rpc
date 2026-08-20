@@ -771,13 +771,21 @@ async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
             .decode(&bodies[0])
             .expect("message is base64")
     };
-    let outcome = <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
-        .expect("message is a job outcome");
+    let callback = <mm_proto::v1::JobCallback as prost::Message>::decode(decoded.as_slice())
+        .expect("message is a job callback");
+    let outcome = callback.outcome.expect("the callback carries the outcome");
+    let stitch = callback
+        .stitch
+        .expect("the callback carries the reference half");
     assert_eq!(outcome.job_id, job_id);
     assert_eq!(outcome.request_id, "req-cb");
     assert_eq!(outcome.state, mm_proto::v1::JobState::Succeeded as i32);
     assert_eq!(outcome.error_code, "");
     assert!(outcome.file_errors.is_empty());
+    assert_eq!(stitch.status, mm_proto::v1::StitchStatus::Completed as i32);
+    assert_eq!(stitch.request_id, "req-cb");
+    assert_eq!(stitch.error_code, None);
+    assert!(stitch.file_errors.is_empty());
     let result =
         mm_domain::OpResult::try_from(outcome.result.expect("result present")).expect("decodes");
     let mm_domain::OpResult::Concat(timed) = result else {

@@ -1292,8 +1292,12 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
             .decode(&bodies[0])
             .expect("message is base64")
     };
-    let outcome = <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
-        .expect("message is a job outcome");
+    let callback = <mm_proto::v1::JobCallback as prost::Message>::decode(decoded.as_slice())
+        .expect("message is a job callback");
+    let outcome = callback.outcome.expect("the callback carries the outcome");
+    let stitch = callback
+        .stitch
+        .expect("the callback carries the reference half");
     assert_eq!(outcome.job_id, job.id.to_string());
     assert_eq!(outcome.request_id, job.request.to_string());
     assert_eq!(outcome.state, mm_proto::v1::JobState::Failed as i32);
@@ -1303,6 +1307,14 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
     );
     assert!(outcome.result.is_none());
     assert!(!outcome.file_errors.is_empty());
+    assert_eq!(stitch.status, mm_proto::v1::StitchStatus::Failed as i32);
+    assert_eq!(stitch.request_id, job.request.to_string());
+    assert_eq!(
+        stitch.error_code,
+        Some("ERROR_UNSUPPORTED_CONTAINER".to_string())
+    );
+    assert_eq!(stitch.r2_uri, None);
+    assert_eq!(stitch.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER");
     assert_eq!(outcome.file_errors[0].code, "ERROR_UNSUPPORTED_CONTAINER");
     assert_eq!(
         outcome.file_errors[0].media_ref,
@@ -1806,8 +1818,10 @@ async fn one_outcome(
             .decode(&bodies[0])
             .expect("message is base64")
     };
-    <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
-        .expect("message is a job outcome")
+    <mm_proto::v1::JobCallback as prost::Message>::decode(decoded.as_slice())
+        .expect("message is a job callback")
+        .outcome
+        .expect("the callback carries this service's outcome")
 }
 
 #[tokio::test(flavor = "multi_thread")]

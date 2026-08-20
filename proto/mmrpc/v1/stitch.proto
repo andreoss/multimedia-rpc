@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package mmrpc.v1;
+
+import "mmrpc/v1/job.proto";
+import "mmrpc/v1/media.proto";
+
+enum StitchStatus {
+  STITCH_STATUS_UNSPECIFIED = 0;
+  STITCH_STATUS_COMPLETED = 1;
+  STITCH_STATUS_FAILED = 2;
+  STITCH_STATUS_CANCELLED = 3;
+}
+
+message VideoStitchResult {
+  string request_id = 1;
+  StitchStatus status = 2;
+  optional string asset_id = 3;
+  optional string r2_uri = 4;
+  optional string error_code = 5;
+  repeated FileError file_errors = 6;
+}
+
+message JobCallback {
+  JobOutcome outcome = 1;
+  VideoStitchResult stitch = 2;
+}

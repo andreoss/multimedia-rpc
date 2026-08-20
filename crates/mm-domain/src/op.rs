@@ -1456,3 +1456,17 @@ pub enum OpResult {
     Batch(BatchResult),
     Graph(GraphResult),
 }
+
+impl OpResult {
+    pub fn primary_output(&self) -> Option<&MediaRef> {
+        match self {
+            OpResult::Concat(output) => Some(output.output()),
+            OpResult::Transcode(result) => Some(result.output()),
+            OpResult::Trim(output) => Some(output.output()),
+            OpResult::Thumbnail(result) => result.outputs().first(),
+            OpResult::Image(result) => result.outputs().first(),
+            OpResult::Package(result) => Some(result.playlist()),
+            OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
+        }
+    }
+}

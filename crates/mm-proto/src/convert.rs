@@ -776,6 +776,44 @@ impl From<&JobRecord> for v1::JobOutcome {
     }
 }
 
+impl From<&JobRecord> for v1::VideoStitchResult {
+    fn from(record: &JobRecord) -> Self {
+        v1::VideoStitchResult {
+            request_id: record.request.to_string(),
+            status: stitch_status(record.state) as i32,
+            asset_id: None,
+            r2_uri: record
+                .result
+                .as_ref()
+                .and_then(OpResult::primary_output)
+                .map(MediaRef::to_uri),
+            error_code: record
+                .failure
+                .as_ref()
+                .map(|failure| failure_code(failure).to_string()),
+            file_errors: file_errors(record),
+        }
+    }
+}
+
+fn stitch_status(state: JobState) -> v1::StitchStatus {
+    match state {
+        JobState::Succeeded => v1::StitchStatus::Completed,
+        JobState::Failed => v1::StitchStatus::Failed,
+        JobState::Cancelled => v1::StitchStatus::Cancelled,
+        JobState::Pending | JobState::Running => v1::StitchStatus::Unspecified,
+    }
+}
+
+impl From<&JobRecord> for v1::JobCallback {
+    fn from(record: &JobRecord) -> Self {
+        v1::JobCallback {
+            outcome: Some(v1::JobOutcome::from(record)),
+            stitch: Some(v1::VideoStitchResult::from(record)),
+        }
+    }
+}
+
 impl From<&OpResult> for v1::OpResult {
     fn from(value: &OpResult) -> Self {
         let op = match value {

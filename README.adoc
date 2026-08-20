@@ -23,5 +23,6 @@ object storage.
 - cargo clippy --workspace --all-targets -- -D warnings
 - cargo fmt --all --check
 - sh scripts/parity.sh
+- sh scripts/auth-conformance.sh
 - sh scripts/stability.sh
 - buf lint && buf breaking --against .git#branch=master

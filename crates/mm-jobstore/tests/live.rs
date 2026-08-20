@@ -5,10 +5,11 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use mm_domain::{
-    ConcatSpec, JobFailure, JobId, JobNotifications, JobRepository, JobState, JobStoreError,
-    MediaRef, NewJob, OpResult, OpSpec, ProgressPercent, RequestId, TimedOutput, UserId, WorkerId,
+    CancelNotifications, ConcatSpec, JobFailure, JobId, JobNotifications, JobRepository, JobState,
+    JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProgressPercent, RequestId, TimedOutput,
+    UserId, WorkerId,
 };
-use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository, reconnect_backoff};
+use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository, reconnect_backoff};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -1001,6 +1002,29 @@ fn reconnect_backoff_grows_exponentially_to_a_cap() {
     assert_eq!(reconnect_backoff(4), Duration::from_millis(800));
     assert_eq!(reconnect_backoff(10), Duration::from_secs(5));
     assert_eq!(reconnect_backoff(u32::MAX), Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn a_cancel_request_notifies_listeners_with_the_job_id() {
+    let db = fresh_db().await;
+    let listener = PgCancelListener::connect(&db.url)
+        .await
+        .expect("listener connects");
+    let repo = db.repository();
+    let job = repo
+        .create(new_job("owner-1", "req-cancel-notify"))
+        .await
+        .expect("create succeeds");
+    repo.claim(&worker("w-cancel"), limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    repo.request_cancel(job.id).await.expect("cancel succeeds");
+    let cancelled = tokio::time::timeout(Duration::from_secs(1), listener.cancelled())
+        .await
+        .expect("cancel notifies within a second")
+        .expect("notification received");
+    assert_eq!(cancelled, job.id);
+    db.dispose().await;
 }
 
 #[tokio::test]

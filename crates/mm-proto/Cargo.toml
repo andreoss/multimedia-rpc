@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mm-domain = { path = "../mm-domain" }
 prost.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true

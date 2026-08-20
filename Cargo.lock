@@ -480,6 +480,7 @@ version = "0.1.0"
 name = "mm-proto"
 version = "0.1.0"
 dependencies = [
+ "mm-domain",
  "proptest",
  "prost",
  "tonic",

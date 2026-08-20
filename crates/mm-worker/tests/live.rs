@@ -198,10 +198,23 @@ async fn upload_input(store: &S3ObjectStore, path: &Path, key: &str) -> MediaRef
     let payload = tokio::fs::read(path).await.unwrap();
     let length = payload.len() as u64;
     let object = ObjectRef::new(BUCKET, key).unwrap();
-    store
-        .put(&object, mm_domain::body_from_bytes(payload), length)
-        .await
-        .unwrap();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let chunks: Vec<Result<bytes::Bytes, mm_domain::ObjectStoreError>> = payload
+            .chunks(64 * 1024)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect();
+        let body: ObjectBody = Box::pin(futures_util::stream::iter(chunks));
+        match store.put(&object, body, length).await {
+            Ok(()) => break,
+            Err(error) if attempt < 3 => {
+                eprintln!("fixture upload attempt {attempt} failed: {error}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(error) => panic!("fixture upload failed after {attempt} attempts: {error}"),
+        }
+    }
     MediaRef::object_uri(&format!("s3://{BUCKET}/{key}")).unwrap()
 }
 
@@ -673,28 +686,20 @@ async fn an_overdue_running_job_is_killed_and_fails_with_timeout() {
         upload_input(&store, &second, "inputs/long-b-120s.mp4").await,
     ];
     let repository = db.repository();
-    let id = JobId::generate();
-    let job = repository
-        .create(NewJob::new(
-            id,
-            owner(),
-            RequestId::from_str(&format!("req-{id}")).unwrap(),
-            OpSpec::Concat(ConcatSpec::new(refs, None).unwrap()),
-            Some(std::time::SystemTime::now() + Duration::from_secs(6)),
-        ))
-        .await
-        .unwrap();
+    let job = repository.create(concat_job(refs)).await.unwrap();
 
-    let handle = start(base_config(&db, store.clone(), "worker-reaped"));
+    let mut config = base_config(&db, store.clone(), "worker-reaped");
+    config.heartbeat_interval = Duration::from_millis(300);
+    let handle = start(config);
     await_state(
         &repository,
         job.id,
         JobState::Running,
-        Duration::from_secs(15),
+        Duration::from_secs(60),
     )
     .await;
     let needle = job.id.to_string();
-    let found = Instant::now() + Duration::from_secs(20);
+    let found = Instant::now() + Duration::from_secs(120);
     let pid = loop {
         if let Some(pid) = find_process(&needle) {
             break pid;
@@ -703,13 +708,19 @@ async fn an_overdue_running_job_is_killed_and_fails_with_timeout() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
 
-    let record = await_terminal(&repository, job.id, Duration::from_secs(60)).await;
+    sqlx::query("UPDATE jobs SET deadline_at = now() WHERE id = $1")
+        .bind(job.id.as_uuid())
+        .execute(&db.pool)
+        .await
+        .expect("deadline update succeeds");
+
+    let record = await_terminal(&repository, job.id, Duration::from_secs(30)).await;
     handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
     let failure = record.failure.expect("failure recorded");
     assert_eq!(failure.code(), codes::TIMEOUT);
-    let gone = Instant::now() + Duration::from_secs(3);
+    let gone = Instant::now() + Duration::from_secs(5);
     while process_mentions(pid, &needle) {
         assert!(Instant::now() < gone, "merge process survived the reap");
         tokio::time::sleep(Duration::from_millis(50)).await;

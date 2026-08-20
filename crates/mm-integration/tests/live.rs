@@ -400,9 +400,20 @@ async fn drop_db(admin: &sqlx::PgPool, pool: sqlx::PgPool, name: &str) {
 }
 
 async fn upload_object(store: &S3ObjectStore, path: &Path, key: &str) -> MediaRef {
-    let (body, length) = file_body(path);
     let object = mm_domain::ObjectRef::new(BUCKET, key).unwrap();
-    store.put(&object, body, length).await.unwrap();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let (body, length) = file_body(path);
+        match store.put(&object, body, length).await {
+            Ok(()) => break,
+            Err(error) if attempt < 3 => {
+                eprintln!("fixture upload attempt {attempt} failed: {error}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(error) => panic!("fixture upload failed after {attempt} attempts: {error}"),
+        }
+    }
     MediaRef::object_uri(&format!("s3://{BUCKET}/{key}")).unwrap()
 }
 

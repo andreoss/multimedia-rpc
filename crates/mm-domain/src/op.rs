@@ -8,6 +8,8 @@ pub const MAX_BATCH_STEPS: usize = 32;
 pub const MAX_GRAPH_NODES: usize = 64;
 pub const MAX_NESTING_DEPTH: usize = 4;
 pub const MAX_TREE_STEPS: usize = 128;
+pub const MIN_LADDER_RUNGS: usize = 2;
+pub const MAX_LADDER_RUNGS: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRef {
@@ -293,6 +295,22 @@ pub enum OpSpecError {
     EmptyOffsets,
     #[error("segment length {value} is not positive and finite")]
     InvalidSegmentLength { value: f64 },
+    #[error("ladder has {count} rungs, below the 2 a ladder needs")]
+    EmptyLadder { count: usize },
+    #[error("ladder has {count} rungs, above the {max} allowed")]
+    TooManyRungs { count: usize, max: usize },
+    #[error("rung {index} names no resolution")]
+    RungWithoutResolution { index: usize },
+    #[error("rung {index} names no video bitrate")]
+    RungWithoutVideoBitrate { index: usize },
+    #[error("rung {index} is not larger than the rung below it")]
+    NonMonotonicRung { index: usize },
+    #[error("rung {index} raises the audio bitrate above the rung below it")]
+    RungAudioBitrateRises { index: usize },
+    #[error("rung {index} carries its own poster; the ladder carries one")]
+    RungCarriesPoster { index: usize },
+    #[error("rung {index} carries its own range; the ladder's input carries one")]
+    RungCarriesRange { index: usize },
     #[error("offset {value} is negative or not finite")]
     InvalidOffset { value: f64 },
     #[error("{dimension} is zero")]
@@ -725,6 +743,107 @@ impl PackageSpec {
 
     pub fn segment_seconds(&self) -> f64 {
         self.segment_seconds
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LadderSpec {
+    input: InputSource,
+    rungs: Vec<OutputProfile>,
+    segment_seconds: Option<f64>,
+    poster_seconds: Option<f64>,
+}
+
+impl LadderSpec {
+    pub fn new<I: Into<InputSource>>(
+        input: I,
+        rungs: Vec<OutputProfile>,
+    ) -> Result<Self, OpSpecError> {
+        if rungs.len() < MIN_LADDER_RUNGS {
+            return Err(OpSpecError::EmptyLadder { count: rungs.len() });
+        }
+        if rungs.len() > MAX_LADDER_RUNGS {
+            return Err(OpSpecError::TooManyRungs {
+                count: rungs.len(),
+                max: MAX_LADDER_RUNGS,
+            });
+        }
+        for (index, rung) in rungs.iter().enumerate() {
+            if rung.is_empty() {
+                return Err(OpSpecError::EmptyProfile);
+            }
+            if rung.resolution().is_none() {
+                return Err(OpSpecError::RungWithoutResolution { index });
+            }
+            if rung.video_max_bitrate().is_none() {
+                return Err(OpSpecError::RungWithoutVideoBitrate { index });
+            }
+            if rung.poster_seconds().is_some() {
+                return Err(OpSpecError::RungCarriesPoster { index });
+            }
+            if rung.range().is_some() {
+                return Err(OpSpecError::RungCarriesRange { index });
+            }
+        }
+        for index in 1..rungs.len() {
+            let lower = &rungs[index - 1];
+            let upper = &rungs[index];
+            let (lower_width, lower_height) = lower.resolution().unwrap_or((0, 0));
+            let (upper_width, upper_height) = upper.resolution().unwrap_or((0, 0));
+            let lower_area = u64::from(lower_width) * u64::from(lower_height);
+            let upper_area = u64::from(upper_width) * u64::from(upper_height);
+            if upper_area <= lower_area {
+                return Err(OpSpecError::NonMonotonicRung { index });
+            }
+            if upper.video_max_bitrate() <= lower.video_max_bitrate() {
+                return Err(OpSpecError::NonMonotonicRung { index });
+            }
+            if upper.audio_bitrate() > lower.audio_bitrate() {
+                return Err(OpSpecError::RungAudioBitrateRises { index });
+            }
+        }
+        Ok(Self {
+            input: source(input),
+            rungs,
+            segment_seconds: None,
+            poster_seconds: None,
+        })
+    }
+
+    pub fn with_segment_seconds(mut self, segment_seconds: f64) -> Result<Self, OpSpecError> {
+        if !segment_seconds.is_finite() || segment_seconds <= 0.0 {
+            return Err(OpSpecError::InvalidSegmentLength {
+                value: segment_seconds,
+            });
+        }
+        self.segment_seconds = Some(segment_seconds);
+        Ok(self)
+    }
+
+    pub fn with_poster(mut self, poster_seconds: f64) -> Result<Self, OpSpecError> {
+        if !poster_seconds.is_finite() || poster_seconds < 0.0 {
+            Err(OutputProfileError::InvalidPoster {
+                value: poster_seconds,
+            })?;
+        }
+        self.poster_seconds = Some(poster_seconds);
+        Ok(self)
+    }
+
+    pub fn input(&self) -> &InputSource {
+        &self.input
+    }
+
+    pub fn rungs(&self) -> &[OutputProfile] {
+        &self.rungs
+    }
+
+    pub fn segment_seconds(&self) -> Option<f64> {
+        self.segment_seconds
+    }
+
+    pub fn poster_seconds(&self) -> Option<f64> {
+        self.poster_seconds
     }
 }
 
@@ -1445,6 +1564,107 @@ impl PackageResult {
 
     pub fn segments(&self) -> &[MediaRef] {
         &self.segments
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenditionResult {
+    profile: OutputProfile,
+    media: MediaRef,
+    playlist: Option<MediaRef>,
+    segments: Vec<MediaRef>,
+    duration_seconds: f64,
+    width: u32,
+    height: u32,
+    bandwidth_bps: u32,
+}
+
+impl RenditionResult {
+    pub fn new(
+        profile: OutputProfile,
+        media: MediaRef,
+        playlist: Option<MediaRef>,
+        segments: Vec<MediaRef>,
+        duration_seconds: f64,
+    ) -> Result<Self, OpResultError> {
+        Ok(Self {
+            profile,
+            media,
+            playlist,
+            segments,
+            duration_seconds: parse_duration(duration_seconds)?,
+            width: 0,
+            height: 0,
+            bandwidth_bps: 0,
+        })
+    }
+
+    pub fn with_measurement(mut self, width: u32, height: u32, bandwidth_bps: u32) -> Self {
+        self.width = width;
+        self.height = height;
+        self.bandwidth_bps = bandwidth_bps;
+        self
+    }
+
+    pub fn profile(&self) -> &OutputProfile {
+        &self.profile
+    }
+
+    pub fn media(&self) -> &MediaRef {
+        &self.media
+    }
+
+    pub fn playlist(&self) -> Option<&MediaRef> {
+        self.playlist.as_ref()
+    }
+
+    pub fn segments(&self) -> &[MediaRef] {
+        &self.segments
+    }
+
+    pub fn duration_seconds(&self) -> f64 {
+        self.duration_seconds
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn bandwidth_bps(&self) -> u32 {
+        self.bandwidth_bps
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LadderResult {
+    master_playlist: Option<MediaRef>,
+    renditions: Vec<RenditionResult>,
+}
+
+impl LadderResult {
+    pub fn new(
+        master_playlist: Option<MediaRef>,
+        renditions: Vec<RenditionResult>,
+    ) -> Result<Self, OpResultError> {
+        if renditions.is_empty() {
+            return Err(OpResultError::EmptyOutputs);
+        }
+        Ok(Self {
+            master_playlist,
+            renditions,
+        })
+    }
+
+    pub fn master_playlist(&self) -> Option<&MediaRef> {
+        self.master_playlist.as_ref()
+    }
+
+    pub fn renditions(&self) -> &[RenditionResult] {
+        &self.renditions
     }
 }
 

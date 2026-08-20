@@ -207,6 +207,11 @@ fn check(signal: &watch::Receiver<Signal>) -> Result<(), Finish> {
     }
 }
 
+fn log_line(message: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout(), "{message}");
+}
+
 fn timeout_failure() -> JobFailure {
     JobFailure::new(codes::TIMEOUT, "job deadline passed").expect("worker failure codes are valid")
 }
@@ -228,17 +233,17 @@ pub(crate) async fn publish_outcome(ctx: &WorkerConfig, record: &JobRecord) {
         match publisher.publish(queue, &body).await {
             Ok(()) => return,
             Err(error) if attempt < ctx.retry.max_attempts => {
-                println!(
+                log_line(format_args!(
                     "job {} callback attempt {attempt} failed: {error}",
                     record.id
-                );
+                ));
                 tokio::time::sleep(ctx.retry.delay(attempt)).await;
             }
             Err(error) => {
-                println!(
+                log_line(format_args!(
                     "job {} callback abandoned after {attempt} attempts: {error}",
                     record.id
-                );
+                ));
                 return;
             }
         }
@@ -372,7 +377,11 @@ async fn pipeline(
     }
     let warned = warnings(&verdicts);
     if !warned.is_empty() {
-        println!("job {} warnings: {}", job.id, render_verdicts(&warned));
+        log_line(format_args!(
+            "job {} warnings: {}",
+            job.id,
+            render_verdicts(&warned)
+        ));
     }
 
     tokio::fs::create_dir_all(&ctx.staging_dir)
@@ -382,11 +391,11 @@ async fn pipeline(
     let _reservation = match admit(ctx, estimate) {
         Ok(reservation) => reservation,
         Err(available) => {
-            println!(
+            log_line(format_args!(
                 "job {} released: estimated {estimate} bytes exceed the \
                  available {available}",
                 job.id
-            );
+            ));
             let _ = ctx
                 .repository
                 .release(job.id, &ctx.worker_id, ctx.release_retry)

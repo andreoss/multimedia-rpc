@@ -1209,6 +1209,10 @@ fn parse_duration(value: f64) -> Result<f64, OpResultError> {
     }
 }
 
+fn millis(seconds: f64) -> i64 {
+    (seconds * 1000.0).round() as i64
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimedOutput {
     output: MediaRef,
@@ -1467,6 +1471,13 @@ impl OpResult {
             OpResult::Image(result) => result.outputs().first(),
             OpResult::Package(result) => Some(result.playlist()),
             OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
+        }
+    }
+
+    pub fn merged_duration_ms(&self) -> Option<i64> {
+        match self {
+            OpResult::Concat(timed) => Some(millis(timed.duration_seconds())),
+            _ => None,
         }
     }
 }

@@ -1589,7 +1589,15 @@ async fn concat_pipeline(
     )
     .await;
     let _ = tokio::fs::remove_file(&output_path).await;
-    merged
+    match merged {
+        Ok(OpResult::Concat(timed)) => {
+            let output = timed.output().clone();
+            TimedOutput::new(output, total.as_secs_f64())
+                .map(OpResult::Concat)
+                .map_err(|error| failed(codes::OUTPUT_INVALID, error))
+        }
+        other => other,
+    }
 }
 
 async fn thumbnail_pipeline(

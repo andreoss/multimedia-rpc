@@ -19,6 +19,7 @@ message VideoStitchResult {
   optional string r2_uri = 4;
   optional string error_code = 5;
   repeated FileError file_errors = 6;
+  optional int64 duration_ms = 7;
 }
 
 message JobCallback {

@@ -315,6 +315,13 @@ async fn a_concat_job_runs_to_succeeded_with_an_uploaded_output() {
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
     assert_eq!(record.progress.value(), 100);
+    let duration_ms = record
+        .duration_ms
+        .expect("a settled concat carries the merged duration");
+    assert!(
+        (duration_ms - 7_000).abs() < 600,
+        "the merged duration {duration_ms}ms is not the 4s+3s sum"
+    );
     let result = record.result.expect("result recorded");
     let OpResult::Concat(timed) = result else {
         panic!("expected a concat result");
@@ -365,6 +372,10 @@ async fn a_probe_job_succeeds_with_stream_metadata() {
     handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    assert_eq!(
+        record.duration_ms, None,
+        "a probe merges nothing, so it stores no merged duration"
+    );
     let OpResult::Probe(probe) = record.result.expect("result recorded") else {
         panic!("expected a probe result");
     };

@@ -98,3 +98,7 @@ pub fn unix(time: SystemTime) -> i64 {
         .expect("time after epoch")
         .as_secs() as i64
 }
+
+pub fn fixed_now() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+}

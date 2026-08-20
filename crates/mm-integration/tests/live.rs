@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::env;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};

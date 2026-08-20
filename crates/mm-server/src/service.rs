@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use mm_domain::{
     JobEventNotifications, JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
-    OpSpec, ProgressPercent, QueueUrl, RequestId, UserId,
+    OpSpec, ProgressPercent, QueueUrl, RequestId,
 };
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
@@ -184,11 +184,6 @@ async fn follow_job(
     }
 }
 
-fn parse_user(value: &str) -> Result<UserId, Status> {
-    UserId::from_str(value)
-        .map_err(|error| Status::invalid_argument(format!("user_id is invalid: {error}")))
-}
-
 fn parse_request_id(value: &str) -> Result<RequestId, Status> {
     RequestId::from_str(value)
         .map_err(|error| Status::invalid_argument(format!("idempotency_key is invalid: {error}")))
@@ -270,8 +265,8 @@ impl MediaJobService for MediaJobs {
         &self,
         request: Request<v1::CreateJobRequest>,
     ) -> Result<Response<v1::CreateJobResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
         let message = request.into_inner();
-        let owner = parse_user(&message.user_id)?;
         let request_id = parse_request_id(&message.idempotency_key)?;
         let spec = parse_spec(message.spec)?;
         let callback = parse_callback(message.callback)?;
@@ -311,8 +306,8 @@ impl MediaJobService for MediaJobs {
         &self,
         request: Request<v1::GetJobRequest>,
     ) -> Result<Response<v1::GetJobResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
         let message = request.into_inner();
-        let owner = parse_user(&message.user_id)?;
         let id = parse_job_id(&message.job_id)?;
         let record = self
             .repository
@@ -329,8 +324,8 @@ impl MediaJobService for MediaJobs {
         &self,
         request: Request<v1::CancelJobRequest>,
     ) -> Result<Response<v1::CancelJobResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
         let message = request.into_inner();
-        let owner = parse_user(&message.user_id)?;
         let id = parse_job_id(&message.job_id)?;
         let record = self
             .repository
@@ -361,8 +356,8 @@ impl MediaJobService for MediaJobs {
         &self,
         request: Request<v1::ListJobsRequest>,
     ) -> Result<Response<v1::ListJobsResponse>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
         let message = request.into_inner();
-        let owner = parse_user(&message.user_id)?;
         let states = parse_states(&message.statuses)?;
         let limit = page_limit(message.page_size);
         let cursor = parse_page_token(&message.page_token)?;
@@ -384,8 +379,8 @@ impl MediaJobService for MediaJobs {
         &self,
         request: Request<v1::WatchJobRequest>,
     ) -> Result<Response<Self::WatchJobStream>, Status> {
+        let owner = crate::interceptor::owner_of(&request)?;
         let message = request.into_inner();
-        let owner = parse_user(&message.user_id)?;
         let id = parse_job_id(&message.job_id)?;
         let changes = self.watch.subscribe();
         let snapshot = self

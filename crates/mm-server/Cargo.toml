@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mm-auth = { path = "../mm-auth" }
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 mm-proto = { path = "../mm-proto" }
@@ -17,6 +18,8 @@ tonic-health.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
+mm-auth = { path = "../mm-auth", features = ["testing"] }
 mm-jobstore = { path = "../mm-jobstore" }
 mm-storage = { path = "../mm-storage" }
 mm-testkit = { path = "../mm-testkit" }

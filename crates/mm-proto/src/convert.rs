@@ -34,6 +34,13 @@ impl From<&MediaRef> for v1::MediaRef {
     }
 }
 
+fn optional_ref(value: Option<v1::MediaRef>) -> Result<Option<MediaRef>, MediaRefError> {
+    match value {
+        Some(value) => Ok(Some(value.try_into()?)),
+        None => Ok(None),
+    }
+}
+
 fn required_ref(value: Option<v1::MediaRef>) -> Result<MediaRef, MediaRefError> {
     value.ok_or(MediaRefError::Missing)?.try_into()
 }
@@ -542,6 +549,7 @@ impl TryFrom<v1::OpResult> for OpResult {
             v1::op_result::Op::Package(package) => Ok(OpResult::Package(PackageResult::new(
                 required_ref(package.playlist)?,
                 ref_list(package.segments)?,
+                optional_ref(package.init_segment)?,
             )?)),
             v1::op_result::Op::Batch(batch) => Ok(OpResult::Batch(BatchResult::try_from(batch)?)),
             v1::op_result::Op::Graph(graph) => Ok(OpResult::Graph(GraphResult::try_from(graph)?)),
@@ -562,14 +570,19 @@ impl TryFrom<v1::RenditionResult> for RenditionResult {
             Some(playlist) => Some(playlist.try_into()?),
             None => None,
         };
-        Ok(RenditionResult::new(
+        let init_segment = optional_ref(value.init_segment)?;
+        let rendition = RenditionResult::new(
             OutputProfile::try_from(profile)?,
             media,
             playlist,
             ref_list(value.segments)?,
             value.duration_seconds,
         )?
-        .with_measurement(value.width, value.height, value.bandwidth_bps))
+        .with_measurement(value.width, value.height, value.bandwidth_bps);
+        Ok(match init_segment {
+            Some(init_segment) => rendition.with_init_segment(init_segment),
+            None => rendition,
+        })
     }
 }
 
@@ -580,6 +593,7 @@ impl From<&RenditionResult> for v1::RenditionResult {
             media: Some(v1::MediaRef::from(value.media())),
             playlist: value.playlist().map(v1::MediaRef::from),
             segments: value.segments().iter().map(v1::MediaRef::from).collect(),
+            init_segment: value.init_segment().map(v1::MediaRef::from),
             duration_seconds: value.duration_seconds(),
             width: value.width(),
             height: value.height(),
@@ -970,6 +984,7 @@ impl From<&OpResult> for v1::OpResult {
             OpResult::Package(package) => v1::op_result::Op::Package(v1::PackageResult {
                 playlist: Some(v1::MediaRef::from(package.playlist())),
                 segments: package.segments().iter().map(v1::MediaRef::from).collect(),
+                init_segment: package.init_segment().map(v1::MediaRef::from),
             }),
             OpResult::Image(image) => v1::op_result::Op::Image(v1::ImageResult {
                 outputs: image.outputs().iter().map(v1::MediaRef::from).collect(),

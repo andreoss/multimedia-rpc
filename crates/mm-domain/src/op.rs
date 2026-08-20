@@ -1556,14 +1556,23 @@ impl ImageResult {
 pub struct PackageResult {
     playlist: MediaRef,
     segments: Vec<MediaRef>,
+    init_segment: Option<MediaRef>,
 }
 
 impl PackageResult {
-    pub fn new(playlist: MediaRef, segments: Vec<MediaRef>) -> Result<Self, OpResultError> {
+    pub fn new(
+        playlist: MediaRef,
+        segments: Vec<MediaRef>,
+        init_segment: Option<MediaRef>,
+    ) -> Result<Self, OpResultError> {
         if segments.is_empty() {
             return Err(OpResultError::EmptyOutputs);
         }
-        Ok(Self { playlist, segments })
+        Ok(Self {
+            playlist,
+            segments,
+            init_segment,
+        })
     }
 
     pub fn playlist(&self) -> &MediaRef {
@@ -1573,6 +1582,10 @@ impl PackageResult {
     pub fn segments(&self) -> &[MediaRef] {
         &self.segments
     }
+
+    pub fn init_segment(&self) -> Option<&MediaRef> {
+        self.init_segment.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1581,6 +1594,7 @@ pub struct RenditionResult {
     media: MediaRef,
     playlist: Option<MediaRef>,
     segments: Vec<MediaRef>,
+    init_segment: Option<MediaRef>,
     duration_seconds: f64,
     width: u32,
     height: u32,
@@ -1600,11 +1614,21 @@ impl RenditionResult {
             media,
             playlist,
             segments,
+            init_segment: None,
             duration_seconds: parse_duration(duration_seconds)?,
             width: 0,
             height: 0,
             bandwidth_bps: 0,
         })
+    }
+
+    pub fn with_init_segment(mut self, init_segment: MediaRef) -> Self {
+        self.init_segment = Some(init_segment);
+        self
+    }
+
+    pub fn init_segment(&self) -> Option<&MediaRef> {
+        self.init_segment.as_ref()
     }
 
     pub fn with_measurement(mut self, width: u32, height: u32, bandwidth_bps: u32) -> Self {

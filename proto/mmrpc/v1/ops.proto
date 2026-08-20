@@ -150,6 +150,7 @@ message ImageResult {
 message PackageResult {
   MediaRef playlist = 1;
   repeated MediaRef segments = 2;
+  optional MediaRef init_segment = 3;
 }
 
 message StepFailure {
@@ -191,6 +192,7 @@ message RenditionResult {
   uint32 width = 6;
   uint32 height = 7;
   uint32 bandwidth_bps = 8;
+  optional MediaRef init_segment = 9;
 }
 
 message LadderResult {

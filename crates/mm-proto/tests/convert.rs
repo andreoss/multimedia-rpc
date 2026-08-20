@@ -508,11 +508,75 @@ fn a_package_spec_and_result_round_trip_through_the_contract() {
                 MediaRef::object_uri("s3://media/out/seg00000.m4s").unwrap(),
                 MediaRef::object_uri("s3://media/out/seg00001.m4s").unwrap(),
             ],
+            Some(MediaRef::object_uri("s3://media/out/init.mp4").unwrap()),
         )
         .unwrap(),
     );
     let wire = v1::OpResult::from(&result);
     assert_eq!(OpResult::try_from(wire).unwrap(), result);
+}
+
+#[test]
+fn a_package_result_with_no_init_segment_round_trips_unset() {
+    let result = OpResult::Package(
+        PackageResult::new(
+            MediaRef::object_uri("s3://media/out/playlist.m3u8").unwrap(),
+            vec![MediaRef::object_uri("s3://media/out/seg00000.m4s").unwrap()],
+            None,
+        )
+        .unwrap(),
+    );
+    let wire = v1::OpResult::from(&result);
+    let back = OpResult::try_from(wire).unwrap();
+    assert_eq!(back, result);
+    match back {
+        OpResult::Package(package) => assert!(
+            package.init_segment().is_none(),
+            "an unset init segment must arrive unset, not as a default"
+        ),
+        other => panic!("expected a package result, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_packaged_ladder_rendition_round_trips_its_init_segment() {
+    let profile = OutputProfile::from_raw(0.0, 300, 0, 64, 0, 320, 240).unwrap();
+    let rendition = RenditionResult::new(
+        profile,
+        MediaRef::object_uri("s3://media/out/renditions/0/output.mp4").unwrap(),
+        Some(MediaRef::object_uri("s3://media/out/renditions/0/playlist.m3u8").unwrap()),
+        vec![MediaRef::object_uri("s3://media/out/renditions/0/seg00000.m4s").unwrap()],
+        5.0,
+    )
+    .unwrap()
+    .with_measurement(320, 240, 300_000)
+    .with_init_segment(MediaRef::object_uri("s3://media/out/renditions/0/init.mp4").unwrap());
+    let result = OpResult::Ladder(LadderResult::new(None, vec![rendition.clone()]).unwrap());
+    let wire = v1::OpResult::from(&result);
+    assert_eq!(OpResult::try_from(wire).unwrap(), result);
+
+    let named = rendition
+        .init_segment()
+        .expect("the rendition names its init");
+    assert_eq!(
+        named,
+        &MediaRef::object_uri("s3://media/out/renditions/0/init.mp4").unwrap()
+    );
+}
+
+#[test]
+fn an_unpackaged_rendition_names_no_init_segment() {
+    let profile = OutputProfile::from_raw(0.0, 300, 0, 64, 0, 320, 240).unwrap();
+    let rendition = RenditionResult::new(
+        profile,
+        MediaRef::object_uri("s3://media/out/renditions/0/output.mp4").unwrap(),
+        None,
+        Vec::new(),
+        5.0,
+    )
+    .unwrap()
+    .with_measurement(320, 240, 300_000);
+    assert!(rendition.init_segment().is_none());
 }
 
 #[test]

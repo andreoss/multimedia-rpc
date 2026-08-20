@@ -8,9 +8,11 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use mm_domain::{
-    JobId, MediaRef, ObjectBody, ObjectStore, ObjectStoreError, OutputKey, resolve_media_ref,
+    AudioReport, BlockCode, InputReport, JobId, MediaRef, ObjectBody, ObjectStore,
+    ObjectStoreError, OutputKey, Verdict, VerdictCode, VideoReport, WarnCode, resolve_media_ref,
+    validate_concat_inputs,
 };
-use mm_ffmpeg::{ProbeLimits, Prober};
+use mm_ffmpeg::{MediaInfo, ProbeLimits, Prober};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -227,6 +229,38 @@ async fn counting_relay(upstream_authority: String) -> (SocketAddr, Arc<AtomicU6
     (address, counter)
 }
 
+fn to_report(info: &MediaInfo) -> InputReport {
+    InputReport {
+        container: info.container.clone(),
+        duration: info.duration,
+        size_bytes: info.size_bytes,
+        drm: info.drm,
+        video: info
+            .video
+            .iter()
+            .map(|video| VideoReport {
+                codec: video.codec.clone(),
+                width: video.width,
+                height: video.height,
+                avg_fps: video.avg_fps,
+                real_fps: video.real_fps,
+                rotation: video.rotation,
+                sample_aspect_ratio: video.sample_aspect_ratio,
+                interlaced: video.interlaced,
+            })
+            .collect(),
+        audio: info
+            .audio
+            .iter()
+            .map(|audio| AudioReport {
+                codec: audio.codec.clone(),
+                channels: audio.channels,
+                sample_rate: audio.sample_rate,
+            })
+            .collect(),
+    }
+}
+
 fn probe_limits() -> ProbeLimits {
     ProbeLimits {
         probe_size_bytes: 1024 * 1024,
@@ -270,5 +304,51 @@ async fn a_presigned_fixture_probes_without_a_full_download() {
     assert!(
         transferred < file_size / 2,
         "probe transferred {transferred} of {file_size} bytes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_container_blocks_live() {
+    let store = test_store().await;
+    let good = fixture("main-30fps.mp4", 90, 30, "mp4");
+    let bad = fixture("bad-container.mkv", 3, 30, "matroska");
+
+    let good_url = upload_and_presign(&store, &good, "main-30fps.mp4").await;
+    let bad_url = upload_and_presign(&store, &bad, "bad-container.mkv").await;
+
+    let prober = Prober::default();
+    let bad_info = prober.probe(&bad_url, &probe_limits()).await.unwrap();
+    let good_info = prober.probe(&good_url, &probe_limits()).await.unwrap();
+
+    let verdicts = validate_concat_inputs(&[to_report(&bad_info), to_report(&good_info)]);
+    assert!(verdicts.contains(&Verdict {
+        input: Some(0),
+        code: VerdictCode::Block(BlockCode::UnsupportedContainer),
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn frame_rate_drift_warns_live() {
+    let store = test_store().await;
+    let main = fixture("main-30fps.mp4", 90, 30, "mp4");
+    let slow = fixture("alt-25fps.mp4", 6, 25, "mp4");
+
+    let main_url = upload_and_presign(&store, &main, "main-30fps.mp4").await;
+    let slow_url = upload_and_presign(&store, &slow, "alt-25fps.mp4").await;
+
+    let prober = Prober::default();
+    let main_info = prober.probe(&main_url, &probe_limits()).await.unwrap();
+    let slow_info = prober.probe(&slow_url, &probe_limits()).await.unwrap();
+
+    let verdicts = validate_concat_inputs(&[to_report(&main_info), to_report(&slow_info)]);
+    assert!(verdicts.contains(&Verdict {
+        input: None,
+        code: VerdictCode::Warn(WarnCode::FpsDrift),
+    }));
+    assert!(
+        verdicts
+            .iter()
+            .all(|verdict| !matches!(verdict.code, VerdictCode::Block(_))),
+        "unexpected blocks: {verdicts:?}"
     );
 }

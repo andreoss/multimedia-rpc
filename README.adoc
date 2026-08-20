@@ -6,6 +6,7 @@ object storage.
 == Crates
 - mm-domain — ids, job state machine, op catalog, ports
 - mm-ffmpeg — probe, progress, process supervision
+- mm-gst — pipeline description, bus parsing, packaging runner
 - mm-integration — live integration suite
 - mm-jobstore — migrations and the job repository
 - mm-magick — identify and convert argv, parsing, runner

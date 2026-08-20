@@ -1,0 +1,17 @@
+[package]
+name = "mm-gst"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+gst = ["dep:glib", "dep:gstreamer"]
+
+[dependencies]
+thiserror.workspace = true
+glib = { version = "0.20", optional = true }
+gstreamer = { version = "0.23", features = ["v1_28"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+uuid.workspace = true

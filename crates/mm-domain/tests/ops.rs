@@ -13,7 +13,7 @@ fn http() -> MediaRef {
 }
 
 fn profile() -> OutputProfile {
-    OutputProfile::from_raw(30.0, 4_000_000, 23, 128_000, 48_000).unwrap()
+    OutputProfile::from_raw(30.0, 4_000_000, 23, 128_000, 48_000, 1280, 720).unwrap()
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn http_url_rejects_empty_host() {
 
 #[test]
 fn output_profile_treats_zero_as_unset() {
-    let profile = OutputProfile::from_raw(0.0, 0, 0, 0, 0).unwrap();
+    let profile = OutputProfile::from_raw(0.0, 0, 0, 0, 0, 0, 0).unwrap();
     assert!(profile.is_empty());
     assert_eq!(profile.frame_rate(), None);
     assert_eq!(profile.video_max_bitrate(), None);
@@ -99,10 +99,34 @@ fn output_profile_keeps_positive_values() {
 }
 
 #[test]
+fn output_profile_keeps_a_full_resolution() {
+    assert_eq!(profile().resolution(), Some((1280, 720)));
+    let unset = OutputProfile::from_raw(30.0, 0, 0, 0, 0, 0, 0).unwrap();
+    assert_eq!(unset.resolution(), None);
+}
+
+#[test]
+fn output_profile_rejects_a_partial_resolution() {
+    for (width, height) in [(1280, 0), (0, 720)] {
+        assert_eq!(
+            OutputProfile::from_raw(0.0, 0, 0, 0, 0, width, height).unwrap_err(),
+            OutputProfileError::PartialResolution { width, height }
+        );
+    }
+}
+
+#[test]
+fn a_resolution_alone_makes_the_profile_nonempty() {
+    let profile = OutputProfile::from_raw(0.0, 0, 0, 0, 0, 640, 360).unwrap();
+    assert!(!profile.is_empty());
+    assert_eq!(profile.resolution(), Some((640, 360)));
+}
+
+#[test]
 fn output_profile_rejects_bad_frame_rate() {
     for value in [-1.0, f64::NAN, f64::INFINITY, -0.5] {
         assert!(matches!(
-            OutputProfile::from_raw(value, 0, 0, 0, 0),
+            OutputProfile::from_raw(value, 0, 0, 0, 0, 0, 0),
             Err(OutputProfileError::InvalidFrameRate { .. })
         ));
     }
@@ -123,7 +147,7 @@ fn concat_requires_at_least_two_inputs() {
 
 #[test]
 fn concat_rejects_empty_profile() {
-    let empty = OutputProfile::from_raw(0.0, 0, 0, 0, 0).unwrap();
+    let empty = OutputProfile::from_raw(0.0, 0, 0, 0, 0, 0, 0).unwrap();
     assert_eq!(
         ConcatSpec::new(vec![object(), http()], Some(empty)).unwrap_err(),
         OpSpecError::EmptyProfile
@@ -139,7 +163,7 @@ fn probe_takes_any_valid_ref() {
 
 #[test]
 fn transcode_requires_a_nonempty_profile() {
-    let empty = OutputProfile::from_raw(0.0, 0, 0, 0, 0).unwrap();
+    let empty = OutputProfile::from_raw(0.0, 0, 0, 0, 0, 0, 0).unwrap();
     assert_eq!(
         TranscodeSpec::new(object(), empty).unwrap_err(),
         OpSpecError::EmptyProfile

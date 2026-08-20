@@ -158,6 +158,8 @@ fn op_spec_oneof_has_all_five_arms() {
                 video_quality: 23,
                 audio_bitrate: 128_000,
                 audio_sample_rate: 48_000,
+                width: 1280,
+                height: 720,
             }),
         }),
         v1::op_spec::Op::Trim(v1::TrimSpec {

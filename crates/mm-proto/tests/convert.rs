@@ -25,6 +25,10 @@ fn media_ref_strategy() -> impl Strategy<Value = MediaRef> {
     ]
 }
 
+fn resolution_strategy() -> impl Strategy<Value = (u32, u32)> {
+    prop_oneof![Just((0u32, 0u32)), (16u32..7680, 16u32..4320)]
+}
+
 fn profile_strategy() -> impl Strategy<Value = OutputProfile> {
     (
         0.1f64..240.0,
@@ -32,15 +36,25 @@ fn profile_strategy() -> impl Strategy<Value = OutputProfile> {
         1u32..52,
         1u32..512_000,
         8_000u32..192_000,
+        resolution_strategy(),
     )
         .prop_map(
-            |(frame_rate, video_max_bitrate, video_quality, audio_bitrate, sample_rate)| {
+            |(
+                frame_rate,
+                video_max_bitrate,
+                video_quality,
+                audio_bitrate,
+                sample_rate,
+                (width, height),
+            )| {
                 OutputProfile::from_raw(
                     frame_rate,
                     video_max_bitrate,
                     video_quality,
                     audio_bitrate,
                     sample_rate,
+                    width,
+                    height,
                 )
                 .unwrap()
             },

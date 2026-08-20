@@ -53,6 +53,9 @@ pub fn target_profile(profile: Option<&OutputProfile>) -> TargetProfile {
     if let Some(rate) = profile.audio_sample_rate() {
         target.audio_sample_rate_hz = rate;
     }
+    if let Some(resolution) = profile.resolution() {
+        target.resolution = Some(resolution);
+    }
     target
 }
 

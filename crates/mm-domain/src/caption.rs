@@ -125,10 +125,12 @@ impl CaptionDocument {
         let cues = match format {
             CaptionFormat::Srt => parse_srt(&lines)?,
             CaptionFormat::WebVtt => parse_webvtt(&lines)?,
-            CaptionFormat::Scc => return Err(CaptionError::UnsupportedFormat {
-                format,
-                message: "SCC parsing not yet fully implemented".to_string(),
-            }),
+            CaptionFormat::Scc => {
+                return Err(CaptionError::UnsupportedFormat {
+                    format,
+                    message: "SCC parsing not yet fully implemented".to_string(),
+                });
+            }
             CaptionFormat::Embedded => parse_webvtt(&lines)?,
         };
         if cues.is_empty() {
@@ -169,7 +171,10 @@ pub enum CaptionError {
     #[error("caption at line never ends")]
     UnterminatedCue { line: usize },
     #[error("caption format {format} is not supported by this function")]
-    UnsupportedFormat { format: CaptionFormat, message: String },
+    UnsupportedFormat {
+        format: CaptionFormat,
+        message: String,
+    },
     #[error("SCC document is missing its header")]
     MissingSccHeader,
     #[error("SCC word at line carries a malformed hex value")]

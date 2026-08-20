@@ -562,6 +562,8 @@ impl TryFrom<v1::SubtitleSpec> for SubtitleSpec {
             None | Some(v1::CaptionFormat::Unspecified) => None,
             Some(v1::CaptionFormat::Srt) => Some(CaptionFormat::Srt),
             Some(v1::CaptionFormat::Webvtt) => Some(CaptionFormat::WebVtt),
+            Some(v1::CaptionFormat::Scc) => Some(CaptionFormat::Scc),
+            Some(v1::CaptionFormat::Embedded) => Some(CaptionFormat::Embedded),
         };
         let mode = match v1::SubtitleMode::try_from(value.mode) {
             Ok(v1::SubtitleMode::Mux) => SubtitleMode::Mux,
@@ -582,6 +584,8 @@ impl From<&SubtitleSpec> for v1::SubtitleSpec {
                 .map(|format| match format {
                     CaptionFormat::Srt => v1::CaptionFormat::Srt as i32,
                     CaptionFormat::WebVtt => v1::CaptionFormat::Webvtt as i32,
+                    CaptionFormat::Scc => v1::CaptionFormat::Scc as i32,
+                    CaptionFormat::Embedded => v1::CaptionFormat::Embedded as i32,
                 })
                 .unwrap_or(v1::CaptionFormat::Unspecified as i32),
             mode: match value.mode() {

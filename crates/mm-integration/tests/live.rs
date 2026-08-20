@@ -352,3 +352,197 @@ async fn frame_rate_drift_warns_live() {
         "unexpected blocks: {verdicts:?}"
     );
 }
+
+const ADMIN_URL_DEFAULT: &str = "postgres://mm:mm@127.0.0.1:5433/mm";
+
+fn admin_url() -> String {
+    env_or("MM_DATABASE_URL", ADMIN_URL_DEFAULT)
+}
+
+async fn fresh_pool() -> (sqlx::PgPool, sqlx::PgPool, String, String) {
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url())
+        .await
+        .expect("admin connection");
+    let name = format!("mm_test_{}", uuid::Uuid::now_v7().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+        .execute(&admin)
+        .await
+        .expect("create test database");
+    let url = format!(
+        "{}/{name}",
+        admin_url()
+            .rsplit_once('/')
+            .expect("database url has a path")
+            .0
+    );
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&url)
+        .await
+        .expect("test database connection");
+    mm_jobstore::MIGRATOR
+        .run(&pool)
+        .await
+        .expect("migrations apply");
+    (admin, pool, url, name)
+}
+
+async fn drop_db(admin: &sqlx::PgPool, pool: sqlx::PgPool, name: &str) {
+    pool.close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {name} WITH (FORCE)"
+    )))
+    .execute(admin)
+    .await
+    .expect("drop test database");
+}
+
+async fn upload_object(store: &S3ObjectStore, path: &Path, key: &str) -> MediaRef {
+    let (body, length) = file_body(path);
+    let object = mm_domain::ObjectRef::new(BUCKET, key).unwrap();
+    store.put(&object, body, length).await.unwrap();
+    MediaRef::object_uri(&format!("s3://{BUCKET}/{key}")).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_job_merges_end_to_end_through_server_and_worker() {
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let first = fixture("e2e-a-6s.mp4", 6, 30, "mp4");
+    let second = fixture("e2e-b-4s.mp4", 4, 30, "mp4");
+    let inputs = vec![
+        upload_object(&store, &first, "inputs/e2e-a-6s.mp4").await,
+        upload_object(&store, &second, "inputs/e2e-b-4s.mp4").await,
+    ];
+
+    let server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-e2e").unwrap(),
+        staging,
+    );
+    worker_config.reconcile_interval = Duration::from_secs(30);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Concat(
+        mm_domain::ConcatSpec::new(inputs, None).expect("valid concat spec"),
+    ));
+    let created_at = std::time::Instant::now();
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-e2e".to_string(),
+            idempotency_key: "req-e2e".to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    assert!(created.created);
+    let job_id = created.job_id;
+
+    let mut left_pending_within = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let final_job = loop {
+        let job = client
+            .get_job(mm_proto::v1::GetJobRequest {
+                user_id: "owner-e2e".to_string(),
+                job_id: job_id.clone(),
+            })
+            .await
+            .expect("get succeeds")
+            .into_inner()
+            .job
+            .expect("job present");
+        if left_pending_within.is_none() && job.state() != mm_proto::v1::JobState::Pending {
+            left_pending_within = Some(created_at.elapsed());
+        }
+        match job.state() {
+            mm_proto::v1::JobState::Succeeded => break job,
+            mm_proto::v1::JobState::Failed | mm_proto::v1::JobState::Cancelled => {
+                panic!("job ended in {:?}", job.state());
+            }
+            _ => {}
+        }
+        assert!(std::time::Instant::now() < deadline, "job never succeeded");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    let picked_up = left_pending_within.expect("job left pending");
+    assert!(
+        picked_up < Duration::from_secs(1),
+        "pickup took {picked_up:?}"
+    );
+    assert_eq!(final_job.progress_percent, 100);
+
+    let result = mm_domain::OpResult::try_from(final_job.result.expect("result present"))
+        .expect("result decodes");
+    let mm_domain::OpResult::Concat(timed) = result else {
+        panic!("expected a concat result");
+    };
+    assert!(
+        (timed.duration_seconds() - 10.0).abs() < 0.6,
+        "duration {}",
+        timed.duration_seconds()
+    );
+    let MediaRef::Object(object) = timed.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{job_id}/output.mp4"));
+    assert!(store.head(&object).await.expect("output exists") > 0);
+
+    let output_url = resolve_media_ref(
+        store.as_ref(),
+        &MediaRef::Object(object),
+        SystemTime::now() + Duration::from_secs(300),
+        SystemTime::now(),
+    )
+    .await
+    .expect("output presigns");
+    let info = Prober::default()
+        .probe(&output_url, &probe_limits())
+        .await
+        .expect("output probes");
+    assert!(info.container.split(',').any(|token| token == "mp4"));
+    assert!((info.duration.as_secs_f64() - 10.0).abs() < 0.6);
+    assert_eq!(info.video[0].codec, "h264");
+    assert_eq!(info.audio[0].codec, "aac");
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}

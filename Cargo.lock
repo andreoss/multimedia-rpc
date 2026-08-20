@@ -1804,8 +1804,15 @@ dependencies = [
  "futures-util",
  "mm-domain",
  "mm-ffmpeg",
+ "mm-jobstore",
+ "mm-proto",
+ "mm-server",
  "mm-storage",
+ "mm-worker",
+ "sqlx",
  "tokio",
+ "tonic",
+ "uuid",
 ]
 
 [[package]]

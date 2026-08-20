@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use mm_domain::{
-    JobId, MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OutputKey, collect_body,
-    resolve_media_ref,
+    JobId, JobPrefix, MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OutputKey,
+    body_from_bytes, collect_body, resolve_media_ref,
 };
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 
@@ -165,7 +165,7 @@ async fn get_of_a_missing_object_is_not_found() {
 #[tokio::test]
 async fn bucket_lifecycle_round_trips() {
     let store = test_store().await;
-    let bucket = "mm-storage-it".to_string();
+    let bucket = "mm-storage-it-lifecycle".to_string();
     store.ensure_bucket(&bucket).await.unwrap();
     store.ensure_bucket(&bucket).await.unwrap();
     store.delete_bucket(&bucket).await.unwrap();
@@ -319,4 +319,102 @@ async fn a_presigned_put_accepts_a_client_body_without_the_service() {
         .unwrap();
     assert!(read == payload, "the object does not hold the put body");
     store.delete(&target).await.unwrap();
+}
+
+#[tokio::test]
+async fn prefix_delete_removes_only_its_own_keys() {
+    let store = test_store().await;
+    let bucket = "mm-storage-it".to_string();
+    store.ensure_bucket(&bucket).await.unwrap();
+    let mine_job = JobId::generate();
+    let theirs_job = JobId::generate();
+    let mine = JobPrefix::new(&bucket, &mine_job).unwrap();
+
+    let kept = OutputKey::new(&theirs_job, "renditions/1/playlist.m3u8")
+        .unwrap()
+        .into_object(&bucket)
+        .unwrap();
+    store
+        .put(&kept, body_from_bytes(Bytes::from_static(b"theirs")), 6)
+        .await
+        .unwrap();
+    for artifact in ["output.mp4", "init.mp4", "renditions/0/seg00000.m4s"] {
+        let target = OutputKey::new(&mine_job, artifact)
+            .unwrap()
+            .into_object(&bucket)
+            .unwrap();
+        store
+            .put(&target, body_from_bytes(Bytes::from_static(b"mine")), 4)
+            .await
+            .unwrap();
+    }
+
+    let removed = store.delete_job_prefix(&mine).await.unwrap();
+    assert_eq!(removed, 3, "the prefix delete must count what it removed");
+
+    let read = store.head(&kept).await;
+    assert!(
+        read.is_ok(),
+        "a sibling prefix must survive another one delete"
+    );
+
+    for artifact in ["output.mp4", "init.mp4", "renditions/0/seg00000.m4s"] {
+        let target = OutputKey::new(&mine_job, artifact)
+            .unwrap()
+            .into_object(&bucket)
+            .unwrap();
+        let gone = store.head(&target).await;
+        assert!(
+            matches!(gone, Err(ObjectStoreError::NotFound { .. })),
+            "{artifact} survived the prefix delete: {gone:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prefix_delete_of_a_prefix_nothing_wrote_answers_zero() {
+    let store = test_store().await;
+    let bucket = "mm-storage-it".to_string();
+    store.ensure_bucket(&bucket).await.unwrap();
+    let prefix = JobPrefix::new(&bucket, &JobId::generate()).unwrap();
+    assert_eq!(store.delete_job_prefix(&prefix).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn prefix_delete_pages_past_the_first_listing() {
+    let store = test_store().await;
+    let bucket = "mm-storage-it".to_string();
+    store.ensure_bucket(&bucket).await.unwrap();
+    let job = JobId::generate();
+    let prefix = JobPrefix::new(&bucket, &job).unwrap();
+
+    let mut written = Vec::new();
+    for index in 0..1_001u32 {
+        let artifact = format!("renditions/0/seg{index:05}.m4s");
+        written.push(
+            OutputKey::new(&job, &artifact)
+                .unwrap()
+                .into_object(&bucket)
+                .unwrap(),
+        );
+    }
+    for target in &written {
+        store
+            .put(target, body_from_bytes(Bytes::from_static(b"x")), 1)
+            .await
+            .unwrap();
+    }
+
+    let removed = store.delete_job_prefix(&prefix).await.unwrap();
+    assert_eq!(
+        removed, 1_001,
+        "a delete that stops at the first page leaves keys behind"
+    );
+    assert!(
+        matches!(
+            store.head(&written[0]).await,
+            Err(ObjectStoreError::NotFound { .. })
+        ),
+        "the first key survived a delete that claimed to remove it all"
+    );
 }

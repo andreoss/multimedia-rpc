@@ -55,6 +55,15 @@ pub trait ObjectStore: Send + Sync {
 
     async fn delete(&self, object: &ObjectRef) -> Result<(), ObjectStoreError>;
 
+    async fn delete_job_prefix(&self, prefix: &JobPrefix) -> Result<usize, ObjectStoreError> {
+        Err(ObjectStoreError::Backend {
+            message: format!(
+                "store {} does not implement the job prefix delete",
+                prefix.bucket()
+            ),
+        })
+    }
+
     async fn presign_get(
         &self,
         object: &ObjectRef,
@@ -82,6 +91,44 @@ pub enum OutputKeyError {
     ReservedSegment { segment: String },
     #[error("artifact path contains forbidden character {character:?}")]
     ForbiddenCharacter { character: char },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum JobPrefixError {
+    #[error("a job prefix needs a bucket")]
+    EmptyBucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobPrefix {
+    bucket: String,
+    prefix: String,
+}
+
+impl JobPrefix {
+    pub fn new(bucket: &str, job_id: &JobId) -> Result<Self, JobPrefixError> {
+        if bucket.is_empty() {
+            return Err(JobPrefixError::EmptyBucket);
+        }
+        Ok(Self {
+            bucket: bucket.to_string(),
+            prefix: format!("jobs/{job_id}/"),
+        })
+    }
+
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+}
+
+impl fmt::Display for JobPrefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.bucket, self.prefix)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

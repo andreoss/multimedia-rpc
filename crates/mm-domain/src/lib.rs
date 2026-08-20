@@ -36,8 +36,8 @@ pub use reference::{failure_code, verdict_code};
 pub use resolve::{ResolveError, resolve_media_ref};
 
 pub use store::{
-    ObjectBody, ObjectStore, ObjectStoreError, OutputKey, OutputKeyError, body_from_bytes,
-    collect_body,
+    JobPrefix, JobPrefixError, ObjectBody, ObjectStore, ObjectStoreError, OutputKey,
+    OutputKeyError, body_from_bytes, collect_body,
 };
 
 pub use validate::{

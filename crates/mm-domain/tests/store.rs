@@ -3,8 +3,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use mm_domain::{
-    JobId, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OutputKey, OutputKeyError,
-    body_from_bytes, collect_body,
+    JobId, JobPrefix, JobPrefixError, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError,
+    OutputKey, OutputKeyError, body_from_bytes, collect_body,
 };
 
 struct MemoryStore {
@@ -236,4 +236,44 @@ fn store_errors_describe_themselves() {
         message: "boom".to_string(),
     };
     assert_eq!(backend.to_string(), "object store backend error: boom");
+}
+
+#[test]
+fn a_job_prefix_is_scoped_to_one_job() {
+    let job = JobId::generate();
+    let prefix = JobPrefix::new("mm-bucket", &job).unwrap();
+    let key = OutputKey::new(&job, "renditions/0/seg00000.m4s").unwrap();
+    assert!(
+        key.as_str().starts_with(prefix.prefix()),
+        "{key} is not under {prefix}"
+    );
+    let other = OutputKey::new(&JobId::generate(), "output.mp4").unwrap();
+    assert!(
+        !other.as_str().starts_with(prefix.prefix()),
+        "a prefix that reaches another job delete is not a job prefix"
+    );
+}
+
+#[test]
+fn a_job_prefix_needs_a_bucket() {
+    let job = JobId::generate();
+    assert!(matches!(
+        JobPrefix::new("", &job),
+        Err(JobPrefixError::EmptyBucket)
+    ));
+}
+
+#[tokio::test]
+async fn a_store_that_has_not_implemented_the_prefix_delete_refuses_by_name() {
+    let store = MemoryStore {
+        objects: Mutex::new(HashMap::new()),
+    };
+    let prefix = JobPrefix::new("mm-bucket", &JobId::generate()).unwrap();
+    match store.delete_job_prefix(&prefix).await {
+        Err(ObjectStoreError::Backend { message }) => assert!(
+            message.contains("mm-bucket"),
+            "the refusal must name the bucket it would have swept: {message}"
+        ),
+        other => panic!("a store that cannot sweep a prefix must say so, not answer {other:?}"),
+    }
 }

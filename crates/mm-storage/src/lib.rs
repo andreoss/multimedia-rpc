@@ -12,17 +12,18 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::error::display::DisplayErrorContext;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use futures_util::stream;
 use http_body::{Body, Frame};
-use mm_domain::{ObjectBody, ObjectRef, ObjectStore, ObjectStoreError};
+use mm_domain::{JobPrefix, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError};
 use sync_wrapper::SyncWrapper;
 
 const PART_SIZE: usize = 8 * 1024 * 1024;
+const DELETE_BATCH: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub enum CredentialSource {
@@ -342,6 +343,59 @@ impl ObjectStore for S3ObjectStore {
             .await
             .map(|_| ())
             .map_err(backend)
+    }
+
+    async fn delete_job_prefix(&self, prefix: &JobPrefix) -> Result<usize, ObjectStoreError> {
+        let mut removed = 0usize;
+        loop {
+            let page = self
+                .client
+                .list_objects_v2()
+                .bucket(prefix.bucket())
+                .prefix(prefix.prefix())
+                .send()
+                .await
+                .map_err(backend)?;
+            let keys: Vec<String> = page
+                .contents()
+                .iter()
+                .filter_map(|entry| entry.key().map(str::to_string))
+                .collect();
+            if keys.is_empty() {
+                break;
+            }
+            for chunk in keys.chunks(DELETE_BATCH) {
+                let mut objects = Vec::with_capacity(chunk.len());
+                for key in chunk {
+                    objects.push(
+                        ObjectIdentifier::builder()
+                            .key(key)
+                            .build()
+                            .map_err(backend)?,
+                    );
+                }
+                let request = Delete::builder()
+                    .set_objects(Some(objects))
+                    .build()
+                    .map_err(backend)?;
+                let deleted = self
+                    .client
+                    .delete_objects()
+                    .bucket(prefix.bucket())
+                    .delete(request)
+                    .send()
+                    .await
+                    .map_err(backend)?;
+                let errors = deleted.errors();
+                if !errors.is_empty() {
+                    return Err(ObjectStoreError::Backend {
+                        message: errors[0].message().unwrap_or("delete refused").to_string(),
+                    });
+                }
+            }
+            removed += keys.len();
+        }
+        Ok(removed)
     }
 
     async fn presign_get(

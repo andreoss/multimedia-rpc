@@ -1859,6 +1859,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-magick"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mm-proto"
 version = "0.1.0"
 dependencies = [

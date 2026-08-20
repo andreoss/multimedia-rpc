@@ -4,10 +4,10 @@ use mm_domain::{
     ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputSource,
     JobFailure, JobFailureError, JobRecord, JobState, MediaRef, MediaRefError, MediaSource, NodeId,
     NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, PackageResult, PackageSpec, ParameterDeclaration, ParameterName,
-    ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl, ResizeMode, SourceError,
-    StepOutcome, StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
+    OutputProfileError, OutputRange, PackageResult, PackageSpec, ParameterDeclaration,
+    ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl, ResizeMode,
+    SourceError, StepOutcome, StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec,
+    TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -305,7 +305,7 @@ impl TryFrom<v1::OutputProfile> for OutputProfile {
     type Error = OutputProfileError;
 
     fn try_from(value: v1::OutputProfile) -> Result<Self, Self::Error> {
-        OutputProfile::from_raw(
+        let profile = OutputProfile::from_raw(
             value.frame_rate,
             value.video_max_bitrate,
             value.video_quality,
@@ -313,7 +313,18 @@ impl TryFrom<v1::OutputProfile> for OutputProfile {
             value.audio_sample_rate,
             value.width,
             value.height,
-        )
+        )?;
+        let profile = match value.poster_seconds {
+            Some(seconds) => profile.with_poster(seconds)?,
+            None => profile,
+        };
+        match value.range {
+            Some(range) => Ok(profile.with_range(OutputRange::new(
+                range.start_seconds,
+                range.duration_seconds,
+            )?)),
+            None => Ok(profile),
+        }
     }
 }
 
@@ -328,6 +339,11 @@ impl From<&OutputProfile> for v1::OutputProfile {
             audio_sample_rate: value.audio_sample_rate().unwrap_or(0),
             width,
             height,
+            poster_seconds: value.poster_seconds(),
+            range: value.range().map(|range| v1::OutputRange {
+                start_seconds: range.start_seconds(),
+                duration_seconds: range.duration_seconds(),
+            }),
         }
     }
 }
@@ -358,12 +374,15 @@ impl TryFrom<v1::OpSpec> for OpSpec {
                 trim.start_seconds,
                 trim.duration_seconds,
             )?)),
-            v1::op_spec::Op::Thumbnail(thumbnail) => Ok(OpSpec::Thumbnail(ThumbnailSpec::new(
-                required_source(thumbnail.input)?,
-                thumbnail.offsets_seconds,
-                thumbnail.width,
-                thumbnail.height,
-            )?)),
+            v1::op_spec::Op::Thumbnail(thumbnail) => Ok(OpSpec::Thumbnail(
+                ThumbnailSpec::new(
+                    required_source(thumbnail.input)?,
+                    thumbnail.offsets_seconds,
+                    thumbnail.width,
+                    thumbnail.height,
+                )?
+                .with_sprite(thumbnail.sprite_columns),
+            )),
             v1::op_spec::Op::Package(package) => Ok(OpSpec::Package(PackageSpec::new(
                 required_source(package.input)?,
                 package.segment_seconds,
@@ -406,6 +425,7 @@ impl From<&OpSpec> for v1::OpSpec {
                 offsets_seconds: thumbnail.offsets_seconds().to_vec(),
                 width: thumbnail.width(),
                 height: thumbnail.height(),
+                sprite_columns: thumbnail.sprite_columns(),
             }),
             OpSpec::Package(package) => v1::op_spec::Op::Package(v1::PackageSpec {
                 input: Some(v1::InputSource::from(package.input())),

@@ -125,6 +125,41 @@ pub struct OutputProfile {
     audio_bitrate: Option<u32>,
     audio_sample_rate: Option<u32>,
     resolution: Option<(u32, u32)>,
+    poster_seconds: Option<f64>,
+    range: Option<OutputRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputRange {
+    start_seconds: f64,
+    duration_seconds: f64,
+}
+
+impl OutputRange {
+    pub fn new(start_seconds: f64, duration_seconds: f64) -> Result<Self, OutputProfileError> {
+        if !start_seconds.is_finite() || start_seconds < 0.0 {
+            return Err(OutputProfileError::InvalidRangeStart {
+                value: start_seconds,
+            });
+        }
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(OutputProfileError::InvalidRangeDuration {
+                value: duration_seconds,
+            });
+        }
+        Ok(Self {
+            start_seconds,
+            duration_seconds,
+        })
+    }
+
+    pub fn start_seconds(&self) -> f64 {
+        self.start_seconds
+    }
+
+    pub fn duration_seconds(&self) -> f64 {
+        self.duration_seconds
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -133,6 +168,12 @@ pub enum OutputProfileError {
     InvalidFrameRate { value: f64 },
     #[error("resolution {width}x{height} sets only one dimension")]
     PartialResolution { width: u32, height: u32 },
+    #[error("poster timestamp {value} is negative or not finite")]
+    InvalidPoster { value: f64 },
+    #[error("range start {value} is negative or not finite")]
+    InvalidRangeStart { value: f64 },
+    #[error("range duration {value} is not positive and finite")]
+    InvalidRangeDuration { value: f64 },
 }
 
 fn nonzero(value: u32) -> Option<u32> {
@@ -170,7 +211,32 @@ impl OutputProfile {
             audio_bitrate: nonzero(audio_bitrate),
             audio_sample_rate: nonzero(audio_sample_rate),
             resolution,
+            poster_seconds: None,
+            range: None,
         })
+    }
+
+    pub fn with_poster(mut self, poster_seconds: f64) -> Result<Self, OutputProfileError> {
+        if !poster_seconds.is_finite() || poster_seconds < 0.0 {
+            return Err(OutputProfileError::InvalidPoster {
+                value: poster_seconds,
+            });
+        }
+        self.poster_seconds = Some(poster_seconds);
+        Ok(self)
+    }
+
+    pub fn with_range(mut self, range: OutputRange) -> Self {
+        self.range = Some(range);
+        self
+    }
+
+    pub fn poster_seconds(&self) -> Option<f64> {
+        self.poster_seconds
+    }
+
+    pub fn range(&self) -> Option<&OutputRange> {
+        self.range.as_ref()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -180,6 +246,8 @@ impl OutputProfile {
             && self.audio_bitrate.is_none()
             && self.audio_sample_rate.is_none()
             && self.resolution.is_none()
+            && self.poster_seconds.is_none()
+            && self.range.is_none()
     }
 
     pub fn frame_rate(&self) -> Option<f64> {
@@ -437,6 +505,7 @@ pub struct ThumbnailSpec {
     offsets_seconds: Vec<f64>,
     width: u32,
     height: u32,
+    sprite_columns: u32,
 }
 
 impl ThumbnailSpec {
@@ -467,7 +536,13 @@ impl ThumbnailSpec {
             offsets_seconds,
             width,
             height,
+            sprite_columns: 0,
         })
+    }
+
+    pub fn with_sprite(mut self, sprite_columns: u32) -> Self {
+        self.sprite_columns = sprite_columns;
+        self
     }
 
     pub fn input(&self) -> &InputSource {
@@ -484,6 +559,10 @@ impl ThumbnailSpec {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn sprite_columns(&self) -> u32 {
+        self.sprite_columns
     }
 }
 

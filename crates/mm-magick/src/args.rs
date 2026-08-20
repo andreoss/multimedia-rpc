@@ -33,6 +33,17 @@ fn written(format: ImageFormat, output: &str) -> String {
     format!("{}:{output}", format.coder())
 }
 
+pub fn sprite_args(inputs: &[String], columns: u32, output: &str) -> Vec<String> {
+    let mut args = vec!["montage".to_string()];
+    args.extend(inputs.iter().cloned());
+    args.push("-tile".to_string());
+    args.push(format!("{}x", columns.max(1)));
+    args.push("-geometry".to_string());
+    args.push("+0+0".to_string());
+    args.push(format!("jpg:{output}"));
+    args
+}
+
 pub fn identify_args(format: &str, input: &str) -> Vec<String> {
     ["identify", "-format", format, input]
         .into_iter()

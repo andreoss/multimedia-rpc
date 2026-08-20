@@ -212,6 +212,8 @@ fn op_spec_oneof_has_all_five_arms() {
                 audio_sample_rate: 48_000,
                 width: 1280,
                 height: 720,
+                poster_seconds: None,
+                range: None,
             }),
         }),
         v1::op_spec::Op::Trim(v1::TrimSpec {
@@ -224,6 +226,7 @@ fn op_spec_oneof_has_all_five_arms() {
             offsets_seconds: vec![0.0, 1.5],
             width: 320,
             height: 180,
+            sprite_columns: 0,
         }),
     ];
     assert_eq!(arms.len(), 5);

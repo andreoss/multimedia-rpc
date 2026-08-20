@@ -29,7 +29,7 @@ use mm_gst::{
 };
 use mm_magick::{
     ImageFormat as ToolImageFormat, ResizeMode as ToolResizeMode, ToolError as ImageToolError,
-    composite_args, convert_args, resize_args,
+    composite_args, convert_args, resize_args, sprite_args,
 };
 use mm_observability::{Component, record};
 use prost::Message;
@@ -1398,6 +1398,10 @@ async fn transcode_pipeline(
                 duration_seconds: trim.duration_seconds(),
             })
         }),
+        range: spec
+            .profile()
+            .range()
+            .map(|range| (range.start_seconds(), range.duration_seconds())),
         speed: source.and_then(|source| source.speed()),
         volume: source.and_then(|source| source.volume()),
         ..TranscodeTarget::default()
@@ -1419,8 +1423,82 @@ async fn transcode_pipeline(
         OutputShape::Transcode,
     )
     .await;
+    let outcome = match transcoded {
+        Ok(result) => {
+            if let Some(poster_seconds) = spec.profile().poster_seconds() {
+                extract_poster(
+                    ctx,
+                    job,
+                    scope,
+                    &output_path,
+                    poster_seconds,
+                    deadline_at,
+                    signal,
+                )
+                .await?;
+            }
+            Ok(result)
+        }
+        Err(error) => Err(error),
+    };
     let _ = tokio::fs::remove_file(&output_path).await;
-    transcoded
+    outcome
+}
+
+async fn extract_poster(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    scope: &Scope,
+    output_path: &Path,
+    poster_seconds: f64,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<(), Finish> {
+    let info = ctx
+        .prober
+        .probe(&output_path.to_string_lossy(), &ctx.probe_limits)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let (width, height) = info
+        .video
+        .first()
+        .map(|video| (video.width, video.height))
+        .unwrap_or((1280, 720));
+    let target = ThumbnailTarget {
+        width,
+        height,
+        format: ImageFormat::Jpeg,
+    };
+    let poster_path = ctx.staging_dir.join(format!("{}-poster.jpg", job.id));
+    let args = build_thumbnail_args(
+        &output_path.to_string_lossy(),
+        poster_seconds,
+        &target,
+        &poster_path.to_string_lossy(),
+    );
+    let limits = remaining_limits(
+        ctx,
+        Duration::from_secs(u64::from(THUMBNAIL_RUN_SECONDS)),
+        deadline_at,
+    )?;
+    check(signal)?;
+    supervise(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
+    let object = OutputKey::new(&job.id, &scoped(&scope.prefix, "poster.jpg"))
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+        .into_object(&ctx.bucket)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    upload_object(ctx, &object, &poster_path).await?;
+    let _ = tokio::fs::remove_file(&poster_path).await;
+    Ok(())
 }
 
 async fn concat_pipeline(
@@ -1528,13 +1606,62 @@ async fn thumbnail_pipeline(
         signal,
     )
     .await;
+    let sprite = if spec.sprite_columns() > 0 {
+        Some(
+            build_sprite(
+                ctx,
+                job.id,
+                &scope.prefix,
+                &staged,
+                spec.sprite_columns(),
+                signal,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     for path in &staged {
         let _ = tokio::fs::remove_file(path).await;
     }
-    let outputs = produced?;
+    let mut outputs = produced?;
+    if let Some(sprite) = sprite {
+        outputs.push(sprite?);
+    }
     let result =
         ThumbnailResult::new(outputs).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
     Ok(OpResult::Thumbnail(result))
+}
+
+async fn build_sprite(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    prefix: &str,
+    staged: &[PathBuf],
+    columns: u32,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<MediaRef, Finish> {
+    let inputs: Vec<String> = staged
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    let sprite_path = ctx.staging_dir.join(format!("{id}-sprite.jpg"));
+    let args = sprite_args(&inputs, columns, &sprite_path.to_string_lossy());
+    ctx.image_tool
+        .run(&args, &ctx.image_limits)
+        .await
+        .map_err(|error| match error {
+            ImageToolError::Failed { stderr_tail, .. } => failed(codes::IMAGE_FAILED, stderr_tail),
+            other => failed(codes::IMAGE_LAUNCH_FAILED, other),
+        })?;
+    check(signal)?;
+    let object = OutputKey::new(&id, &scoped(prefix, "sprite.jpg"))
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+        .into_object(&ctx.bucket)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    upload_object(ctx, &object, &sprite_path).await?;
+    let _ = tokio::fs::remove_file(&sprite_path).await;
+    Ok(MediaRef::Object(object))
 }
 
 fn staged_frame_bytes(count: usize, width: u32, height: u32) -> u64 {

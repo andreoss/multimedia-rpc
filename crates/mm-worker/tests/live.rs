@@ -2163,3 +2163,129 @@ async fn a_graph_failure_leaves_no_key_under_the_job_prefix() {
     );
     db.dispose().await;
 }
+
+fn frame_gray(path: &Path, at_seconds: Option<f64>) -> Vec<u8> {
+    let mut command = Command::new("ffmpeg");
+    command.arg("-v").arg("quiet").arg("-nostdin");
+    if let Some(seconds) = at_seconds {
+        command.arg("-ss").arg(format!("{seconds:.3}"));
+    }
+    let output = command
+        .arg("-i")
+        .arg(path)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-vf")
+        .arg("scale=16:16")
+        .arg("-pix_fmt")
+        .arg("gray")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-")
+        .output()
+        .expect("ffmpeg runs");
+    assert!(output.status.success(), "frame extraction failed");
+    output.stdout
+}
+
+fn frame_difference(left: &[u8], right: &[u8]) -> u32 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| u32::from(left.abs_diff(*right)))
+        .sum()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transcode_with_a_poster_lands_a_matching_second_object() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("poster-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/poster-4s.mp4").await;
+    let profile = OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360)
+        .unwrap()
+        .with_poster(1.0)
+        .unwrap();
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Transcode(
+            TranscodeSpec::new(input, profile).unwrap(),
+        )))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-poster"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Transcode(result) = record.result.expect("result recorded") else {
+        panic!("expected a transcode result");
+    };
+    let MediaRef::Object(output) = result.output().clone() else {
+        panic!("expected an object output");
+    };
+    let poster = ObjectRef::new(BUCKET, &format!("jobs/{}/poster.jpg", job.id)).unwrap();
+    assert!(store.head(&poster).await.expect("poster exists") > 0);
+
+    let dir = scratch_dir("verify");
+    let output_path = dir.join(format!("{}-poster-output.mp4", job.id));
+    let poster_path = dir.join(format!("{}-poster.jpg", job.id));
+    let output_bytes = collect_body(store.get(&output).await.expect("output fetches"))
+        .await
+        .expect("output body");
+    let poster_bytes = collect_body(store.get(&poster).await.expect("poster fetches"))
+        .await
+        .expect("poster body");
+    tokio::fs::write(&output_path, &output_bytes).await.unwrap();
+    tokio::fs::write(&poster_path, &poster_bytes).await.unwrap();
+
+    let from_poster = frame_gray(&poster_path, None);
+    let at_one = frame_difference(&from_poster, &frame_gray(&output_path, Some(1.0)));
+    let at_zero = frame_difference(&from_poster, &frame_gray(&output_path, Some(0.0)));
+    assert!(
+        at_one < at_zero,
+        "the poster is not the frame at 1.0s: 1.0 differs by {at_one}, 0.0 by {at_zero}"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thumbnail_sprite_tiles_the_requested_offsets() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("sprite-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/sprite-4s.mp4").await;
+    let spec = OpSpec::Thumbnail(
+        ThumbnailSpec::new(input, vec![0.0, 1.0, 2.0, 3.0], 160, 90)
+            .unwrap()
+            .with_sprite(2),
+    );
+    let repository = db.repository();
+    let job = repository.create(single_input_job(spec)).await.unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-sprite"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Thumbnail(result) = record.result.expect("result recorded") else {
+        panic!("expected a thumbnail result");
+    };
+    assert_eq!(result.outputs().len(), 5, "four frames and one sprite");
+    let MediaRef::Object(sprite) = result.outputs()[4].clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(sprite.key(), format!("jobs/{}/sprite.jpg", job.id));
+    let bytes = collect_body(store.get(&sprite).await.expect("sprite fetches"))
+        .await
+        .expect("sprite body");
+    let local = scratch_dir("verify").join(format!("{}-sprite.jpg", job.id));
+    tokio::fs::write(&local, &bytes).await.unwrap();
+    let info = mm_ffmpeg::Prober::default()
+        .probe(&local.to_string_lossy(), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(info.video[0].width, 320);
+    assert_eq!(info.video[0].height, 180);
+    db.dispose().await;
+}

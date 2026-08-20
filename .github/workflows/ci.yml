@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mm
+          POSTGRES_PASSWORD: mm
+          POSTGRES_DB: mm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mm -d mm"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://mm:mm@localhost:5432/mm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Query cache
+        run: |
+          cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres
+          sqlx migrate run --source crates/mm-jobstore/migrations
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: "1.72.0"
+      - run: buf lint
+
+  proto-breaking:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: "1.72.0"
+      - run: git fetch --no-tags origin "${{ github.base_ref }}"
+      - run: buf breaking --against ".git#branch=origin/${{ github.base_ref }}"
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mm
+          POSTGRES_PASSWORD: mm
+          POSTGRES_DB: mm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mm -d mm"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://mm:mm@localhost:5432/mm
+      MM_DATABASE_URL: postgres://mm:mm@localhost:5432/mm
+      MM_OBJECTSTORE_ENDPOINT: http://127.0.0.1:8333
+      MM_OBJECTSTORE_REGION: us-east-1
+      MM_OBJECTSTORE_ACCESS_KEY: mm-test-access
+      MM_OBJECTSTORE_SECRET_KEY: mm-test-secret
+      MM_QUEUE_ENDPOINT: http://127.0.0.1:9324
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          protobuf-compiler ffmpeg imagemagick
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libglib2.0-dev
+          gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-tools
+          nodejs
+      - name: Backends
+        run: |
+          docker run -d --name queue -p 9324:9324 softwaremill/elasticmq-native:latest
+          mkdir -p /tmp/objectstore
+          printf '%s' '{"identities":[{"name":"mm","credentials":[{"accessKey":"mm-test-access","secretKey":"mm-test-secret"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > /tmp/objectstore/s3.json
+          docker run -d --name objectstore -p 8333:8333 -p 9333:9333 \
+            -v /tmp/objectstore/s3.json:/etc/objectstore/s3.json:ro \
+            chrislusf/seaweedfs:latest \
+            server -s3 -s3.config=/etc/objectstore/s3.json -dir=/data
+      - name: Wait for backends
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf "http://127.0.0.1:9324/?Action=ListQueues" >/dev/null && break
+            sleep 2
+          done
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9333/cluster/healthz >/dev/null && break
+            sleep 2
+          done
+      - name: Query cache
+        run: |
+          cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres
+          sqlx migrate run --source crates/mm-jobstore/migrations
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+      - name: Auth conformance
+        run: sh scripts/auth-conformance.sh
+
+  coverage:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mm
+          POSTGRES_PASSWORD: mm
+          POSTGRES_DB: mm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mm -d mm"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://mm:mm@localhost:5432/mm
+      MM_DATABASE_URL: postgres://mm:mm@localhost:5432/mm
+      MM_OBJECTSTORE_ENDPOINT: http://127.0.0.1:8333
+      MM_OBJECTSTORE_REGION: us-east-1
+      MM_OBJECTSTORE_ACCESS_KEY: mm-test-access
+      MM_OBJECTSTORE_SECRET_KEY: mm-test-secret
+      MM_QUEUE_ENDPOINT: http://127.0.0.1:9324
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Toolchain
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          protobuf-compiler ffmpeg imagemagick
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libglib2.0-dev
+          gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-tools
+          nodejs
+      - name: Backends
+        run: |
+          docker run -d --name queue -p 9324:9324 softwaremill/elasticmq-native:latest
+          mkdir -p /tmp/objectstore
+          printf '%s' '{"identities":[{"name":"mm","credentials":[{"accessKey":"mm-test-access","secretKey":"mm-test-secret"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > /tmp/objectstore/s3.json
+          docker run -d --name objectstore -p 8333:8333 -p 9333:9333 \
+            -v /tmp/objectstore/s3.json:/etc/objectstore/s3.json:ro \
+            chrislusf/seaweedfs:latest \
+            server -s3 -s3.config=/etc/objectstore/s3.json -dir=/data
+      - name: Wait for backends
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf "http://127.0.0.1:9324/?Action=ListQueues" >/dev/null && break
+            sleep 2
+          done
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9333/cluster/healthz >/dev/null && break
+            sleep 2
+          done
+      - name: Query cache
+        run: |
+          cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres
+          sqlx migrate run --source crates/mm-jobstore/migrations
+      - name: Coverage
+        run: |
+          cargo install cargo-llvm-cov --locked
+          cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 85

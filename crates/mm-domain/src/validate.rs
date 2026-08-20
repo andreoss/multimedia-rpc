@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::op::OpKind;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputReport {
     pub container: String,
@@ -208,9 +210,34 @@ fn check_drift(inputs: &[InputReport], verdicts: &mut Vec<Verdict>) {
     }
 }
 
-pub fn validate_concat_inputs(inputs: &[InputReport]) -> Vec<Verdict> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputPolicy {
+    pub min_inputs: usize,
+    pub cross_input_checks: bool,
+}
+
+impl OpKind {
+    pub fn input_policy(self) -> Option<InputPolicy> {
+        match self {
+            OpKind::Concat => Some(InputPolicy {
+                min_inputs: MIN_CONCAT_INPUTS,
+                cross_input_checks: true,
+            }),
+            OpKind::Transcode | OpKind::Trim | OpKind::Thumbnail => Some(InputPolicy {
+                min_inputs: 1,
+                cross_input_checks: false,
+            }),
+            OpKind::Probe => None,
+        }
+    }
+}
+
+pub fn validate_inputs(kind: OpKind, inputs: &[InputReport]) -> Vec<Verdict> {
+    let Some(policy) = kind.input_policy() else {
+        return Vec::new();
+    };
     let mut verdicts = Vec::new();
-    if inputs.len() < MIN_CONCAT_INPUTS {
+    if inputs.len() < policy.min_inputs {
         verdicts.push(block(None, BlockCode::TooFewInputs));
     }
     let total: Duration = inputs.iter().map(|report| report.duration).sum();
@@ -220,8 +247,14 @@ pub fn validate_concat_inputs(inputs: &[InputReport]) -> Vec<Verdict> {
     for (index, report) in inputs.iter().enumerate() {
         check_one(index, report, &mut verdicts);
     }
-    check_drift(inputs, &mut verdicts);
+    if policy.cross_input_checks {
+        check_drift(inputs, &mut verdicts);
+    }
     verdicts
+}
+
+pub fn validate_concat_inputs(inputs: &[InputReport]) -> Vec<Verdict> {
+    validate_inputs(OpKind::Concat, inputs)
 }
 
 pub fn render_verdicts(verdicts: &[Verdict]) -> String {

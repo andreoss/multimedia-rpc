@@ -1,7 +1,7 @@
 use mm_domain::{
-    ConcatSpec, MediaRef, MediaRefError, OpResultError, OpSpecError, OutputProfile,
+    ConcatSpec, MediaRef, MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile,
     OutputProfileError, ProbeResult, ProbeSpec, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeSpec, TrimSpec,
+    TranscodeSpec, TrimSpec, UnsupportedOp,
 };
 
 fn object() -> MediaRef {
@@ -234,6 +234,62 @@ fn thumbnail_accepts_valid_specs() {
     assert_eq!(spec.offsets_seconds(), &[0.0, 1.5]);
     assert_eq!(spec.width(), 320);
     assert_eq!(spec.height(), 180);
+}
+
+fn specs() -> Vec<(OpSpec, OpKind)> {
+    vec![
+        (
+            OpSpec::Concat(ConcatSpec::new(vec![object(), http()], None).unwrap()),
+            OpKind::Concat,
+        ),
+        (OpSpec::Probe(ProbeSpec::new(object())), OpKind::Probe),
+        (
+            OpSpec::Transcode(TranscodeSpec::new(object(), profile()).unwrap()),
+            OpKind::Transcode,
+        ),
+        (
+            OpSpec::Trim(TrimSpec::new(object(), 0.0, 2.0).unwrap()),
+            OpKind::Trim,
+        ),
+        (
+            OpSpec::Thumbnail(ThumbnailSpec::new(object(), vec![1.0], 320, 180).unwrap()),
+            OpKind::Thumbnail,
+        ),
+    ]
+}
+
+#[test]
+fn every_spec_names_its_kind() {
+    for (spec, kind) in specs() {
+        assert_eq!(spec.kind(), kind);
+    }
+}
+
+#[test]
+fn executable_kinds_pass_the_support_gate() {
+    for kind in [OpKind::Concat, OpKind::Probe, OpKind::Transcode] {
+        assert!(kind.ensure_executable().is_ok());
+    }
+}
+
+#[test]
+fn trim_and_thumbnail_answer_a_typed_unsupported_error() {
+    assert_eq!(
+        OpKind::Trim.ensure_executable().unwrap_err(),
+        UnsupportedOp { kind: OpKind::Trim }
+    );
+    let error = OpKind::Thumbnail.ensure_executable().unwrap_err();
+    assert_eq!(
+        error,
+        UnsupportedOp {
+            kind: OpKind::Thumbnail
+        }
+    );
+    assert_eq!(error.to_string(), "thumbnail is not supported yet");
+    assert_eq!(
+        OpKind::Trim.ensure_executable().unwrap_err().to_string(),
+        "trim is not supported yet"
+    );
 }
 
 #[test]

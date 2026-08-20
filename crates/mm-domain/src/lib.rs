@@ -18,9 +18,10 @@ pub use jobs::{
     ProgressPercent,
 };
 pub use op::{
-    ConcatSpec, HttpRef, MediaRef, MediaRefError, ObjectRef, OpResult, OpResultError, OpSpec,
-    OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ThumbnailResult,
-    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    ConcatSpec, HttpRef, MediaRef, MediaRefError, ObjectRef, OpKind, OpResult, OpResultError,
+    OpSpec, OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    UnsupportedOp,
 };
 pub use resolve::{ResolveError, resolve_media_ref};
 
@@ -30,8 +31,8 @@ pub use store::{
 };
 
 pub use validate::{
-    AudioReport, BlockCode, InputReport, Verdict, VerdictCode, VideoReport, WarnCode,
-    parse_rendered_verdicts, render_verdicts, validate_concat_inputs,
+    AudioReport, BlockCode, InputPolicy, InputReport, Verdict, VerdictCode, VideoReport, WarnCode,
+    parse_rendered_verdicts, render_verdicts, validate_concat_inputs, validate_inputs,
 };
 
 pub use state::{

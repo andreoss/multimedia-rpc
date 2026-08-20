@@ -414,6 +414,55 @@ pub enum OpSpec {
     Thumbnail(ThumbnailSpec),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpKind {
+    Concat,
+    Probe,
+    Transcode,
+    Trim,
+    Thumbnail,
+}
+
+impl std::fmt::Display for OpKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            OpKind::Concat => "concat",
+            OpKind::Probe => "probe",
+            OpKind::Transcode => "transcode",
+            OpKind::Trim => "trim",
+            OpKind::Thumbnail => "thumbnail",
+        };
+        formatter.write_str(name)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("{kind} is not supported yet")]
+pub struct UnsupportedOp {
+    pub kind: OpKind,
+}
+
+impl OpKind {
+    pub fn ensure_executable(self) -> Result<(), UnsupportedOp> {
+        match self {
+            OpKind::Concat | OpKind::Probe | OpKind::Transcode => Ok(()),
+            OpKind::Trim | OpKind::Thumbnail => Err(UnsupportedOp { kind: self }),
+        }
+    }
+}
+
+impl OpSpec {
+    pub fn kind(&self) -> OpKind {
+        match self {
+            OpSpec::Concat(_) => OpKind::Concat,
+            OpSpec::Probe(_) => OpKind::Probe,
+            OpSpec::Transcode(_) => OpKind::Transcode,
+            OpSpec::Trim(_) => OpKind::Trim,
+            OpSpec::Thumbnail(_) => OpKind::Thumbnail,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum OpResultError {
     #[error("op result is missing")]

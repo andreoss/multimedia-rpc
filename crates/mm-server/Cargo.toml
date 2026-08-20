@@ -1,0 +1,7 @@
+[package]
+name = "mm-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]

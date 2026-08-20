@@ -18,10 +18,10 @@ pub use jobs::{
     ProgressPercent,
 };
 pub use op::{
-    ConcatSpec, HttpRef, MediaRef, MediaRefError, ObjectRef, OpKind, OpResult, OpResultError,
-    OpSpec, OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
-    UnsupportedOp,
+    ConcatSpec, HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError,
+    ObjectRef, OpKind, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
+    OutputProfileError, ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec,
+    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, UnsupportedOp,
 };
 pub use resolve::{ResolveError, resolve_media_ref};
 

@@ -31,6 +31,35 @@ message ThumbnailSpec {
   uint32 height = 4;
 }
 
+enum ImageOp {
+  IMAGE_OP_UNSPECIFIED = 0;
+  IMAGE_OP_RESIZE = 1;
+  IMAGE_OP_CONVERT = 2;
+  IMAGE_OP_COMPOSITE = 3;
+}
+
+enum ImageFormat {
+  IMAGE_FORMAT_UNSPECIFIED = 0;
+  IMAGE_FORMAT_JPEG = 1;
+  IMAGE_FORMAT_PNG = 2;
+}
+
+enum ResizeMode {
+  RESIZE_MODE_UNSPECIFIED = 0;
+  RESIZE_MODE_FIT = 1;
+  RESIZE_MODE_EXACT = 2;
+  RESIZE_MODE_FILL = 3;
+}
+
+message ImageSpec {
+  repeated MediaRef inputs = 1;
+  ImageOp op = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  ResizeMode resize_mode = 5;
+  ImageFormat format = 6;
+}
+
 message OpSpec {
   oneof op {
     ConcatSpec concat = 1;
@@ -38,6 +67,7 @@ message OpSpec {
     TranscodeSpec transcode = 3;
     TrimSpec trim = 4;
     ThumbnailSpec thumbnail = 5;
+    ImageSpec image = 6;
   }
 }
 
@@ -66,6 +96,10 @@ message ThumbnailResult {
   repeated MediaRef outputs = 1;
 }
 
+message ImageResult {
+  repeated MediaRef outputs = 1;
+}
+
 message OpResult {
   oneof op {
     ConcatResult concat = 1;
@@ -73,5 +107,6 @@ message OpResult {
     TranscodeResult transcode = 3;
     TrimResult trim = 4;
     ThumbnailResult thumbnail = 5;
+    ImageResult image = 6;
   }
 }

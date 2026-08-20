@@ -1,7 +1,7 @@
 use mm_domain::{
-    ConcatSpec, MediaRef, MediaRefError, OpResult, OpResultError, OpSpec, OpSpecError,
-    OutputProfile, ProbeResult, ProbeSpec, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimSpec,
+    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, MediaRef, MediaRefError, OpResult,
+    OpResultError, OpSpec, OpSpecError, OutputProfile, ProbeResult, ProbeSpec, ResizeMode,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
 };
 use mm_proto::v1;
 use proptest::prelude::*;
@@ -324,4 +324,82 @@ fn empty_thumbnail_result_outputs_are_rejected() {
         OpResult::try_from(proto).unwrap_err(),
         OpResultError::EmptyOutputs
     );
+}
+
+fn image_spec(op: ImageOp, format: Option<ImageFormat>, inputs: usize) -> OpSpec {
+    let refs: Vec<MediaRef> = (0..inputs)
+        .map(|index| MediaRef::object_uri(&format!("s3://media/in/{index}.png")).unwrap())
+        .collect();
+    OpSpec::Image(ImageSpec::new(refs, op, 320, 180, ResizeMode::Exact, format).unwrap())
+}
+
+#[test]
+fn an_image_spec_round_trips_through_the_contract() {
+    for spec in [
+        image_spec(ImageOp::Resize, None, 1),
+        image_spec(ImageOp::Convert, Some(ImageFormat::Jpeg), 1),
+        image_spec(ImageOp::Composite, None, 2),
+    ] {
+        let wire = v1::OpSpec::from(&spec);
+        assert_eq!(OpSpec::try_from(wire).unwrap(), spec);
+    }
+}
+
+#[test]
+fn an_image_result_round_trips_through_the_contract() {
+    let outputs = vec![
+        MediaRef::object_uri("s3://media/out/a.png").unwrap(),
+        MediaRef::object_uri("s3://media/out/b.jpg").unwrap(),
+    ];
+    let result = OpResult::Image(ImageResult::new(outputs.clone()).unwrap());
+
+    let wire = v1::OpResult::from(&result);
+
+    assert_eq!(OpResult::try_from(wire).unwrap(), result);
+}
+
+#[test]
+fn an_image_spec_without_its_operation_is_rejected() {
+    let wire = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Image(v1::ImageSpec {
+            inputs: vec![],
+            op: v1::ImageOp::Unspecified as i32,
+            width: 0,
+            height: 0,
+            resize_mode: v1::ResizeMode::Unspecified as i32,
+            format: v1::ImageFormat::Unspecified as i32,
+        })),
+    };
+
+    assert!(matches!(
+        OpSpec::try_from(wire),
+        Err(OpSpecError::MissingOp)
+    ));
+}
+
+#[test]
+fn a_declared_image_format_round_trips_for_every_image_op() {
+    let refs: Vec<MediaRef> = (0..2)
+        .map(|index| MediaRef::object_uri(&format!("s3://media/in/{index}.png")).unwrap())
+        .collect();
+    let composite = OpSpec::Image(
+        ImageSpec::new(
+            refs,
+            ImageOp::Composite,
+            0,
+            0,
+            ResizeMode::Fit,
+            Some(ImageFormat::Jpeg),
+        )
+        .unwrap(),
+    );
+
+    let wire = v1::OpSpec::from(&composite);
+    let decoded = OpSpec::try_from(wire).unwrap();
+    let OpSpec::Image(image) = decoded else {
+        panic!("expected an image spec");
+    };
+
+    assert_eq!(image.declared_format(), Some(ImageFormat::Jpeg));
+    assert_eq!(image.format(), ImageFormat::Jpeg);
 }

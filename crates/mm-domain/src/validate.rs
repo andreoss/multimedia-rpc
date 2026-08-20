@@ -238,6 +238,10 @@ pub struct InputPolicy {
 }
 
 const VIDEO_KINDS: &[MediaKind] = &[MediaKind::Video];
+const IMAGE_KINDS: &[MediaKind] = &[MediaKind::Image];
+const SUPPORTED_IMAGE_CONTAINERS: [&str; 5] =
+    ["image2", "image_pipe", "png_pipe", "jpeg_pipe", "webp_pipe"];
+const SUPPORTED_IMAGE_CODECS: [&str; 3] = ["png", "mjpeg", "webp"];
 
 impl OpKind {
     pub fn input_policy(self) -> Option<InputPolicy> {
@@ -257,6 +261,22 @@ impl OpKind {
                 containers: &SUPPORTED_CONTAINERS,
                 video_codecs: &SUPPORTED_VIDEO_CODECS,
                 audio_codecs: &SUPPORTED_AUDIO_CODECS,
+            }),
+            OpKind::Resize | OpKind::Convert => Some(InputPolicy {
+                min_inputs: 1,
+                cross_input_checks: false,
+                kinds: IMAGE_KINDS,
+                containers: &SUPPORTED_IMAGE_CONTAINERS,
+                video_codecs: &SUPPORTED_IMAGE_CODECS,
+                audio_codecs: &[],
+            }),
+            OpKind::Composite => Some(InputPolicy {
+                min_inputs: 2,
+                cross_input_checks: false,
+                kinds: IMAGE_KINDS,
+                containers: &SUPPORTED_IMAGE_CONTAINERS,
+                video_codecs: &SUPPORTED_IMAGE_CODECS,
+                audio_codecs: &[],
             }),
             OpKind::Probe => None,
         }

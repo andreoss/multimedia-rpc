@@ -1,7 +1,9 @@
+use std::time::Duration;
+
 use mm_domain::{
     AudioReport, InputReport, MediaKind, OutputProfile, Verdict, VerdictCode, VideoReport,
 };
-use mm_ffmpeg::{MediaInfo, TargetProfile};
+use mm_ffmpeg::{MediaInfo, StillInfo, TargetProfile};
 
 pub fn input_report(info: &MediaInfo) -> InputReport {
     InputReport {
@@ -82,3 +84,28 @@ pub fn warnings(verdicts: &[Verdict]) -> Vec<Verdict> {
 }
 
 pub use mm_domain::render_verdicts;
+
+pub fn still_report(still: &StillInfo) -> InputReport {
+    let kind = match mm_ffmpeg::media_kind(&still.container) {
+        mm_ffmpeg::MediaKind::Video => MediaKind::Video,
+        mm_ffmpeg::MediaKind::Image => MediaKind::Image,
+    };
+    InputReport {
+        container: still.container.clone(),
+        duration: Duration::ZERO,
+        size_bytes: still.size_bytes,
+        drm: false,
+        kind,
+        video: vec![VideoReport {
+            codec: still.codec.clone(),
+            width: still.width,
+            height: still.height,
+            avg_fps: None,
+            real_fps: None,
+            rotation: 0,
+            sample_aspect_ratio: None,
+            interlaced: false,
+        }],
+        audio: Vec::new(),
+    }
+}

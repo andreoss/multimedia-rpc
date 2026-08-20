@@ -573,3 +573,35 @@ fn a_video_input_still_passes_a_video_op() {
 
     assert!(blocks(&verdicts).is_empty(), "{verdicts:?}");
 }
+
+#[test]
+fn an_image_input_passes_an_op_that_declares_images() {
+    let verdicts = validate_inputs(OpKind::Resize, &[image_input()]);
+
+    assert!(blocks(&verdicts).is_empty(), "{verdicts:?}");
+}
+
+#[test]
+fn a_video_input_blocks_an_op_that_declares_images() {
+    let verdicts = validate_inputs(OpKind::Resize, &[input()]);
+
+    assert_eq!(
+        blocks(&verdicts),
+        vec![(Some(0), BlockCode::MediaKindMismatch)]
+    );
+}
+
+#[test]
+fn a_composite_needs_two_inputs_and_both_must_be_images() {
+    let one = validate_inputs(OpKind::Composite, &[image_input()]);
+    assert_eq!(blocks(&one), vec![(None, BlockCode::TooFewInputs)]);
+
+    let both = validate_inputs(OpKind::Composite, &[image_input(), image_input()]);
+    assert!(blocks(&both).is_empty(), "{both:?}");
+
+    let mixed = validate_inputs(OpKind::Composite, &[image_input(), input()]);
+    assert_eq!(
+        blocks(&mixed),
+        vec![(Some(1), BlockCode::MediaKindMismatch)]
+    );
+}

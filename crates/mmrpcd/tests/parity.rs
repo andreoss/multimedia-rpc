@@ -30,6 +30,7 @@ const BUCKET: &str = "mm-parity";
 const STACK_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const STACK_READY_POLL: Duration = Duration::from_millis(250);
 const STACK_READY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn env_or(name: &str, fallback: &str) -> String {
     env::var(name).unwrap_or_else(|_| fallback.to_string())
@@ -236,12 +237,31 @@ async fn upload_input(store: &S3ObjectStore, path: &Path, key: &str) -> String {
 
 struct Daemon {
     child: Child,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    drained: Option<std::thread::JoinHandle<Vec<u8>>>,
+}
+
+impl Daemon {
+    fn stderr_tail(&self) -> String {
+        String::from_utf8_lossy(&self.stderr.lock().expect("stderr lock"))
+            .lines()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(drained) = self.drained.take() {
+            let _ = drained.join();
+        }
     }
 }
 
@@ -276,23 +296,37 @@ fn spawn_daemon(database_url: &str, worker_id: &str, extra: &[(&str, &str)]) -> 
         .env("MM_WORKER_PROGRESS_SECS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     for (name, value) in extra {
         command.env(name, value);
     }
-    let child = command.spawn().expect("daemon spawns");
-    Daemon { child }
+    let mut child = command.spawn().expect("daemon spawns");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&captured);
+    let drained = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut buffer = Vec::new();
+        let _ = std::io::copy(&mut reader, &mut buffer);
+        sink.lock().expect("stderr lock").extend_from_slice(&buffer);
+        buffer
+    });
+    Daemon {
+        child,
+        stderr: captured,
+        drained: Some(drained),
+    }
 }
 
 async fn announced_address(daemon: &mut Daemon) -> SocketAddr {
     let stdout = daemon.child.stdout.take().expect("stdout is piped");
     tokio::time::timeout(
-        Duration::from_secs(30),
+        DAEMON_ANNOUNCE_TIMEOUT,
         tokio::task::spawn_blocking(move || {
             let mut reader = BufReader::new(stdout);
             loop {
                 let mut line = String::new();
-                let count = reader.read_line(&mut line).expect("announce line readable");
+                let count = reader.read_line(&mut line).unwrap_or_default();
                 assert!(count > 0, "daemon exited before announcing");
                 if let Some(address) = line.trim().strip_prefix("listening ") {
                     return address.parse().expect("announced address parses");
@@ -301,7 +335,13 @@ async fn announced_address(daemon: &mut Daemon) -> SocketAddr {
         }),
     )
     .await
-    .expect("daemon announces in time")
+    .unwrap_or_else(|_| {
+        panic!(
+            "the daemon announced nothing within {DAEMON_ANNOUNCE_TIMEOUT:?}; \
+             its last output was: {}",
+            daemon.stderr_tail()
+        )
+    })
     .expect("announce reader finishes")
 }
 

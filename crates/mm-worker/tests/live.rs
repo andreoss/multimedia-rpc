@@ -2001,6 +2001,14 @@ async fn a_package_job_lands_a_playlist_and_its_segments() {
     assert!(playlist_text.contains("#EXTINF:1.000,"));
     assert!(playlist_text.trim_end().ends_with("#EXT-X-ENDLIST"));
 
+    let named_init = result
+        .init_segment()
+        .expect("a packaged result names the init segment its playlist points at");
+    let MediaRef::Object(named_init) = named_init else {
+        panic!("expected an object init segment");
+    };
+    assert_eq!(named_init.key(), format!("jobs/{}/init.mp4", job.id));
+
     let init = ObjectRef::new(BUCKET, &format!("jobs/{}/init.mp4", job.id)).unwrap();
     assert!(store.head(&init).await.expect("init exists") > 0);
     for (index, segment) in result.segments().iter().enumerate() {
@@ -2685,6 +2693,24 @@ async fn a_registered_packer_answers_a_ladder_end_to_end() {
         assert!(
             rendition.playlist().is_some(),
             "rung {index} has no playlist"
+        );
+        let named_init = rendition
+            .init_segment()
+            .unwrap_or_else(|| panic!("rung {index} names no init segment, so nothing removes it"));
+        let MediaRef::Object(named_init) = named_init else {
+            panic!("expected an object init segment");
+        };
+        assert_eq!(
+            named_init.key(),
+            format!("jobs/{}/renditions/{index}/init.mp4", job.id)
+        );
+        assert!(
+            store
+                .head(&ObjectRef::new(BUCKET, named_init.key()).unwrap())
+                .await
+                .expect("the rung init exists")
+                > 0,
+            "rung {index} names an init segment that was never written"
         );
         assert_eq!(rendition.segments().len(), 1);
         let MediaRef::Object(playlist) = rendition.playlist().expect("playlist") else {

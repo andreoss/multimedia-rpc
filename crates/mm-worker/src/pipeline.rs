@@ -989,8 +989,12 @@ async fn upload_set(
         landed.record(key.clone());
         segments.push(MediaRef::Object(key));
     }
-    let result = PackageResult::new(MediaRef::Object(playlist), segments)
-        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let result = PackageResult::new(
+        MediaRef::Object(playlist),
+        segments,
+        Some(MediaRef::Object(init)),
+    )
+    .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
     Ok(OpResult::Package(result))
 }
 
@@ -1525,7 +1529,7 @@ async fn pack_rung(
     segment_seconds: f64,
     packer: &dyn RungPacker,
     landed: &mut Landed,
-) -> Result<(ObjectRef, Vec<ObjectRef>), Finish> {
+) -> Result<(ObjectRef, Vec<ObjectRef>, ObjectRef), Finish> {
     let staging = ctx
         .staging_dir
         .join(job.to_string())
@@ -1563,7 +1567,7 @@ async fn pack_rung(
     {
         let _ = tokio::fs::remove_file(path).await;
     }
-    Ok((playlist, segments))
+    Ok((playlist, segments, init))
 }
 
 async fn ladder_pipeline(
@@ -1814,10 +1818,11 @@ async fn encode_one_rung(
         }
         None => None,
     };
-    let (playlist, segments): (Option<ObjectRef>, Vec<ObjectRef>) = match packed {
-        Some((playlist, segments)) => (Some(playlist), segments),
-        None => (None, Vec::new()),
-    };
+    let (playlist, segments, init): (Option<ObjectRef>, Vec<ObjectRef>, Option<ObjectRef>) =
+        match packed {
+            Some((playlist, segments, init)) => (Some(playlist), segments, Some(init)),
+            None => (None, Vec::new(), None),
+        };
     let rendition = RenditionResult::new(
         profile,
         MediaRef::Object(media),
@@ -1827,6 +1832,10 @@ async fn encode_one_rung(
     )
     .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
     .with_measurement(width, height, rendition_bandwidth(&profile, &measured));
+    let rendition = match init {
+        Some(init) => rendition.with_init_segment(MediaRef::Object(init)),
+        None => rendition,
+    };
     Ok((index, rendition))
 }
 

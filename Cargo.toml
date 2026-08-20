@@ -15,6 +15,7 @@ members = [
     "crates/mm-server",
     "crates/mm-worker",
     "crates/mmrpcd",
+    "crates/mm-commands",
     "xtask",
 ]
 

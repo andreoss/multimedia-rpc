@@ -1993,3 +1993,67 @@ async fn p16_reference_facade_answers_the_reference_job_shape() {
     drop(daemon);
     db.dispose().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_prints_the_registry_and_submit_sends_one_line_jobs() {
+    let _slot = mm_testkit::stack_slot();
+    let commands = Command::new(env!("CARGO_BIN_EXE_mmrpcd"))
+        .arg("commands")
+        .output()
+        .expect("commands runs");
+    assert!(
+        commands.status.success(),
+        "{}",
+        String::from_utf8_lossy(&commands.stderr)
+    );
+    let lines: Vec<String> = String::from_utf8_lossy(&commands.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines.len(), 17, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("transcode spec:base64:required enabled"))
+    );
+
+    let db = fresh_db().await;
+    let mut daemon = spawn_daemon(&db.url, "parity-submit", &[]);
+    let address = announced_address(&mut daemon).await;
+    let mut client = unary_client(address).await;
+    let spec = probe_spec(&format!("s3://{BUCKET}/inputs/submit-missing.mp4"));
+    let line = format!(
+        "probe spec={}",
+        BASE64_STANDARD.encode(spec.encode_to_vec())
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mmrpcd"))
+        .arg("submit")
+        .env("MM_RPC_ADDR", format!("http://{address}"))
+        .env("MM_SUBMIT_OWNER", "owner-submit")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("submit spawns");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin is piped")
+            .write_all(format!("{line}\n").as_bytes())
+            .expect("line writes");
+    }
+    let output = child.wait_with_output().expect("submit waits");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let job_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(!job_id.is_empty(), "submit printed no job id");
+    let job = get_job(&mut client, "owner-submit", &job_id).await;
+    assert_eq!(job.job_id, job_id);
+    drop(daemon);
+    db.dispose().await;
+}

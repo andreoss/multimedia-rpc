@@ -1967,6 +1967,28 @@ pub enum OpKind {
     Title,
 }
 
+impl OpKind {
+    pub const ALL: [OpKind; 17] = [
+        OpKind::Concat,
+        OpKind::Probe,
+        OpKind::Transcode,
+        OpKind::Trim,
+        OpKind::Thumbnail,
+        OpKind::Resize,
+        OpKind::Convert,
+        OpKind::Composite,
+        OpKind::Package,
+        OpKind::Batch,
+        OpKind::Graph,
+        OpKind::Ladder,
+        OpKind::Loudness,
+        OpKind::Subtitle,
+        OpKind::Grade,
+        OpKind::Audio,
+        OpKind::Title,
+    ];
+}
+
 impl std::fmt::Display for OpKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {

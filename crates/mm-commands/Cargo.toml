@@ -1,0 +1,12 @@
+[package]
+name = "mm-commands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mm-domain = { path = "../mm-domain" }
+mm-proto = { path = "../mm-proto" }
+base64.workspace = true
+prost.workspace = true
+thiserror.workspace = true

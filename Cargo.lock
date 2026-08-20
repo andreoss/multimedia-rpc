@@ -1925,6 +1925,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-commands"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "mm-domain",
+ "mm-proto",
+ "prost",
+ "thiserror",
+]
+
+[[package]]
 name = "mm-domain"
 version = "0.1.0"
 dependencies = [
@@ -2120,6 +2131,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "mm-auth",
+ "mm-commands",
  "mm-domain",
  "mm-ffmpeg",
  "mm-jobstore",

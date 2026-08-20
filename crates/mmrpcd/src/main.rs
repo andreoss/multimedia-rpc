@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -7,11 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mm_auth::Settings;
+use mm_commands::parse_line;
 use mm_domain::{JobRepository, JobStoreError, WorkerId};
 use mm_ffmpeg::Prober;
 use mm_jobstore::{PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository};
 use mm_observability::{Component, record};
 use mm_observability::{Metrics, Registry, Scrape};
+use mm_proto::v1::media_job_service_client::MediaJobServiceClient;
 use mm_server::{Auth, ServerConfig};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings, SqsCallbackPublisher, SqsSettings};
 use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, WorkerHandle};
@@ -23,6 +26,8 @@ enum Role {
     Server,
     Worker,
     Combined,
+    Commands,
+    Submit,
 }
 
 fn parse_role(args: &[String]) -> Result<Role, String> {
@@ -30,7 +35,11 @@ fn parse_role(args: &[String]) -> Result<Role, String> {
         [role] if role == "server" => Ok(Role::Server),
         [role] if role == "worker" => Ok(Role::Worker),
         [role] if role == "combined" => Ok(Role::Combined),
-        _ => Err(String::from("usage: mmrpcd <server|worker|combined>")),
+        [role] if role == "commands" => Ok(Role::Commands),
+        [role] if role == "submit" => Ok(Role::Submit),
+        _ => Err(String::from(
+            "usage: mmrpcd <server|worker|combined|commands|submit>",
+        )),
     }
 }
 
@@ -584,6 +593,42 @@ fn build_auth(settings: &AuthSettings) -> Result<Auth, String> {
         .map_err(|error| format!("{} is not a usable key document: {error}", path.display()))
 }
 
+#[allow(deprecated)]
+async fn submit() -> Result<(), String> {
+    let address = std::env::var("MM_RPC_ADDR")
+        .map_err(|_| String::from("MM_RPC_ADDR is required for submit"))?;
+    let owner = std::env::var("MM_SUBMIT_OWNER").unwrap_or_else(|_| String::from("command-submit"));
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|error| error.to_string())?;
+    let mut specs = Vec::new();
+    for (index, line) in input.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let spec = parse_line(line).map_err(|error| format!("line {}: {error}", index + 1))?;
+        specs.push(spec);
+    }
+    let mut client = MediaJobServiceClient::connect(address)
+        .await
+        .map_err(|error| error.to_string())?;
+    for spec in specs {
+        let response = client
+            .create_job(mm_proto::v1::CreateJobRequest {
+                user_id: owner.clone(),
+                idempotency_key: format!("command-{}", uuid::Uuid::now_v7()),
+                spec: Some(mm_proto::v1::OpSpec::from(&spec)),
+                callback: None,
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .into_inner();
+        println!("{}", response.job_id);
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_role(&args) {
@@ -593,6 +638,13 @@ fn main() -> ExitCode {
             |get| Ok((server_env(get)?, worker_env(get)?)),
             |(server, worker)| combine(server, worker),
         ),
+        Ok(Role::Commands) => {
+            for line in mm_commands::lines() {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(Role::Submit) => run(|_| Ok(()), |_| submit()),
         Err(message) => {
             eprintln!("{message}");
             ExitCode::FAILURE
@@ -652,6 +704,12 @@ mod tests {
     #[test]
     fn combined_role_parses() {
         assert_eq!(parse_role(&args(&["combined"])), Ok(Role::Combined));
+    }
+
+    #[test]
+    fn command_roles_parse() {
+        assert_eq!(parse_role(&args(&["commands"])), Ok(Role::Commands));
+        assert_eq!(parse_role(&args(&["submit"])), Ok(Role::Submit));
     }
 
     #[test]

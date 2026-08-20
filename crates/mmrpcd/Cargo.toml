@@ -7,15 +7,19 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 mm-auth = { path = "../mm-auth" }
+mm-commands = { path = "../mm-commands" }
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 mm-observability = { path = "../mm-observability" }
 mm-jobstore = { path = "../mm-jobstore" }
+mm-proto = { path = "../mm-proto" }
 mm-server = { path = "../mm-server" }
 mm-storage = { path = "../mm-storage" }
 mm-worker = { path = "../mm-worker" }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tonic.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 mm-auth = { path = "../mm-auth", features = ["testing"] }

@@ -2016,6 +2016,34 @@ async fn commands_prints_the_registry_and_submit_sends_one_line_jobs() {
             .iter()
             .any(|line| line.starts_with("transcode spec:base64:required enabled"))
     );
+    let described = Command::new(env!("CARGO_BIN_EXE_mmrpcd"))
+        .args(["describe", "probe"])
+        .output()
+        .expect("describe runs");
+    assert!(
+        described.status.success(),
+        "{}",
+        String::from_utf8_lossy(&described.stderr)
+    );
+    let description = String::from_utf8_lossy(&described.stdout);
+    for needle in [
+        "id: probe",
+        "label: Probe",
+        "description: Read container and stream metadata",
+        "parameter: spec",
+        "type: base64",
+        "required: true",
+        "bounds: none",
+        "enabled: true",
+    ] {
+        assert!(description.contains(needle), "{description}");
+    }
+    let unknown = Command::new(env!("CARGO_BIN_EXE_mmrpcd"))
+        .args(["describe", "observer"])
+        .output()
+        .expect("describe refuses");
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("no command named"));
 
     let db = fresh_db().await;
     let mut daemon = spawn_daemon(&db.url, "parity-submit", &[]);

@@ -300,6 +300,34 @@ pub fn lines() -> Vec<String> {
     registry().iter().map(render).collect()
 }
 
+pub fn describe(id: &str) -> Result<Command, CommandError> {
+    registry()
+        .into_iter()
+        .find(|command| command.id == id)
+        .ok_or_else(|| CommandError::UnknownCommand { id: id.to_string() })
+}
+
+pub fn render_description(command: &Command) -> String {
+    let mut lines = vec![
+        format!("id: {}", command.id),
+        format!("label: {}", command.label),
+        format!("description: {}", command.description),
+        format!("enabled: {}", command.enabled),
+        format!(
+            "disabled-reason: {}",
+            command.disabled_reason.unwrap_or("none")
+        ),
+    ];
+    for parameter in command.parameters {
+        lines.push(format!("parameter: {}", parameter.name));
+        lines.push(format!("  type: {}", parameter.kind));
+        lines.push(format!("  required: {}", parameter.required));
+        lines.push(format!("  description: {}", parameter.description));
+        lines.push(format!("  bounds: {}", parameter.bounds.unwrap_or("none")));
+    }
+    lines.join("\n")
+}
+
 pub fn parse_line(line: &str) -> Result<OpSpec, CommandError> {
     let mut tokens = line.split_whitespace();
     let id = tokens

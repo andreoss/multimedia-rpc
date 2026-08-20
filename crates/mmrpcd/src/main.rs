@@ -27,6 +27,7 @@ enum Role {
     Worker,
     Combined,
     Commands,
+    Describe,
     Submit,
 }
 
@@ -36,9 +37,10 @@ fn parse_role(args: &[String]) -> Result<Role, String> {
         [role] if role == "worker" => Ok(Role::Worker),
         [role] if role == "combined" => Ok(Role::Combined),
         [role] if role == "commands" => Ok(Role::Commands),
+        [role, id] if role == "describe" && !id.is_empty() => Ok(Role::Describe),
         [role] if role == "submit" => Ok(Role::Submit),
         _ => Err(String::from(
-            "usage: mmrpcd <server|worker|combined|commands|submit>",
+            "usage: mmrpcd <server|worker|combined|commands|describe <command>|submit>",
         )),
     }
 }
@@ -644,6 +646,19 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Ok(Role::Describe) => {
+            let id = args.get(1).map(String::as_str).unwrap_or_default();
+            match mm_commands::describe(id) {
+                Ok(command) => {
+                    println!("{}", mm_commands::render_description(&command));
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(Role::Submit) => run(|_| Ok(()), |_| submit()),
         Err(message) => {
             eprintln!("{message}");
@@ -710,6 +725,16 @@ mod tests {
     fn command_roles_parse() {
         assert_eq!(parse_role(&args(&["commands"])), Ok(Role::Commands));
         assert_eq!(parse_role(&args(&["submit"])), Ok(Role::Submit));
+    }
+
+    #[test]
+    fn describe_role_parses_with_one_command() {
+        assert_eq!(
+            parse_role(&args(&["describe", "probe"])),
+            Ok(Role::Describe)
+        );
+        assert!(parse_role(&args(&["describe"])).is_err());
+        assert!(parse_role(&args(&["describe", "probe", "extra"])).is_err());
     }
 
     #[test]

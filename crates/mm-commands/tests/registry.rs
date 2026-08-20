@@ -143,3 +143,28 @@ fn incomplete_metadata_is_refused() {
         Err(MetadataError::ReasonOnEnabled { .. })
     ));
 }
+
+#[test]
+fn every_command_can_be_described() {
+    use mm_commands::{describe, render_description};
+
+    for kind in OpKind::ALL {
+        let command = describe(&kind.to_string()).expect("command is described");
+        assert_eq!(command.id(), kind.to_string());
+        assert!(command.validate_metadata().is_ok());
+        let text = render_description(&command);
+        assert!(text.contains(&format!("id: {}", command.id())));
+        assert!(text.contains(&format!("label: {}", command.label())));
+        assert!(text.contains("parameter: spec"));
+        assert!(text.contains("required: true"));
+        assert!(text.contains("bounds: none"));
+    }
+}
+
+#[test]
+fn describing_an_unknown_command_names_it() {
+    assert!(matches!(
+        mm_commands::describe("observer"),
+        Err(CommandError::UnknownCommand { id }) if id == "observer"
+    ));
+}

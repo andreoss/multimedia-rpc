@@ -49,6 +49,24 @@ async fn a_missing_binary_is_a_launch_error() {
     assert!(matches!(result, Err(ProbeError::Launch { .. })));
 }
 
+#[tokio::test]
+async fn a_present_binary_reports_its_version() {
+    let version = Prober::default()
+        .version(Duration::from_secs(5))
+        .await
+        .expect("probe binary present");
+    assert!(!version.is_empty());
+    assert!(version.contains("version"));
+}
+
+#[tokio::test]
+async fn a_missing_binary_has_no_version() {
+    let result = Prober::with_binary("mm-no-such-probe-binary")
+        .version(Duration::from_secs(5))
+        .await;
+    assert!(matches!(result, Err(ProbeError::Launch { .. })));
+}
+
 #[test]
 fn default_limits_cap_the_probe() {
     let limits = ProbeLimits::default();

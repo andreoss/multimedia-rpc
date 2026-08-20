@@ -16,17 +16,14 @@ services:
       retries: 12
 
   objectstore:
-    image: minio/minio:latest
-    command: ["server", "/data"]
-    environment:
-      MINIO_ROOT_USER: mmadmin
-      MINIO_ROOT_PASSWORD: mmsecret1
+    image: chrislusf/seaweedfs:latest
+    command: ["server", "-s3", "-dir=/data"]
     ports:
-      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:8333:8333"
     volumes:
       - store-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/"]
       interval: 5s
       timeout: 3s
       retries: 12

@@ -2,27 +2,74 @@ use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mm_domain::{
-    JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob, OpSpec, RequestId, UserId,
+    JobEventNotifications, JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
+    OpSpec, ProgressPercent, RequestId, UserId,
 };
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::cursor;
 
 const DEFAULT_PAGE_SIZE: u32 = 20;
 const MAX_PAGE_SIZE: u32 = 100;
+const WATCH_FANOUT_CAPACITY: usize = 256;
+const WATCH_BUFFER: usize = 16;
+
+#[derive(Clone)]
+pub(crate) struct WatchHub {
+    changes: Option<broadcast::Sender<JobId>>,
+    poll: Duration,
+}
+
+impl WatchHub {
+    pub(crate) fn start(
+        events: Option<Arc<dyn JobEventNotifications>>,
+        poll: Duration,
+    ) -> (Self, Option<JoinHandle<()>>) {
+        match events {
+            None => (Self { changes: None, poll }, None),
+            Some(events) => {
+                let (sender, _) = broadcast::channel(WATCH_FANOUT_CAPACITY);
+                let feeder = sender.clone();
+                let feed = tokio::spawn(async move {
+                    loop {
+                        if let Ok(id) = events.changed().await {
+                            let _ = feeder.send(id);
+                        }
+                    }
+                });
+                (
+                    Self {
+                        changes: Some(sender),
+                        poll,
+                    },
+                    Some(feed),
+                )
+            }
+        }
+    }
+
+    fn subscribe(&self) -> Option<broadcast::Receiver<JobId>> {
+        self.changes.as_ref().map(|sender| sender.subscribe())
+    }
+}
 
 pub(crate) struct MediaJobs {
     repository: Arc<dyn JobRepository>,
+    watch: WatchHub,
 }
 
 impl MediaJobs {
-    pub(crate) fn new(repository: Arc<dyn JobRepository>) -> Self {
-        Self { repository }
+    pub(crate) fn new(repository: Arc<dyn JobRepository>, watch: WatchHub) -> Self {
+        Self { repository, watch }
     }
 
     async fn refetch(&self, id: JobId) -> Result<JobRecord, Status> {
@@ -31,6 +78,100 @@ impl MediaJobs {
             .await
             .map_err(store_failure)?
             .ok_or_else(not_found)
+    }
+}
+
+fn state_event(state: JobState) -> v1::WatchJobResponse {
+    v1::WatchJobResponse {
+        event: Some(v1::JobEvent {
+            kind: Some(v1::job_event::Kind::State(state_to_proto(state) as i32)),
+        }),
+    }
+}
+
+fn progress_event(progress: ProgressPercent) -> v1::WatchJobResponse {
+    v1::WatchJobResponse {
+        event: Some(v1::JobEvent {
+            kind: Some(v1::job_event::Kind::ProgressPercent(u32::from(
+                progress.value(),
+            ))),
+        }),
+    }
+}
+
+async fn wait_for_change(
+    changes: &mut Option<broadcast::Receiver<JobId>>,
+    poll: Duration,
+    id: JobId,
+) {
+    let Some(receiver) = changes else {
+        tokio::time::sleep(poll).await;
+        return;
+    };
+    let sleep = tokio::time::sleep(poll);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return,
+            received = receiver.recv() => match received {
+                Ok(changed) if changed == id => return,
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => return,
+                Err(broadcast::error::RecvError::Closed) => {
+                    (&mut sleep).await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn follow_job(
+    repository: Arc<dyn JobRepository>,
+    mut changes: Option<broadcast::Receiver<JobId>>,
+    poll: Duration,
+    snapshot: JobRecord,
+    sink: mpsc::Sender<Result<v1::WatchJobResponse, Status>>,
+) {
+    let id = snapshot.id;
+    let mut state = snapshot.state;
+    let mut progress = snapshot.progress;
+    if sink.send(Ok(state_event(state))).await.is_err() || state.is_terminal() {
+        return;
+    }
+    if progress > ProgressPercent::ZERO && sink.send(Ok(progress_event(progress))).await.is_err() {
+        return;
+    }
+    loop {
+        wait_for_change(&mut changes, poll, id).await;
+        let current = match repository.get(id).await {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                let _ = sink.send(Err(not_found())).await;
+                return;
+            }
+            Err(error) => {
+                let _ = sink.send(Err(store_failure(error))).await;
+                return;
+            }
+        };
+        if current.state != state
+            && !current.state.is_terminal()
+            && sink.send(Ok(state_event(current.state))).await.is_err()
+        {
+            return;
+        }
+        if current.progress != progress
+            && sink.send(Ok(progress_event(current.progress))).await.is_err()
+        {
+            return;
+        }
+        if current.state != state && current.state.is_terminal() {
+            let _ = sink.send(Ok(state_event(current.state))).await;
+            return;
+        }
+        state = current.state;
+        progress = current.progress;
     }
 }
 
@@ -234,10 +375,25 @@ impl MediaJobService for MediaJobs {
 
     async fn watch_job(
         &self,
-        _request: Request<v1::WatchJobRequest>,
+        request: Request<v1::WatchJobRequest>,
     ) -> Result<Response<Self::WatchJobStream>, Status> {
-        Err(Status::unimplemented(
-            "WatchJob arrives with a later sprint",
-        ))
+        let message = request.into_inner();
+        let owner = parse_user(&message.user_id)?;
+        let id = parse_job_id(&message.job_id)?;
+        let snapshot = self
+            .repository
+            .get_owned(&owner, id)
+            .await
+            .map_err(store_failure)?
+            .ok_or_else(not_found)?;
+        let (sink, events) = mpsc::channel(WATCH_BUFFER);
+        tokio::spawn(follow_job(
+            self.repository.clone(),
+            self.watch.subscribe(),
+            self.watch.poll,
+            snapshot,
+            sink,
+        ));
+        Ok(Response::new(Box::pin(ReceiverStream::new(events))))
     }
 }

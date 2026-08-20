@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mm_domain::{JobRepository, MediaRefError, ObjectRef, ObjectStore};
+use mm_domain::{JobEventNotifications, JobRepository, MediaRefError, ObjectRef, ObjectStore};
 use mm_ffmpeg::Prober;
 use mm_proto::v1::media_job_service_server::MediaJobServiceServer;
 use thiserror::Error;
@@ -18,7 +18,7 @@ use tonic::server::NamedService;
 use tonic::transport::Server;
 
 use health::Dependencies;
-use service::MediaJobs;
+use service::{MediaJobs, WatchHub};
 
 pub const SERVICE_NAME: &str = <MediaJobServiceServer<MediaJobs> as NamedService>::NAME;
 
@@ -28,6 +28,8 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     pub health_interval: Duration,
     pub check_timeout: Duration,
+    pub watch_poll_interval: Duration,
+    pub job_events: Option<Arc<dyn JobEventNotifications>>,
     repository: Arc<dyn JobRepository>,
     store: Arc<dyn ObjectStore>,
     store_probe: ObjectRef,
@@ -58,6 +60,8 @@ impl ServerConfig {
             bind: SocketAddr::from(DEFAULT_BIND),
             health_interval: Duration::from_secs(1),
             check_timeout: Duration::from_secs(2),
+            watch_poll_interval: Duration::from_secs(1),
+            job_events: None,
             repository,
             store,
             store_probe,
@@ -71,11 +75,18 @@ pub struct ServerHandle {
     shutdown: oneshot::Sender<()>,
     server: JoinHandle<Result<(), tonic::transport::Error>>,
     health: JoinHandle<()>,
+    watch_feed: Option<JoinHandle<()>>,
 }
 
 impl ServerHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    fn stop_watch_feed(&self) {
+        if let Some(feed) = &self.watch_feed {
+            feed.abort();
+        }
     }
 
     pub async fn wait(self) -> Result<(), tonic::transport::Error> {
@@ -86,6 +97,7 @@ impl ServerHandle {
 
     pub async fn shutdown(self) {
         self.health.abort();
+        self.stop_watch_feed();
         let _ = self.shutdown.send(());
         let _ = self.server.await;
     }
@@ -108,12 +120,13 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
         config.health_interval,
     ));
     let (shutdown, shutdown_rx) = oneshot::channel::<()>();
-    let router =
-        Server::builder()
-            .add_service(health_service)
-            .add_service(MediaJobServiceServer::new(MediaJobs::new(
-                config.repository,
-            )));
+    let (watch, watch_feed) = WatchHub::start(config.job_events, config.watch_poll_interval);
+    let router = Server::builder()
+        .add_service(health_service)
+        .add_service(MediaJobServiceServer::new(MediaJobs::new(
+            config.repository,
+            watch,
+        )));
     let server = tokio::spawn(router.serve_with_incoming_shutdown(
         TcpListenerStream::new(listener),
         async move {
@@ -126,5 +139,6 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, StartError> {
         shutdown,
         server,
         health,
+        watch_feed,
     })
 }

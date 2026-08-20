@@ -1,11 +1,15 @@
 use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::num::NonZeroU32;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mm_domain::{ConcatSpec, JobRepository, MediaRef, ObjectStore, OpSpec};
+use mm_domain::{
+    ConcatSpec, JobRepository, MediaRef, ObjectStore, OpSpec, ProgressPercent, WorkerId,
+};
 use mm_ffmpeg::Prober;
-use mm_jobstore::{MIGRATOR, PgJobRepository};
+use mm_jobstore::{MIGRATOR, PgJobEventListener, PgJobRepository};
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_client::MediaJobServiceClient;
 use mm_server::{ServerConfig, ServerHandle};
@@ -72,6 +76,7 @@ fn require_stack() {
 struct TestDb {
     admin: PgPool,
     pool: PgPool,
+    url: String,
     name: String,
 }
 
@@ -98,7 +103,12 @@ async fn fresh_db() -> TestDb {
         .await
         .expect("test database connection");
     MIGRATOR.run(&pool).await.expect("migrations apply");
-    TestDb { admin, pool, name }
+    TestDb {
+        admin,
+        pool,
+        url,
+        name,
+    }
 }
 
 impl TestDb {
@@ -416,18 +426,189 @@ async fn a_foreign_owner_replay_is_already_exists() {
     db.dispose().await;
 }
 
+async fn watch_client(handle: &ServerHandle) -> MediaJobServiceClient<tonic::transport::Channel> {
+    let channel = Endpoint::from_shared(format!("http://{}", handle.local_addr()))
+        .expect("valid endpoint")
+        .connect_timeout(Duration::from_secs(2))
+        .connect()
+        .await
+        .expect("dial announced address");
+    MediaJobServiceClient::new(channel)
+}
+
+async fn next_event(
+    stream: &mut tonic::codec::Streaming<v1::WatchJobResponse>,
+) -> Option<v1::job_event::Kind> {
+    tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .expect("an event arrives within five seconds")
+        .expect("stream stays healthy")
+        .map(|response| {
+            response
+                .event
+                .expect("event present")
+                .kind
+                .expect("kind present")
+        })
+}
+
+fn state_kind(state: v1::JobState) -> v1::job_event::Kind {
+    v1::job_event::Kind::State(state as i32)
+}
+
+fn progress_kind(value: u32) -> v1::job_event::Kind {
+    v1::job_event::Kind::ProgressPercent(value)
+}
+
+fn concat_result() -> mm_domain::OpResult {
+    mm_domain::OpResult::Concat(
+        mm_domain::TimedOutput::new(
+            MediaRef::object_uri("s3://media/jobs/x/out.mp4").expect("valid ref"),
+            10.0,
+        )
+        .expect("valid result"),
+    )
+}
+
 #[tokio::test]
-async fn watch_job_is_unimplemented() {
+async fn watching_a_foreign_job_answers_not_found_before_streaming() {
     let (db, handle) = healthy_server().await;
     let mut client = job_client(&handle).await;
+    let created = client
+        .create_job(create_request("owner-1", "req-watch-foreign"))
+        .await
+        .expect("create succeeds")
+        .into_inner();
     let status = client
         .watch_job(v1::WatchJobRequest {
-            user_id: "owner-1".to_string(),
+            user_id: "owner-2".to_string(),
+            job_id: created.job_id,
+        })
+        .await
+        .expect_err("foreign watch rejected");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    let absent = client
+        .watch_job(v1::WatchJobRequest {
+            user_id: "owner-2".to_string(),
             job_id: mm_domain::JobId::generate().to_string(),
         })
         .await
-        .expect_err("watch is unimplemented");
-    assert_eq!(status.code(), tonic::Code::Unimplemented);
+        .expect_err("absent watch rejected");
+    assert_eq!(absent.message(), status.message());
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn watching_a_terminal_job_yields_the_terminal_snapshot_and_closes() {
+    let (db, handle) = healthy_server().await;
+    let repository = db.repository();
+    let mut client = watch_client(&handle).await;
+    let created = client
+        .create_job(create_request("owner-1", "req-watch-terminal"))
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let id = mm_domain::JobId::from_str(&created.job_id).expect("job id");
+    repository.mark_cancelled(id).await.expect("job cancelled");
+    let mut stream = client
+        .watch_job(v1::WatchJobRequest {
+            user_id: "owner-1".to_string(),
+            job_id: created.job_id,
+        })
+        .await
+        .expect("watch starts")
+        .into_inner();
+    assert_eq!(
+        next_event(&mut stream).await,
+        Some(state_kind(v1::JobState::Cancelled))
+    );
+    assert_eq!(next_event(&mut stream).await, None);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+async fn watch_follows_to_terminal(db: &TestDb, handle: &ServerHandle) {
+    let repository = db.repository();
+    let mut client = watch_client(handle).await;
+    let created = client
+        .create_job(create_request("owner-1", "req-watch-follow"))
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    let id = mm_domain::JobId::from_str(&created.job_id).expect("job id");
+    let mut stream = client
+        .watch_job(v1::WatchJobRequest {
+            user_id: "owner-1".to_string(),
+            job_id: created.job_id,
+        })
+        .await
+        .expect("watch starts")
+        .into_inner();
+    assert_eq!(
+        next_event(&mut stream).await,
+        Some(state_kind(v1::JobState::Pending))
+    );
+
+    let claimant = WorkerId::from_str("w-watch").expect("worker id");
+    let claimed = repository
+        .claim(&claimant, NonZeroU32::new(1).expect("limit"), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        next_event(&mut stream).await,
+        Some(state_kind(v1::JobState::Running))
+    );
+
+    for value in [25u8, 50, 75] {
+        repository
+            .set_progress(id, &claimant, ProgressPercent::new(value).expect("progress"))
+            .await
+            .expect("progress persists");
+        assert_eq!(
+            next_event(&mut stream).await,
+            Some(progress_kind(u32::from(value)))
+        );
+    }
+
+    repository
+        .mark_succeeded(id, &claimant, concat_result())
+        .await
+        .expect("job succeeds");
+    assert_eq!(next_event(&mut stream).await, Some(progress_kind(100)));
+    assert_eq!(
+        next_event(&mut stream).await,
+        Some(state_kind(v1::JobState::Succeeded))
+    );
+    assert_eq!(next_event(&mut stream).await, None);
+}
+
+#[tokio::test]
+async fn a_watch_stream_follows_notified_changes_to_the_terminal_state() {
+    let db = fresh_db().await;
+    let store = store_at(&store_endpoint()).await;
+    let mut config = test_config(db.repository(), store, Prober::default());
+    config.watch_poll_interval = Duration::from_secs(600);
+    config.job_events = Some(Arc::new(
+        PgJobEventListener::connect(&db.url)
+            .await
+            .expect("events listener connects"),
+    ));
+    let handle = start_server(config).await;
+    watch_follows_to_terminal(&db, &handle).await;
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn a_watch_stream_follows_changes_by_polling_without_a_listener() {
+    let db = fresh_db().await;
+    let store = store_at(&store_endpoint()).await;
+    let mut config = test_config(db.repository(), store, Prober::default());
+    config.watch_poll_interval = Duration::from_millis(100);
+    let handle = start_server(config).await;
+    watch_follows_to_terminal(&db, &handle).await;
     handle.shutdown().await;
     db.dispose().await;
 }

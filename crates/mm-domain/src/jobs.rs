@@ -2,7 +2,7 @@ use crate::callback::QueueUrl;
 use crate::id::{
     JobId, NodeId, RequestId, TemplateId, TextIdError, TraceId, UserId, WorkerId, parse_text_id,
 };
-use crate::op::{OpResult, OpSpec};
+use crate::op::{MediaRef, OpResult, OpSpec};
 use crate::state::JobState;
 use crate::template::Template;
 use crate::validate::Verdict;
@@ -292,6 +292,19 @@ pub struct JobPage {
     pub next: Option<PageCursor>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputMetadata(Vec<u8>);
+
+impl InputMetadata {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum JobStoreError {
     #[error("a job with this request id already exists: {existing}")]
@@ -415,6 +428,15 @@ pub trait JobRepository: Send + Sync {
     ) -> Result<Option<Template>, JobStoreError>;
     async fn list_templates(&self, owner: &UserId) -> Result<Vec<Template>, JobStoreError>;
     async fn delete_template(&self, owner: &UserId, id: TemplateId) -> Result<bool, JobStoreError>;
+    async fn input_metadata(
+        &self,
+        media: &MediaRef,
+    ) -> Result<Option<InputMetadata>, JobStoreError>;
+    async fn put_input_metadata(
+        &self,
+        media: &MediaRef,
+        metadata: &InputMetadata,
+    ) -> Result<(), JobStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

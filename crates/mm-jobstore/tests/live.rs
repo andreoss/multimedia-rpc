@@ -5,10 +5,10 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use mm_domain::{
-    CancelNotifications, ConcatSpec, InputOrder, JobEventNotifications, JobFailure, JobId,
-    JobNotifications, JobRepository, JobRequester, JobState, JobStoreError, MediaRef, NewJob,
-    OpResult, OpSpec, ProbeSpec, ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType,
-    Template, TimedOutput, TraceId, UserId, WorkerId,
+    CancelNotifications, ConcatSpec, InputMetadata, InputOrder, JobEventNotifications, JobFailure,
+    JobId, JobNotifications, JobRepository, JobRequester, JobState, JobStoreError, MediaRef,
+    NewJob, OpResult, OpSpec, ProbeSpec, ProgressPercent, QueueUrl, RequestId, RequesterId,
+    RequesterType, Template, TimedOutput, TraceId, UserId, WorkerId,
 };
 use mm_jobstore::{
     MIGRATOR, PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository,
@@ -1623,4 +1623,46 @@ async fn an_input_order_that_does_not_match_the_spec_is_refused() {
     assert!(InputOrder::for_inputs(&spec, (0..inputs as i32).collect()).is_ok());
     assert!(InputOrder::for_inputs(&spec, (0..=inputs as i32).collect()).is_err());
     assert!(InputOrder::for_inputs(&spec, Vec::new()).is_err());
+}
+
+#[tokio::test]
+async fn shared_input_metadata_round_trips_by_media_id() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let first = MediaRef::object_uri("s3://mm/inputs/shared-a.mp4").expect("object uri");
+    let second = MediaRef::object_uri("s3://mm/inputs/shared-b.mp4").expect("object uri");
+    let metadata = InputMetadata::from_bytes(b"{\"container\":\"mp4\"}".to_vec());
+
+    assert_eq!(
+        repo.input_metadata(&first).await.expect("read succeeds"),
+        None,
+        "an unprobed media id reads nothing"
+    );
+
+    repo.put_input_metadata(&first, &metadata)
+        .await
+        .expect("write succeeds");
+
+    assert_eq!(
+        repo.input_metadata(&first).await.expect("read succeeds"),
+        Some(metadata.clone()),
+        "the row answers the metadata it was written with"
+    );
+    assert_eq!(
+        repo.input_metadata(&second).await.expect("read succeeds"),
+        None,
+        "another media id reads nothing"
+    );
+
+    let replacement = InputMetadata::from_bytes(b"{\"container\":\"webm\"}".to_vec());
+    repo.put_input_metadata(&first, &replacement)
+        .await
+        .expect("rewrite succeeds");
+    assert_eq!(
+        repo.input_metadata(&first).await.expect("read succeeds"),
+        Some(replacement),
+        "a second write replaces the row"
+    );
+
+    db.dispose().await;
 }

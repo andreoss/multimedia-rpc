@@ -411,19 +411,15 @@ async fn a_probe_job_succeeds_with_stream_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_second_job_reuses_the_probed_input_metadata() {
+async fn a_second_worker_reads_the_shared_metadata_without_probing() {
     let _slot = mm_testkit::stack_slot();
     let db = fresh_db().await;
     let store = test_store().await;
-    let source = fixture("probe-cache-4s.mp4", 4, 30, "mp4");
-    let input = upload_input(&store, &source, "inputs/probe-cache-4s.mp4").await;
+    let source = fixture("shared-metadata-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/shared-metadata-4s.mp4").await;
     let repository = db.repository();
-    let cache = Arc::new(mm_worker::ProbeCache::new());
 
-    let mut config = base_config(&db, store.clone(), "worker-probe-cache");
-    config.probe_cache = cache.clone();
-    let handle = start(config);
-
+    let first_handle = start(base_config(&db, store.clone(), "worker-shared-one"));
     let first = repository
         .create(single_input_job(OpSpec::Probe(
             ProbeSpec::new(input.clone()).expect("a bare reference cuts nothing"),
@@ -431,7 +427,12 @@ async fn a_second_job_reuses_the_probed_input_metadata() {
         .await
         .unwrap();
     let first_record = await_terminal(&repository, first.id, Duration::from_secs(60)).await;
+    first_handle.shutdown().await;
     assert_eq!(first_record.state, JobState::Succeeded);
+
+    let mut second_config = base_config(&db, store.clone(), "worker-shared-two");
+    second_config.prober = mm_ffmpeg::Prober::with_binary("/nonexistent/ffprobe");
+    let second_handle = start(second_config);
 
     let second = repository
         .create(single_input_job(OpSpec::Probe(
@@ -440,11 +441,14 @@ async fn a_second_job_reuses_the_probed_input_metadata() {
         .await
         .unwrap();
     let second_record = await_terminal(&repository, second.id, Duration::from_secs(60)).await;
-    handle.shutdown().await;
+    second_handle.shutdown().await;
 
-    assert_eq!(second_record.state, JobState::Succeeded);
-    assert_eq!(cache.misses(), 1, "only the first job probed the input");
-    assert_eq!(cache.hits(), 1, "the second job reused the probed metadata");
+    assert_eq!(
+        second_record.state,
+        JobState::Succeeded,
+        "a worker with no usable prober read the shared row: {:?}",
+        second_record.failure
+    );
     db.dispose().await;
 }
 

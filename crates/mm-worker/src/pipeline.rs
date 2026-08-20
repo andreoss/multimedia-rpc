@@ -9,13 +9,13 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
     AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphResult, GraphSpec,
-    ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputReport,
-    InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError, MediaRef,
-    NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult,
-    OpSpec, OutputKey, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
-    ResizeMode as DomainResizeMode, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, VideoStreamInfo, WorkerId,
-    resolve_media_ref, validate_inputs,
+    ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
+    InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
+    MediaRef, NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind,
+    OpResult, OpSpec, OutputKey, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
+    ProgressPercent, ResizeMode as DomainResizeMode, StepOutcome, StepState, ThumbnailResult,
+    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, VideoStreamInfo,
+    WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -1271,14 +1271,21 @@ async fn probe_source(
     url: &str,
     index: usize,
 ) -> Result<MediaInfo, Finish> {
-    let Some(key) = input.media().map(|source| source.media().to_uri()) else {
+    let Some(media) = input.media().map(|source| source.media()) else {
         return probe_input(ctx, url, index).await;
     };
-    if let Some(info) = ctx.probe_cache.get(&key) {
+    if let Some(stored) = ctx.repository.input_metadata(media).await.unwrap_or(None)
+        && let Ok(info) = MediaInfo::from_bytes(stored.as_bytes())
+    {
         return Ok(info);
     }
     let info = probe_input(ctx, url, index).await?;
-    ctx.probe_cache.insert(key, info.clone());
+    if let Ok(bytes) = info.to_bytes() {
+        let _ = ctx
+            .repository
+            .put_input_metadata(media, &InputMetadata::from_bytes(bytes))
+            .await;
+    }
     Ok(info)
 }
 

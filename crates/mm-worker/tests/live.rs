@@ -14,7 +14,7 @@ use mm_domain::{
     OutputProfile, ProbeSpec, QueueUrl, RequestId, ThumbnailSpec, TranscodeSpec, TrimSpec, UserId,
     WorkerId, collect_body,
 };
-use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
+use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, codes, start};
 use sqlx::PgPool;
@@ -309,7 +309,7 @@ async fn a_concat_job_runs_to_succeeded_with_an_uploaded_output() {
     let job = repository.create(concat_job(refs)).await.unwrap();
 
     let handle = start(base_config(&db, store.clone(), "worker-single"));
-    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
     handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
@@ -397,7 +397,7 @@ async fn a_transcode_job_succeeds_with_a_verified_output() {
         .unwrap();
 
     let handle = start(base_config(&db, store.clone(), "worker-transcode"));
-    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
     handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
@@ -448,7 +448,7 @@ async fn a_trim_job_succeeds_with_a_verified_output() {
         .unwrap();
 
     let handle = start(base_config(&db, store.clone(), "worker-trim"));
-    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
     handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
@@ -498,7 +498,7 @@ async fn a_thumbnail_job_lands_every_requested_key() {
         .unwrap();
 
     let handle = start(base_config(&db, store.clone(), "worker-thumbnail"));
-    let record = await_terminal(&repository, job.id, Duration::from_secs(180)).await;
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
     handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
@@ -532,6 +532,161 @@ async fn a_thumbnail_job_lands_every_requested_key() {
         let staged = scratch_dir("staging").join(format!("{}-{index}.jpg", job.id));
         assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
     }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thumbnail_upload_failure_cleans_every_key_it_landed() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("thumbnail-cleanup-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/thumbnail-cleanup-4s.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Thumbnail(
+            ThumbnailSpec::new(input, vec![0.0, 1.0, 2.0], 160, 120).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let flaky: Arc<dyn ObjectStore> = Arc::new(FailingNthUpload {
+        inner: store.clone(),
+        fail_on: 2,
+        seen: std::sync::Mutex::new(0),
+    });
+    let mut config = base_config(&db, flaky, "worker-thumbnail-cleanup");
+    config.retry = RetryPolicy {
+        max_attempts: 1,
+        base: Duration::from_millis(100),
+        cap: Duration::from_millis(100),
+    };
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::OUTPUT_UPLOAD_FAILED);
+    assert!(record.result.is_none(), "a failed job recorded a result");
+    for index in 0..3 {
+        let key = ObjectRef::new(BUCKET, &format!("jobs/{}/thumb-{index}.jpg", job.id)).unwrap();
+        assert!(
+            store.head(&key).await.is_err(),
+            "key {index} survived the cleanup"
+        );
+    }
+    for index in 0..3 {
+        let staged = scratch_dir("staging").join(format!("{}-{index}.jpg", job.id));
+        assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancel_during_a_thumbnail_op_leaves_no_output_and_no_staged_file() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("thumbnail-cancel-30s.mp4", 30, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/thumbnail-cancel-30s.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Thumbnail(
+            ThumbnailSpec::new(input, vec![10.0, 15.0, 20.0, 25.0], 640, 360).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let mut config = base_config(&db, store.clone(), "worker-thumbnail-cancel");
+    config.cancellations = Some(Arc::new(
+        PgCancelListener::connect(db.url())
+            .await
+            .expect("cancel listener connects"),
+    ));
+    let handle = start(config);
+    let running = await_state(
+        &repository,
+        job.id,
+        JobState::Running,
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(running.state, JobState::Running);
+    repository
+        .request_cancel(job.id)
+        .await
+        .expect("cancel requested");
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::CANCEL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Cancelled);
+    for index in 0..4 {
+        let key = ObjectRef::new(BUCKET, &format!("jobs/{}/thumb-{index}.jpg", job.id)).unwrap();
+        assert!(
+            store.head(&key).await.is_err(),
+            "key {index} survived the cancel"
+        );
+    }
+    let leftover: Vec<_> = std::fs::read_dir(scratch_dir("staging"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(&job.id.to_string())
+                })
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(leftover.is_empty(), "staged files survived: {leftover:?}");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thumbnail_set_over_the_disk_budget_is_released_until_it_fits() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("thumbnail-budget-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/thumbnail-budget-4s.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Thumbnail(
+            ThumbnailSpec::new(input, vec![0.0, 1.0], 640, 360).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let mut tight = base_config(&db, store.clone(), "worker-thumbnail-budget");
+    tight.disk_budget = DiskBudget::Fixed(1024);
+    tight.release_retry = Duration::from_millis(300);
+    let tight_handle = start(tight);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let record = repository.get(job.id).await.unwrap().unwrap();
+        assert!(
+            !record.state.is_terminal(),
+            "the set was admitted under a budget it exceeds: {:?}",
+            record.state
+        );
+        if record.state == JobState::Pending && record.next_attempt_at.is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the job was never released");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tight_handle.shutdown().await;
+
+    let roomy = start(base_config(&db, store, "worker-thumbnail-roomy"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    roomy.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
     db.dispose().await;
 }
 
@@ -598,7 +753,7 @@ async fn parallel_jobs_never_exceed_the_concurrency_bound() {
     config.claim_batch = NonZeroU32::new(4).unwrap();
     let handle = start(config);
 
-    let deadline = Instant::now() + Duration::from_secs(240);
+    let deadline = Instant::now() + mm_testkit::budget::MERGE_TERMINAL;
     let mut max_running = 0usize;
     loop {
         let mut running = 0usize;
@@ -686,7 +841,7 @@ async fn a_killed_workers_lease_expires_and_another_worker_completes_the_job() {
     rescuer.reconcile_interval = Duration::from_millis(200);
     let rescuer_handle = start(rescuer);
 
-    let record = await_terminal(&repository, job.id, Duration::from_secs(240)).await;
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
     rescuer_handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
@@ -890,6 +1045,62 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
 
 struct FailingUploads {
     inner: Arc<S3ObjectStore>,
+}
+
+struct FailingNthUpload {
+    inner: Arc<S3ObjectStore>,
+    fail_on: usize,
+    seen: std::sync::Mutex<usize>,
+}
+
+#[async_trait]
+impl ObjectStore for FailingNthUpload {
+    async fn get(&self, object: &ObjectRef) -> Result<ObjectBody, ObjectStoreError> {
+        self.inner.get(object).await
+    }
+
+    async fn put(
+        &self,
+        object: &ObjectRef,
+        body: ObjectBody,
+        length: u64,
+    ) -> Result<(), ObjectStoreError> {
+        self.inner.put(object, body, length).await
+    }
+
+    async fn put_multipart(
+        &self,
+        object: &ObjectRef,
+        body: ObjectBody,
+    ) -> Result<(), ObjectStoreError> {
+        let ordinal = {
+            let mut seen = self.seen.lock().expect("upload counter locks");
+            *seen += 1;
+            *seen
+        };
+        if ordinal == self.fail_on {
+            return Err(ObjectStoreError::Backend {
+                message: "injected upload outage".to_string(),
+            });
+        }
+        self.inner.put_multipart(object, body).await
+    }
+
+    async fn head(&self, object: &ObjectRef) -> Result<u64, ObjectStoreError> {
+        self.inner.head(object).await
+    }
+
+    async fn delete(&self, object: &ObjectRef) -> Result<(), ObjectStoreError> {
+        self.inner.delete(object).await
+    }
+
+    async fn presign_get(
+        &self,
+        object: &ObjectRef,
+        expires_in: Duration,
+    ) -> Result<String, ObjectStoreError> {
+        self.inner.presign_get(object, expires_in).await
+    }
 }
 
 #[async_trait]
@@ -1146,7 +1357,7 @@ async fn an_oversized_job_is_released_until_disk_frees() {
 
     let roomy = base_config(&db, store.clone(), "worker-roomy");
     let roomy_handle = start(roomy);
-    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
     roomy_handle.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);

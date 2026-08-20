@@ -359,6 +359,7 @@ pub trait JobRepository: Send + Sync {
         id: JobId,
         worker: &WorkerId,
         failure: JobFailure,
+        result: Option<OpResult>,
     ) -> Result<JobRecord, JobStoreError>;
     async fn mark_cancelled(&self, id: JobId) -> Result<JobRecord, JobStoreError>;
     async fn request_cancel(&self, id: JobId) -> Result<(), JobStoreError>;

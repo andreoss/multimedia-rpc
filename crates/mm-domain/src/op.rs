@@ -733,6 +733,30 @@ impl BatchSpec {
     pub fn stop_on_failure(&self) -> bool {
         self.stop_on_failure
     }
+
+    pub fn ensure_resolvable(&self) -> Result<(), UnsupportedInput> {
+        for (position, step) in self.steps.iter().enumerate() {
+            match step {
+                OpSpec::Batch(nested) => nested.ensure_resolvable()?,
+                leaf => {
+                    for node in leaf.inputs().into_iter().filter_map(InputSource::node) {
+                        let resolves = node
+                            .id()
+                            .as_str()
+                            .parse::<usize>()
+                            .map(|earlier| earlier < position)
+                            .unwrap_or(false);
+                        if !resolves {
+                            return Err(UnsupportedInput {
+                                node: node.id().as_str().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -802,8 +826,8 @@ impl OpKind {
             | OpKind::Resize
             | OpKind::Convert
             | OpKind::Composite
-            | OpKind::Package => Ok(()),
-            OpKind::Batch => Err(UnsupportedOp { kind: self }),
+            | OpKind::Package
+            | OpKind::Batch => Ok(()),
         }
     }
 }
@@ -836,11 +860,14 @@ impl OpSpec {
     }
 
     pub fn ensure_resolvable(&self) -> Result<(), UnsupportedInput> {
-        match self.inputs().into_iter().find_map(InputSource::node) {
-            Some(node) => Err(UnsupportedInput {
-                node: node.id().as_str().to_string(),
-            }),
-            None => Ok(()),
+        match self {
+            OpSpec::Batch(batch) => batch.ensure_resolvable(),
+            _ => match self.inputs().into_iter().find_map(InputSource::node) {
+                Some(node) => Err(UnsupportedInput {
+                    node: node.id().as_str().to_string(),
+                }),
+                None => Ok(()),
+            },
         }
     }
 }

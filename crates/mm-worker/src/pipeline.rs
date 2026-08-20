@@ -1,17 +1,20 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
-    ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure,
-    InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
-    MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
-    OutputKey, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
-    ResizeMode as DomainResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
-    TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
+    BatchResult, BatchSpec, ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult,
+    ImageSpec, InputFailure, InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository,
+    JobState, JobStoreError, MediaRef, NodeRef, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, PackageResult, PackageSpec, ProbeResult,
+    ProbeSpec, ProgressPercent, ResizeMode as DomainResizeMode, StepOutcome, StepState,
+    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
+    WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -66,6 +69,7 @@ enum Finish {
     Released,
     TimedOut,
     Failed(JobFailure),
+    FailedWith(Box<(JobFailure, OpResult)>),
 }
 
 struct Reservation<'a> {
@@ -347,7 +351,7 @@ async fn run_job(
     if SystemTime::now() >= deadline_at {
         if let Ok(record) = ctx
             .repository
-            .mark_failed(job.id, &ctx.worker_id, timeout_failure())
+            .mark_failed(job.id, &ctx.worker_id, timeout_failure(), None)
             .await
         {
             publish_outcome(ctx, &record).await;
@@ -393,36 +397,84 @@ async fn run_job(
             None
         }
         Err(Finish::LeaseLost) | Err(Finish::Released) => None,
-        Err(Finish::TimedOut) => {
-            if let Ok(record) = ctx
-                .repository
-                .mark_failed(job.id, &ctx.worker_id, timeout_failure())
-                .await
-            {
-                publish_outcome(ctx, &record).await;
-                return Some(record.state);
-            }
-            None
+        Err(Finish::TimedOut) => finalize_failure(ctx, job, timeout_failure(), None).await,
+        Err(Finish::Failed(failure)) => finalize_failure(ctx, job, failure, None).await,
+        Err(Finish::FailedWith(failure)) => {
+            finalize_failure(ctx, job, failure.0, Some(failure.1)).await
         }
-        Err(Finish::Failed(failure)) => {
-            if crate::retry::is_transient(failure.code()) && job.attempts < ctx.retry.max_attempts {
-                let delay = ctx.retry.delay(job.attempts);
-                let _ = ctx
-                    .repository
-                    .retry(job.id, &ctx.worker_id, failure, delay)
-                    .await;
-                None
-            } else if let Ok(record) = ctx
-                .repository
-                .mark_failed(job.id, &ctx.worker_id, failure)
-                .await
-            {
-                publish_outcome(ctx, &record).await;
-                Some(record.state)
-            } else {
-                None
-            }
+    }
+}
+
+async fn finalize_failure(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    failure: JobFailure,
+    result: Option<OpResult>,
+) -> Option<JobState> {
+    if crate::retry::is_transient(failure.code()) && job.attempts < ctx.retry.max_attempts {
+        let delay = ctx.retry.delay(job.attempts);
+        let _ = ctx
+            .repository
+            .retry(job.id, &ctx.worker_id, failure, delay)
+            .await;
+        return None;
+    }
+    if let Ok(record) = ctx
+        .repository
+        .mark_failed(job.id, &ctx.worker_id, failure, result)
+        .await
+    {
+        publish_outcome(ctx, &record).await;
+        Some(record.state)
+    } else {
+        None
+    }
+}
+
+struct Scope {
+    prefix: String,
+    resolved: Arc<std::sync::Mutex<HashMap<String, OpResult>>>,
+    done: Arc<AtomicUsize>,
+    total: usize,
+}
+
+impl Scope {
+    fn root(spec: &OpSpec) -> Self {
+        Self {
+            prefix: String::new(),
+            resolved: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            done: Arc::new(AtomicUsize::new(0)),
+            total: leaf_count(spec).max(1),
         }
+    }
+
+    fn child(&self, position: usize) -> Self {
+        let prefix = if self.prefix.is_empty() {
+            format!("steps/{position}")
+        } else {
+            format!("{}/steps/{position}", self.prefix)
+        };
+        Self {
+            prefix,
+            resolved: self.resolved.clone(),
+            done: self.done.clone(),
+            total: self.total,
+        }
+    }
+}
+
+fn leaf_count(spec: &OpSpec) -> usize {
+    match spec {
+        OpSpec::Batch(batch) => batch.steps().iter().map(leaf_count).sum(),
+        _ => 1,
+    }
+}
+
+fn scoped(prefix: &str, artifact: &str) -> String {
+    if prefix.is_empty() {
+        artifact.to_string()
+    } else {
+        format!("{prefix}/{artifact}")
     }
 }
 
@@ -432,30 +484,214 @@ async fn pipeline(
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
-    match &job.spec {
-        OpSpec::Concat(spec) => concat_pipeline(ctx, job, spec, deadline_at, signal).await,
-        OpSpec::Probe(spec) => probe_pipeline(ctx, spec, deadline_at, signal).await,
-        OpSpec::Transcode(spec) => transcode_pipeline(ctx, job, spec, deadline_at, signal).await,
-        OpSpec::Trim(spec) => trim_pipeline(ctx, job, spec, deadline_at, signal).await,
-        OpSpec::Thumbnail(spec) => thumbnail_pipeline(ctx, job, spec, deadline_at, signal).await,
-        OpSpec::Image(spec) => image_pipeline(ctx, job, spec, deadline_at, signal).await,
-        OpSpec::Package(spec) => package_pipeline(ctx, job, spec, deadline_at, signal).await,
-        OpSpec::Batch(_) => Err(failed(
-            codes::UNSUPPORTED_OPERATION,
-            "batch execution is not implemented",
-        )),
+    let scope = Scope::root(&job.spec);
+    run_spec(ctx, job, &job.spec, &scope, deadline_at, signal).await
+}
+
+async fn run_spec(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &OpSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    match spec {
+        OpSpec::Batch(batch) => batch_pipeline(ctx, job, batch, scope, deadline_at, signal).await,
+        leaf => run_leaf(ctx, job, leaf, scope, deadline_at, signal).await,
     }
+}
+
+async fn run_leaf(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &OpSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    let result = match spec {
+        OpSpec::Concat(spec) => concat_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
+        OpSpec::Probe(spec) => probe_pipeline(ctx, spec, scope, deadline_at, signal).await?,
+        OpSpec::Transcode(spec) => {
+            transcode_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
+        }
+        OpSpec::Trim(spec) => trim_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
+        OpSpec::Thumbnail(spec) => {
+            thumbnail_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
+        }
+        OpSpec::Image(spec) => image_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
+        OpSpec::Package(spec) => {
+            package_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
+        }
+        OpSpec::Batch(_) => {
+            return Err(failed(
+                codes::UNSUPPORTED_OPERATION,
+                "a nested batch is not executed yet",
+            ));
+        }
+    };
+    scope.done.fetch_add(1, Ordering::Relaxed);
+    Ok(result)
+}
+
+async fn batch_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &BatchSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    let stop = spec.stop_on_failure();
+    let mut outcomes = Vec::with_capacity(spec.steps().len());
+    let mut landed: Vec<ObjectRef> = Vec::new();
+    let mut failure: Option<JobFailure> = None;
+    for (position, step) in spec.steps().iter().enumerate() {
+        check(signal)?;
+        if matches!(step, OpSpec::Batch(_)) {
+            return Err(failed(
+                codes::UNSUPPORTED_OPERATION,
+                "a nested batch is not executed yet",
+            ));
+        }
+        let child = scope.child(position);
+        match run_leaf(ctx, job, step, &child, deadline_at, signal).await {
+            Ok(result) => {
+                collect_outputs(&result, &mut landed);
+                scope
+                    .resolved
+                    .lock()
+                    .expect("resolved lock")
+                    .insert(position.to_string(), result.clone());
+                outcomes.push(StepOutcome::new(position as u32, StepState::Result(result)));
+            }
+            Err(Finish::Failed(f)) => {
+                if stop {
+                    discard_all(ctx, &landed).await;
+                    cleanup_staging(ctx, job.id).await;
+                    return Err(Finish::Failed(f));
+                }
+                failure = Some(f.clone());
+                outcomes.push(StepOutcome::new(position as u32, StepState::Failure(f)));
+            }
+            Err(Finish::FailedWith(f)) => {
+                let (f, _) = *f;
+                if stop {
+                    discard_all(ctx, &landed).await;
+                    cleanup_staging(ctx, job.id).await;
+                    return Err(Finish::Failed(f));
+                }
+                failure = Some(f.clone());
+                outcomes.push(StepOutcome::new(position as u32, StepState::Failure(f)));
+            }
+            Err(other) => {
+                discard_all(ctx, &landed).await;
+                cleanup_staging(ctx, job.id).await;
+                return Err(other);
+            }
+        }
+    }
+    let result =
+        BatchResult::new(outcomes).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    match failure {
+        Some(f) => Err(Finish::FailedWith(Box::new((f, OpResult::Batch(result))))),
+        None => Ok(OpResult::Batch(result)),
+    }
+}
+
+fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
+    let mut push = |media: &MediaRef| {
+        if let MediaRef::Object(object) = media {
+            landed.push(object.clone());
+        }
+    };
+    match result {
+        OpResult::Concat(timed) | OpResult::Trim(timed) => push(timed.output()),
+        OpResult::Transcode(transcode) => push(transcode.output()),
+        OpResult::Thumbnail(thumbnail) => thumbnail.outputs().iter().for_each(&mut push),
+        OpResult::Image(image) => image.outputs().iter().for_each(&mut push),
+        OpResult::Package(package) => {
+            push(package.playlist());
+            package.segments().iter().for_each(&mut push);
+        }
+        OpResult::Probe(_) | OpResult::Batch(_) => {}
+    }
+}
+
+async fn discard_all(ctx: &WorkerConfig, landed: &[ObjectRef]) {
+    for object in landed {
+        let _ = ctx.store.delete(object).await;
+    }
+}
+
+async fn cleanup_staging(ctx: &WorkerConfig, id: JobId) {
+    let prefix = id.to_string();
+    let Ok(mut entries) = tokio::fs::read_dir(&ctx.staging_dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = tokio::fs::remove_dir_all(&path).await;
+        } else {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+    }
+}
+
+fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
+    match result {
+        OpResult::Concat(timed) | OpResult::Trim(timed) => (index == 0).then(|| timed.output()),
+        OpResult::Transcode(transcode) => (index == 0).then(|| transcode.output()),
+        OpResult::Thumbnail(thumbnail) => thumbnail.outputs().get(index),
+        OpResult::Image(image) => image.outputs().get(index),
+        OpResult::Package(package) => {
+            if index == 0 {
+                Some(package.playlist())
+            } else {
+                package.segments().get(index - 1)
+            }
+        }
+        OpResult::Probe(_) | OpResult::Batch(_) => None,
+    }
+}
+
+fn resolve_node(scope: &Scope, node: &NodeRef, index: usize) -> Result<MediaRef, Finish> {
+    let guard = scope.resolved.lock().expect("resolved lock");
+    let result = guard.get(node.id().as_str()).ok_or_else(|| {
+        failed(
+            codes::INPUT_UNRESOLVABLE,
+            format!("input {index}: node {} has no producer", node.id().as_str()),
+        )
+    })?;
+    result_output(result, node.output() as usize)
+        .cloned()
+        .ok_or_else(|| {
+            failed(
+                codes::INPUT_UNRESOLVABLE,
+                format!(
+                    "input {index}: node {} has no output {}",
+                    node.id().as_str(),
+                    node.output()
+                ),
+            )
+        })
 }
 
 async fn package_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
     spec: &PackageSpec,
+    scope: &Scope,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     check(signal)?;
-    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
     let info = probe_input(ctx, &url, 0).await?;
     gate_verdicts(job.id, OpKind::Package, &[input_report(&info)])?;
@@ -489,7 +725,7 @@ async fn package_pipeline(
     .map_err(|error| failed(codes::PACKAGE_LAUNCH_FAILED, error))
     .and_then(|outcome| outcome.map_err(|error| failed(codes::PACKAGE_FAILED, error)))?;
 
-    let uploaded = upload_package(ctx, job.id, &produced, seconds).await;
+    let uploaded = upload_package(ctx, job.id, &scope.prefix, &produced, seconds).await;
     let _ = std::fs::remove_dir_all(&staging);
     uploaded
 }
@@ -516,6 +752,7 @@ fn packaging_description(request: &GstRequest) -> GstDescription {
 async fn upload_package(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
+    prefix: &str,
     produced: &GstOutcome,
     segment_seconds: f64,
 ) -> Result<OpResult, Finish> {
@@ -548,7 +785,7 @@ async fn upload_package(
         store: ctx.store.as_ref(),
         keys: Vec::new(),
     };
-    let outcome = upload_set(ctx, id, &written, &playlist_path, &mut landed).await;
+    let outcome = upload_set(ctx, id, prefix, &written, &playlist_path, &mut landed).await;
     let staged: Vec<PathBuf> = std::iter::once(written.init.clone())
         .chain(written.segments.iter().cloned())
         .chain(std::iter::once(playlist_path.clone()))
@@ -568,19 +805,20 @@ async fn upload_package(
 async fn upload_set(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
+    prefix: &str,
     written: &GstWritten,
     playlist_path: &Path,
     landed: &mut Landed<'_>,
 ) -> Result<OpResult, Finish> {
-    let init = artifact_object_named(ctx, id, "init.mp4").await?;
-    let playlist = artifact_object_named(ctx, id, mm_gst::playlist_name()).await?;
+    let init = artifact_object_named(ctx, id, prefix, "init.mp4").await?;
+    let playlist = artifact_object_named(ctx, id, prefix, mm_gst::playlist_name()).await?;
     let mut segments = Vec::with_capacity(written.segments.len());
     upload_object(ctx, &init, &written.init).await?;
     landed.record(init.clone());
     upload_object(ctx, &playlist, playlist_path).await?;
     landed.record(playlist.clone());
     for path in &written.segments {
-        let key = artifact_object_named(ctx, id, &segment_name(path)).await?;
+        let key = artifact_object_named(ctx, id, prefix, &segment_name(path)).await?;
         upload_object(ctx, &key, path).await?;
         landed.record(key.clone());
         segments.push(MediaRef::Object(key));
@@ -599,9 +837,10 @@ fn segment_name(path: &Path) -> String {
 async fn artifact_object_named(
     ctx: &WorkerConfig,
     id: JobId,
+    prefix: &str,
     artifact: &str,
 ) -> Result<ObjectRef, Finish> {
-    OutputKey::new(&id, artifact)
+    OutputKey::new(&id, &scoped(prefix, artifact))
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
         .into_object(&ctx.bucket)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))
@@ -628,13 +867,14 @@ async fn image_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
     spec: &ImageSpec,
+    scope: &Scope,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     let mut urls = Vec::with_capacity(spec.inputs().len());
     for (index, input) in spec.inputs().iter().enumerate() {
         check(signal)?;
-        urls.push(resolve_input(ctx, input, deadline_at, index).await?);
+        urls.push(resolve_input(ctx, input, scope, deadline_at, index).await?);
     }
 
     let mut stills = Vec::with_capacity(urls.len());
@@ -661,16 +901,28 @@ async fn image_pipeline(
     let _ = remaining_limits(ctx, IMAGE_RUN_SECONDS, deadline_at)?;
 
     check(signal)?;
-    let produced = run_image(ctx, job.id, &args, &staged, expected, spec.format(), signal).await;
+    let produced = run_image(
+        ctx,
+        job.id,
+        &scope.prefix,
+        &args,
+        &staged,
+        expected,
+        spec.format(),
+        signal,
+    )
+    .await;
     let _ = tokio::fs::remove_file(&staged).await;
     let outputs = produced?;
     let result = ImageResult::new(outputs).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
     Ok(OpResult::Image(result))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_image(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
+    prefix: &str,
     args: &[String],
     staged: &Path,
     expected: FrameExpectation,
@@ -707,7 +959,7 @@ async fn run_image(
         store: ctx.store.as_ref(),
         keys: Vec::new(),
     };
-    match upload_image(ctx, id, staged, format, &mut landed, signal).await {
+    match upload_image(ctx, id, prefix, staged, format, &mut landed, signal).await {
         Ok(outputs) => Ok(outputs),
         Err(finish) => {
             landed.discard().await;
@@ -719,12 +971,13 @@ async fn run_image(
 async fn upload_image(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
+    prefix: &str,
     staged: &Path,
     format: DomainImageFormat,
     landed: &mut Landed<'_>,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<Vec<MediaRef>, Finish> {
-    let artifact = format!("image.{}", format.extension());
+    let artifact = scoped(prefix, &format!("image.{}", format.extension()));
     let object = OutputKey::new(&id, &artifact)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
         .into_object(&ctx.bucket)
@@ -845,16 +1098,18 @@ fn image_args(spec: &ImageSpec, urls: &[String], output: &str) -> Vec<String> {
 async fn resolve_input(
     ctx: &WorkerConfig,
     input: &InputSource,
+    scope: &Scope,
     deadline_at: SystemTime,
     index: usize,
 ) -> Result<String, Finish> {
-    let media = input.media().map(|source| source.media()).ok_or_else(|| {
-        failed(
-            codes::UNSUPPORTED_OPERATION,
-            "a node reference reached the worker",
-        )
-    })?;
-    resolve_media_ref(ctx.store.as_ref(), media, deadline_at, SystemTime::now())
+    let media = match input.media() {
+        Some(source) => source.media().clone(),
+        None => {
+            let node = input.node().expect("an input is a source or a node");
+            resolve_node(scope, node, index)?
+        }
+    };
+    resolve_media_ref(ctx.store.as_ref(), &media, deadline_at, SystemTime::now())
         .await
         .map_err(|error| failed(codes::INPUT_UNRESOLVABLE, format!("input {index}: {error}")))
 }
@@ -941,11 +1196,12 @@ fn stream_count(streams: usize) -> u32 {
 async fn probe_pipeline(
     ctx: &Arc<WorkerConfig>,
     spec: &ProbeSpec,
+    scope: &Scope,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     check(signal)?;
-    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
     let info = probe_input(ctx, &url, 0).await?;
     check(signal)?;
@@ -963,11 +1219,12 @@ async fn transcode_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
     spec: &TranscodeSpec,
+    scope: &Scope,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     check(signal)?;
-    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
     let info = probe_input(ctx, &url, 0).await?;
     gate_verdicts(job.id, OpKind::Transcode, &[input_report(&info)])?;
@@ -1000,6 +1257,7 @@ async fn transcode_pipeline(
     let transcoded = run_and_upload(
         ctx,
         job.id,
+        scope,
         &args,
         &limits,
         &output_path,
@@ -1015,13 +1273,14 @@ async fn concat_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
     spec: &ConcatSpec,
+    scope: &Scope,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     let mut urls = Vec::with_capacity(spec.inputs().len());
     for (index, input) in spec.inputs().iter().enumerate() {
         check(signal)?;
-        urls.push(resolve_input(ctx, input, deadline_at, index).await?);
+        urls.push(resolve_input(ctx, input, scope, deadline_at, index).await?);
     }
 
     let mut infos: Vec<MediaInfo> = Vec::with_capacity(urls.len());
@@ -1056,6 +1315,7 @@ async fn concat_pipeline(
     let merged = run_and_upload(
         ctx,
         job.id,
+        scope,
         &args,
         &limits,
         &output_path,
@@ -1071,11 +1331,12 @@ async fn thumbnail_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
     spec: &ThumbnailSpec,
+    scope: &Scope,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     check(signal)?;
-    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
     let info = probe_input(ctx, &url, 0).await?;
     gate_verdicts(job.id, OpKind::Thumbnail, &[input_report(&info)])?;
@@ -1105,6 +1366,7 @@ async fn thumbnail_pipeline(
     let produced = run_all_and_upload(
         ctx,
         job.id,
+        scope,
         &runs,
         &limits,
         &staged,
@@ -1145,26 +1407,45 @@ impl Landed<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_all_and_upload(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
+    scope: &Scope,
     runs: &[Vec<String>],
     limits: &RunLimits,
     staged: &[PathBuf],
     expected: (u32, u32),
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<Vec<MediaRef>, Finish> {
-    let total = runs.len();
-    for (index, args) in runs.iter().enumerate() {
+    for args in runs.iter() {
         check(signal)?;
-        supervise(ctx, id, args, limits, signal, index, total).await?;
+        supervise(
+            ctx,
+            id,
+            args,
+            limits,
+            signal,
+            scope.done.load(Ordering::Relaxed),
+            scope.total,
+        )
+        .await?;
     }
 
     let mut landed = Landed {
         store: ctx.store.as_ref(),
-        keys: Vec::with_capacity(total),
+        keys: Vec::with_capacity(runs.len()),
     };
-    let outcome = upload_each(ctx, id, staged, expected, &mut landed, signal).await;
+    let outcome = upload_each(
+        ctx,
+        id,
+        &scope.prefix,
+        staged,
+        expected,
+        &mut landed,
+        signal,
+    )
+    .await;
     match outcome {
         Ok(outputs) => Ok(outputs),
         Err(finish) => {
@@ -1177,6 +1458,7 @@ async fn run_all_and_upload(
 async fn upload_each(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
+    prefix: &str,
     staged: &[PathBuf],
     expected: (u32, u32),
     landed: &mut Landed<'_>,
@@ -1199,7 +1481,7 @@ async fn upload_each(
                 ),
             ));
         }
-        let object = artifact_object(ctx, id, index)?;
+        let object = artifact_object(ctx, id, prefix, index)?;
         let bytes = file_bytes(path).await;
         let file = tokio::fs::File::open(path)
             .await
@@ -1216,8 +1498,13 @@ async fn upload_each(
     Ok(outputs)
 }
 
-fn artifact_object(ctx: &WorkerConfig, id: JobId, index: usize) -> Result<ObjectRef, Finish> {
-    let artifact = format!("thumb-{index}.jpg");
+fn artifact_object(
+    ctx: &WorkerConfig,
+    id: JobId,
+    prefix: &str,
+    index: usize,
+) -> Result<ObjectRef, Finish> {
+    let artifact = scoped(prefix, &format!("thumb-{index}.jpg"));
     OutputKey::new(&id, &artifact)
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
         .into_object(&ctx.bucket)
@@ -1228,11 +1515,12 @@ async fn trim_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
     spec: &TrimSpec,
+    scope: &Scope,
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     check(signal)?;
-    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
     check(signal)?;
     let info = probe_input(ctx, &url, 0).await?;
     gate_verdicts(job.id, OpKind::Trim, &[input_report(&info)])?;
@@ -1263,6 +1551,7 @@ async fn trim_pipeline(
     let trimmed = run_and_upload(
         ctx,
         job.id,
+        scope,
         &args,
         &limits,
         &output_path,
@@ -1408,9 +1697,11 @@ fn shared_percent(run_percent: f64, completed: usize, total: usize) -> ProgressP
     ProgressPercent::new(overall as u8).unwrap_or(ProgressPercent::COMPLETE)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_and_upload(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
+    scope: &Scope,
     args: &[String],
     limits: &RunLimits,
     output_path: &PathBuf,
@@ -1418,7 +1709,16 @@ async fn run_and_upload(
     shape: OutputShape,
 ) -> Result<OpResult, Finish> {
     let started = Instant::now();
-    supervise(ctx, id, args, limits, signal, 0, 1).await?;
+    supervise(
+        ctx,
+        id,
+        args,
+        limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
     let wall_seconds = started.elapsed().as_secs_f64();
 
     check(signal)?;
@@ -1430,7 +1730,8 @@ async fn run_and_upload(
     ctx.metrics
         .tool_speed
         .observe(media_seconds(info.duration.as_secs_f64(), wall_seconds));
-    let object = output_object(ctx, id).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let object = output_object(ctx, id, &scope.prefix)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
     let bytes = file_bytes(output_path).await;
     let file = tokio::fs::File::open(output_path)
         .await
@@ -1476,8 +1777,8 @@ async fn file_bytes(path: &Path) -> u64 {
         .unwrap_or_default()
 }
 
-fn output_object(ctx: &WorkerConfig, id: JobId) -> Result<ObjectRef, String> {
-    OutputKey::new(&id, "output.mp4")
+fn output_object(ctx: &WorkerConfig, id: JobId, prefix: &str) -> Result<ObjectRef, String> {
+    OutputKey::new(&id, &scoped(prefix, "output.mp4"))
         .map_err(|error| error.to_string())?
         .into_object(&ctx.bucket)
         .map_err(|error| error.to_string())

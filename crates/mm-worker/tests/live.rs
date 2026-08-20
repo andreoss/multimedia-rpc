@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    CallbackError, CallbackPublisher, ConcatSpec, ImageFormat, ImageOp, ImageSpec, JobId,
-    JobRecord, JobRepository, JobState, MediaRef, NewJob, ObjectBody, ObjectRef, ObjectStore,
-    ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
-    ResizeMode, ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    BatchSpec, CallbackError, CallbackPublisher, ConcatSpec, ImageFormat, ImageOp, ImageSpec,
+    InputSource, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob, NodeRef, ObjectBody,
+    ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec,
+    ProbeSpec, QueueUrl, RequestId, ResizeMode, StepState, ThumbnailSpec, TranscodeSpec, TrimSpec,
+    UserId, WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -1921,5 +1922,117 @@ async fn a_package_job_lands_a_playlist_and_its_segments() {
     }
     let staging = scratch_dir("staging").join(job.id.to_string());
     assert!(!staging.exists(), "staging survived: {staging:?}");
+    db.dispose().await;
+}
+
+fn batch_step_reading(node: &str, output: u32) -> OpSpec {
+    let source = InputSource::from(NodeRef::new(node, output).expect("valid node ref"));
+    OpSpec::Transcode(
+        TranscodeSpec::new(
+            source,
+            OutputProfile::from_raw(24.0, 0, 0, 0, 48_000, 640, 360).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_runs_its_steps_and_names_their_outputs() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("batch-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/batch-4s.mp4").await;
+    let trim = OpSpec::Trim(TrimSpec::new(input, 0.5, 2.0).unwrap());
+    let probe =
+        OpSpec::Probe(ProbeSpec::new(InputSource::from(NodeRef::new("1", 0).unwrap())).unwrap());
+    let spec =
+        OpSpec::Batch(BatchSpec::new(vec![trim, batch_step_reading("0", 0), probe], true).unwrap());
+
+    let repository = db.repository();
+    let job = repository.create(single_input_job(spec)).await.unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-batch"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(180)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Batch(batch) = record.result.expect("result recorded") else {
+        panic!("expected a batch result");
+    };
+    assert_eq!(batch.steps().len(), 3);
+    let StepState::Result(OpResult::Trim(timed)) = batch.steps()[0].state() else {
+        panic!("expected a trim result at step 0");
+    };
+    let MediaRef::Object(trimmed) = timed.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(trimmed.key(), format!("jobs/{}/steps/0/output.mp4", job.id));
+    let StepState::Result(OpResult::Transcode(transcoded)) = batch.steps()[1].state() else {
+        panic!("expected a transcode result at step 1");
+    };
+    let MediaRef::Object(object) = transcoded.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/steps/1/output.mp4", job.id));
+    let StepState::Result(OpResult::Probe(probed)) = batch.steps()[2].state() else {
+        panic!("expected a probe result at step 2");
+    };
+    assert!(
+        (probed.duration_seconds() - 2.0).abs() < 0.5,
+        "the probed duration is {}",
+        probed.duration_seconds()
+    );
+    db.dispose().await;
+}
+
+async fn failing_batch(store: &S3ObjectStore, db: &TestDb, stop: bool) -> JobRecord {
+    let source = fixture("batch-fail-4s.mp4", 4, 30, "mp4");
+    let input = upload_input(store, &source, "inputs/batch-fail-4s.mp4").await;
+    let trim = OpSpec::Trim(TrimSpec::new(input, 0.5, 2.0).unwrap());
+    let bad = batch_step_reading("0", 9);
+    let spec = OpSpec::Batch(BatchSpec::new(vec![trim, bad], stop).unwrap());
+    let repository = db.repository();
+    let job = repository.create(single_input_job(spec)).await.unwrap();
+    let mut config = base_config(db, Arc::new(store.clone()), "worker-batch-fail");
+    config.retry.max_attempts = 1;
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, Duration::from_secs(180)).await;
+    handle.shutdown().await;
+    record
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_batch_discards_the_outputs_of_earlier_steps() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let record = failing_batch(&store, &db, true).await;
+
+    assert_eq!(record.state, JobState::Failed);
+    assert!(record.result.is_none(), "a stopped batch keeps no result");
+    let object = ObjectRef::new(BUCKET, &format!("jobs/{}/steps/0/output.mp4", record.id)).unwrap();
+    assert!(
+        store.head(&object).await.is_err(),
+        "the earlier step's output was left behind"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continued_batch_reports_what_succeeded() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let record = failing_batch(&store, &db, false).await;
+
+    assert_eq!(record.state, JobState::Failed);
+    let OpResult::Batch(batch) = record.result.expect("a continued batch keeps its result") else {
+        panic!("expected a batch result");
+    };
+    assert!(matches!(
+        batch.steps()[0].state(),
+        StepState::Result(OpResult::Trim(_))
+    ));
+    assert!(matches!(batch.steps()[1].state(), StepState::Failure(_)));
     db.dispose().await;
 }

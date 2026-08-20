@@ -232,7 +232,7 @@ fn thumbnail_rejects_invalid_specs() {
 #[test]
 fn thumbnail_accepts_valid_specs() {
     let spec = ThumbnailSpec::new(object(), vec![0.0, 1.5], 320, 180).unwrap();
-    assert_eq!(spec.offsets_seconds(), &[0.0, 1.5]);
+    assert_eq!(spec.offsets_seconds(), vec![0.0, 1.5]);
     assert_eq!(spec.width(), 320);
     assert_eq!(spec.height(), 180);
 }

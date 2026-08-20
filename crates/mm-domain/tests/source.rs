@@ -82,7 +82,7 @@ fn every_refusal_names_the_field_it_refused() {
 #[test]
 fn a_source_carries_its_cuts() {
     let trim = TrimRange::new(1.0, 2.0).unwrap();
-    let source = MediaSource::new(object(), Some(trim.clone()), Some(0.5), Some(0.25)).unwrap();
+    let source = MediaSource::new(object(), Some(trim), Some(0.5), Some(0.25)).unwrap();
     assert_eq!(source.media(), &object());
     assert_eq!(source.trim(), Some(&trim));
     assert_eq!(source.speed(), Some(0.5));

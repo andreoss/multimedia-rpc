@@ -300,7 +300,7 @@ fn substitute_spec(
         )?),
         OpSpec::Thumbnail(thumbnail) => OpSpec::Thumbnail(ThumbnailSpec::new(
             substitute_input(thumbnail.input(), values)?,
-            thumbnail.offsets_seconds().to_vec(),
+            thumbnail.offsets_seconds(),
             thumbnail.width(),
             thumbnail.height(),
         )?),

@@ -1932,6 +1932,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "proptest",
  "thiserror",
  "tokio",
  "uuid",

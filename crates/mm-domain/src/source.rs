@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::id::{NodeId, NodeIdError, ParameterName, ParameterNameError};
 use crate::op::{MediaRef, MediaRefError};
+use crate::time::Ticks;
 
 const MIN_SPEED: f64 = 0.5;
 const MAX_SPEED: f64 = 2.0;
@@ -48,10 +49,10 @@ fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrimRange {
-    start_seconds: f64,
-    duration_seconds: f64,
+    start: Ticks,
+    duration: Ticks,
 }
 
 impl TrimRange {
@@ -66,18 +67,41 @@ impl TrimRange {
                 value: duration_seconds,
             });
         }
-        Ok(Self {
-            start_seconds,
-            duration_seconds,
+        let start =
+            Ticks::from_seconds(start_seconds).map_err(|_| SourceError::InvalidTrimStart {
+                value: start_seconds,
+            })?;
+        let duration = Ticks::from_seconds(duration_seconds).map_err(|_| {
+            SourceError::InvalidTrimDuration {
+                value: duration_seconds,
+            }
+        })?;
+        Self::from_ticks(start, duration).map_err(|_| SourceError::InvalidTrimDuration {
+            value: duration_seconds,
         })
     }
 
+    pub fn from_ticks(start: Ticks, duration: Ticks) -> Result<Self, SourceError> {
+        if duration.is_zero() {
+            return Err(SourceError::InvalidTrimDuration { value: 0.0 });
+        }
+        Ok(Self { start, duration })
+    }
+
+    pub fn start(&self) -> Ticks {
+        self.start
+    }
+
+    pub fn duration(&self) -> Ticks {
+        self.duration
+    }
+
     pub fn start_seconds(&self) -> f64 {
-        self.start_seconds
+        self.start.seconds()
     }
 
     pub fn duration_seconds(&self) -> f64 {
-        self.duration_seconds
+        self.duration.seconds()
     }
 }
 

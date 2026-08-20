@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::id::{NodeId, NodeIdError};
 use crate::jobs::{JobFailure, JobFailureError};
 use crate::source::{InputSource, SourceError};
+use crate::time::Ticks;
 
 pub const MAX_BATCH_STEPS: usize = 32;
 pub const MAX_GRAPH_NODES: usize = 64;
@@ -127,40 +128,59 @@ pub struct OutputProfile {
     audio_bitrate: Option<u32>,
     audio_sample_rate: Option<u32>,
     resolution: Option<(u32, u32)>,
-    poster_seconds: Option<f64>,
+    poster: Option<Ticks>,
     range: Option<OutputRange>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputRange {
-    start_seconds: f64,
-    duration_seconds: f64,
+    start: Ticks,
+    duration: Ticks,
 }
 
 impl OutputRange {
     pub fn new(start_seconds: f64, duration_seconds: f64) -> Result<Self, OutputProfileError> {
-        if !start_seconds.is_finite() || start_seconds < 0.0 {
-            return Err(OutputProfileError::InvalidRangeStart {
+        let start = Ticks::from_seconds(start_seconds).map_err(|_| {
+            OutputProfileError::InvalidRangeStart {
                 value: start_seconds,
-            });
-        }
+            }
+        })?;
         if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
             return Err(OutputProfileError::InvalidRangeDuration {
                 value: duration_seconds,
             });
         }
-        Ok(Self {
-            start_seconds,
-            duration_seconds,
+        let duration = Ticks::from_seconds(duration_seconds).map_err(|_| {
+            OutputProfileError::InvalidRangeDuration {
+                value: duration_seconds,
+            }
+        })?;
+        Self::from_ticks(start, duration).map_err(|_| OutputProfileError::InvalidRangeDuration {
+            value: duration_seconds,
         })
     }
 
+    pub fn from_ticks(start: Ticks, duration: Ticks) -> Result<Self, OutputProfileError> {
+        if duration.is_zero() {
+            return Err(OutputProfileError::InvalidRangeDuration { value: 0.0 });
+        }
+        Ok(Self { start, duration })
+    }
+
+    pub fn start(&self) -> Ticks {
+        self.start
+    }
+
+    pub fn duration(&self) -> Ticks {
+        self.duration
+    }
+
     pub fn start_seconds(&self) -> f64 {
-        self.start_seconds
+        self.start.seconds()
     }
 
     pub fn duration_seconds(&self) -> f64 {
-        self.duration_seconds
+        self.duration.seconds()
     }
 }
 
@@ -213,19 +233,23 @@ impl OutputProfile {
             audio_bitrate: nonzero(audio_bitrate),
             audio_sample_rate: nonzero(audio_sample_rate),
             resolution,
-            poster_seconds: None,
+            poster: None,
             range: None,
         })
     }
 
     pub fn with_poster(mut self, poster_seconds: f64) -> Result<Self, OutputProfileError> {
-        if !poster_seconds.is_finite() || poster_seconds < 0.0 {
-            return Err(OutputProfileError::InvalidPoster {
+        let poster =
+            Ticks::from_seconds(poster_seconds).map_err(|_| OutputProfileError::InvalidPoster {
                 value: poster_seconds,
-            });
-        }
-        self.poster_seconds = Some(poster_seconds);
+            })?;
+        self.poster = Some(poster);
         Ok(self)
+    }
+
+    pub fn with_poster_ticks(mut self, poster: Ticks) -> Self {
+        self.poster = Some(poster);
+        self
     }
 
     pub fn with_range(mut self, range: OutputRange) -> Self {
@@ -233,8 +257,12 @@ impl OutputProfile {
         self
     }
 
+    pub fn poster(&self) -> Option<Ticks> {
+        self.poster
+    }
+
     pub fn poster_seconds(&self) -> Option<f64> {
-        self.poster_seconds
+        self.poster.map(Ticks::seconds)
     }
 
     pub fn range(&self) -> Option<&OutputRange> {
@@ -248,7 +276,7 @@ impl OutputProfile {
             && self.audio_bitrate.is_none()
             && self.audio_sample_rate.is_none()
             && self.resolution.is_none()
-            && self.poster_seconds.is_none()
+            && self.poster.is_none()
             && self.range.is_none()
     }
 
@@ -375,20 +403,29 @@ fn source<I: Into<InputSource>>(input: I) -> InputSource {
     input.into()
 }
 
-fn parse_nonnegative(value: f64, error: fn(f64) -> OpSpecError) -> Result<f64, OpSpecError> {
-    if value.is_finite() && value >= 0.0 {
-        Ok(value)
-    } else {
-        Err(error(value))
-    }
+fn parse_nonnegative(value: f64, error: fn(f64) -> OpSpecError) -> Result<Ticks, OpSpecError> {
+    Ticks::from_seconds(value).map_err(|_| error(value))
 }
 
-fn parse_positive(value: f64) -> Result<f64, OpSpecError> {
-    if value.is_finite() && value > 0.0 {
-        Ok(value)
-    } else {
-        Err(OpSpecError::NonPositiveDuration { value })
+fn parse_positive(value: f64) -> Result<Ticks, OpSpecError> {
+    if !(value.is_finite() && value > 0.0) {
+        return Err(OpSpecError::NonPositiveDuration { value });
     }
+    let ticks =
+        Ticks::from_seconds(value).map_err(|_| OpSpecError::NonPositiveDuration { value })?;
+    if ticks.is_zero() {
+        return Err(OpSpecError::NonPositiveDuration { value });
+    }
+    Ok(ticks)
+}
+
+fn parse_segment(value: f64) -> Result<Ticks, OpSpecError> {
+    parse_positive(value).map_err(|_| OpSpecError::InvalidSegmentLength { value })
+}
+
+fn parse_poster(value: f64) -> Result<Ticks, OpSpecError> {
+    Ticks::from_seconds(value)
+        .map_err(|_| OpSpecError::from(OutputProfileError::InvalidPoster { value }))
 }
 
 fn parse_profile(profile: Option<OutputProfile>) -> Result<Option<OutputProfile>, OpSpecError> {
@@ -483,8 +520,8 @@ impl TranscodeSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrimSpec {
     input: InputSource,
-    start_seconds: f64,
-    duration_seconds: f64,
+    start: Ticks,
+    duration: Ticks,
 }
 
 impl TrimSpec {
@@ -493,14 +530,25 @@ impl TrimSpec {
         start_seconds: f64,
         duration_seconds: f64,
     ) -> Result<Self, OpSpecError> {
+        let start = parse_nonnegative(start_seconds, |value| OpSpecError::InvalidStart { value })?;
+        let duration = parse_positive(duration_seconds)?;
+        Self::from_ticks(input, start, duration)
+    }
+
+    pub fn from_ticks<I: Into<InputSource>>(
+        input: I,
+        start: Ticks,
+        duration: Ticks,
+    ) -> Result<Self, OpSpecError> {
         let input = source(input);
         reject_cuts("trim", std::slice::from_ref(&input))?;
+        if duration.is_zero() {
+            return Err(OpSpecError::NonPositiveDuration { value: 0.0 });
+        }
         Ok(Self {
             input,
-            start_seconds: parse_nonnegative(start_seconds, |value| OpSpecError::InvalidStart {
-                value,
-            })?,
-            duration_seconds: parse_positive(duration_seconds)?,
+            start,
+            duration,
         })
     }
 
@@ -508,19 +556,27 @@ impl TrimSpec {
         &self.input
     }
 
+    pub fn start(&self) -> Ticks {
+        self.start
+    }
+
+    pub fn duration(&self) -> Ticks {
+        self.duration
+    }
+
     pub fn start_seconds(&self) -> f64 {
-        self.start_seconds
+        self.start.seconds()
     }
 
     pub fn duration_seconds(&self) -> f64 {
-        self.duration_seconds
+        self.duration.seconds()
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThumbnailSpec {
     input: InputSource,
-    offsets_seconds: Vec<f64>,
+    offsets: Vec<Ticks>,
     width: u32,
     height: u32,
     sprite_columns: u32,
@@ -533,13 +589,23 @@ impl ThumbnailSpec {
         width: u32,
         height: u32,
     ) -> Result<Self, OpSpecError> {
+        let offsets = offsets_seconds
+            .into_iter()
+            .map(|offset| parse_nonnegative(offset, |value| OpSpecError::InvalidOffset { value }))
+            .collect::<Result<Vec<Ticks>, OpSpecError>>()?;
+        Self::from_ticks(input, offsets, width, height)
+    }
+
+    pub fn from_ticks<I: Into<InputSource>>(
+        input: I,
+        offsets: Vec<Ticks>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, OpSpecError> {
         let input = source(input);
         reject_cuts("thumbnail", std::slice::from_ref(&input))?;
-        if offsets_seconds.is_empty() {
+        if offsets.is_empty() {
             return Err(OpSpecError::EmptyOffsets);
-        }
-        for offset in &offsets_seconds {
-            parse_nonnegative(*offset, |value| OpSpecError::InvalidOffset { value })?;
         }
         if width == 0 {
             return Err(OpSpecError::ZeroDimension { dimension: "width" });
@@ -551,7 +617,7 @@ impl ThumbnailSpec {
         }
         Ok(Self {
             input,
-            offsets_seconds,
+            offsets,
             width,
             height,
             sprite_columns: 0,
@@ -567,8 +633,12 @@ impl ThumbnailSpec {
         &self.input
     }
 
-    pub fn offsets_seconds(&self) -> &[f64] {
-        &self.offsets_seconds
+    pub fn offsets(&self) -> &[Ticks] {
+        &self.offsets
+    }
+
+    pub fn offsets_seconds(&self) -> Vec<f64> {
+        self.offsets.iter().map(|offset| offset.seconds()).collect()
     }
 
     pub fn width(&self) -> u32 {
@@ -719,30 +789,34 @@ impl ImageSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageSpec {
     input: InputSource,
-    segment_seconds: f64,
+    segment: Ticks,
 }
 
 impl PackageSpec {
     pub fn new<I: Into<InputSource>>(input: I, segment_seconds: f64) -> Result<Self, OpSpecError> {
+        let segment = parse_segment(segment_seconds)?;
+        Self::from_ticks(input, segment)
+    }
+
+    pub fn from_ticks<I: Into<InputSource>>(input: I, segment: Ticks) -> Result<Self, OpSpecError> {
         let input = source(input);
         reject_cuts("package", std::slice::from_ref(&input))?;
-        if !segment_seconds.is_finite() || segment_seconds <= 0.0 {
-            return Err(OpSpecError::InvalidSegmentLength {
-                value: segment_seconds,
-            });
+        if segment.is_zero() {
+            return Err(OpSpecError::InvalidSegmentLength { value: 0.0 });
         }
-        Ok(Self {
-            input,
-            segment_seconds,
-        })
+        Ok(Self { input, segment })
     }
 
     pub fn input(&self) -> &InputSource {
         &self.input
     }
 
+    pub fn segment(&self) -> Ticks {
+        self.segment
+    }
+
     pub fn segment_seconds(&self) -> f64 {
-        self.segment_seconds
+        self.segment.seconds()
     }
 }
 
@@ -750,8 +824,8 @@ impl PackageSpec {
 pub struct LadderSpec {
     input: InputSource,
     rungs: Vec<OutputProfile>,
-    segment_seconds: Option<f64>,
-    poster_seconds: Option<f64>,
+    segment: Option<Ticks>,
+    poster: Option<Ticks>,
 }
 
 impl LadderSpec {
@@ -805,29 +879,32 @@ impl LadderSpec {
         Ok(Self {
             input: source(input),
             rungs,
-            segment_seconds: None,
-            poster_seconds: None,
+            segment: None,
+            poster: None,
         })
     }
 
-    pub fn with_segment_seconds(mut self, segment_seconds: f64) -> Result<Self, OpSpecError> {
-        if !segment_seconds.is_finite() || segment_seconds <= 0.0 {
-            return Err(OpSpecError::InvalidSegmentLength {
-                value: segment_seconds,
-            });
+    pub fn with_segment_seconds(self, segment_seconds: f64) -> Result<Self, OpSpecError> {
+        let segment = parse_segment(segment_seconds)?;
+        self.with_segment(segment)
+    }
+
+    pub fn with_segment(mut self, segment: Ticks) -> Result<Self, OpSpecError> {
+        if segment.is_zero() {
+            return Err(OpSpecError::InvalidSegmentLength { value: 0.0 });
         }
-        self.segment_seconds = Some(segment_seconds);
+        self.segment = Some(segment);
         Ok(self)
     }
 
     pub fn with_poster(mut self, poster_seconds: f64) -> Result<Self, OpSpecError> {
-        if !poster_seconds.is_finite() || poster_seconds < 0.0 {
-            Err(OutputProfileError::InvalidPoster {
-                value: poster_seconds,
-            })?;
-        }
-        self.poster_seconds = Some(poster_seconds);
+        self.poster = Some(parse_poster(poster_seconds)?);
         Ok(self)
+    }
+
+    pub fn with_poster_ticks(mut self, poster: Ticks) -> Self {
+        self.poster = Some(poster);
+        self
     }
 
     pub fn input(&self) -> &InputSource {
@@ -838,12 +915,20 @@ impl LadderSpec {
         &self.rungs
     }
 
+    pub fn segment(&self) -> Option<Ticks> {
+        self.segment
+    }
+
+    pub fn poster(&self) -> Option<Ticks> {
+        self.poster
+    }
+
     pub fn segment_seconds(&self) -> Option<f64> {
-        self.segment_seconds
+        self.segment.map(Ticks::seconds)
     }
 
     pub fn poster_seconds(&self) -> Option<f64> {
-        self.poster_seconds
+        self.poster.map(Ticks::seconds)
     }
 }
 

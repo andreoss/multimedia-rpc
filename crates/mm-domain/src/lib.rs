@@ -8,6 +8,7 @@ mod source;
 mod state;
 mod store;
 mod template;
+mod time;
 mod validate;
 
 pub use callback::{CallbackError, CallbackPublisher, QueueUrl, QueueUrlError};
@@ -55,3 +56,4 @@ pub use state::{
 pub use template::{
     ParameterDeclaration, ParameterType, ParameterValue, Template, TemplateError, render,
 };
+pub use time::{Rate, TICKS_PER_SECOND, Ticks, TimeError};

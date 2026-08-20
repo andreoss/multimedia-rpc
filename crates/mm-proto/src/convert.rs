@@ -464,7 +464,7 @@ impl From<&OpSpec> for v1::OpSpec {
             }),
             OpSpec::Thumbnail(thumbnail) => v1::op_spec::Op::Thumbnail(v1::ThumbnailSpec {
                 input: Some(v1::InputSource::from(thumbnail.input())),
-                offsets_seconds: thumbnail.offsets_seconds().to_vec(),
+                offsets_seconds: thumbnail.offsets_seconds(),
                 width: thumbnail.width(),
                 height: thumbnail.height(),
                 sprite_columns: thumbnail.sprite_columns(),

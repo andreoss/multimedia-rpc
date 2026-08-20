@@ -4,9 +4,9 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use mm_domain::{
-    CancelNotifications, JobFailure, JobId, JobNotifications, JobPage, JobRecord, JobRepository,
-    JobState, JobStoreError, NewJob, OpResult, OpSpec, PageCursor, ProgressPercent, RequestId,
-    UserId, WorkerId,
+    CancelNotifications, JobEventNotifications, JobFailure, JobId, JobNotifications, JobPage,
+    JobRecord, JobRepository, JobState, JobStoreError, NewJob, OpResult, OpSpec, PageCursor,
+    ProgressPercent, RequestId, UserId, WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
@@ -85,6 +85,36 @@ impl PgCancelListener {
 #[async_trait]
 impl CancelNotifications for PgCancelListener {
     async fn cancelled(&self) -> Result<JobId, JobStoreError> {
+        loop {
+            if let Some(payload) = self.inner.next().await? {
+                return Uuid::parse_str(&payload)
+                    .map_err(|error| JobStoreError::Backend(error.to_string()))
+                    .and_then(|uuid| {
+                        JobId::from_uuid(uuid)
+                            .map_err(|error| JobStoreError::Backend(error.to_string()))
+                    });
+            }
+        }
+    }
+}
+
+pub const JOB_EVENTS_CHANNEL: &str = "mm_job_events";
+
+pub struct PgJobEventListener {
+    inner: ChannelListener,
+}
+
+impl PgJobEventListener {
+    pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            inner: ChannelListener::connect(url, JOB_EVENTS_CHANNEL).await?,
+        })
+    }
+}
+
+#[async_trait]
+impl JobEventNotifications for PgJobEventListener {
+    async fn changed(&self) -> Result<JobId, JobStoreError> {
         loop {
             if let Some(payload) = self.inner.next().await? {
                 return Uuid::parse_str(&payload)

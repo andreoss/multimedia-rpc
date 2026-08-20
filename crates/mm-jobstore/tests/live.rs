@@ -5,11 +5,14 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use mm_domain::{
-    CancelNotifications, ConcatSpec, JobFailure, JobId, JobNotifications, JobRepository, JobState,
-    JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProgressPercent, RequestId, TimedOutput,
-    UserId, WorkerId,
+    CancelNotifications, ConcatSpec, JobEventNotifications, JobFailure, JobId, JobNotifications,
+    JobRepository, JobState, JobStoreError, MediaRef, NewJob, OpResult, OpSpec, ProgressPercent,
+    RequestId, TimedOutput, UserId, WorkerId,
 };
-use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository, reconnect_backoff};
+use mm_jobstore::{
+    MIGRATOR, PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository,
+    reconnect_backoff,
+};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -1120,4 +1123,55 @@ async fn an_unreachable_listener_errors_with_growing_backoff() {
         "backoff never grew: {:?}",
         third.elapsed()
     );
+}
+
+#[tokio::test]
+async fn state_and_progress_changes_notify_the_events_listener() {
+    let db = fresh_db().await;
+    let listener = PgJobEventListener::connect(&db.url)
+        .await
+        .expect("listener connects");
+    let repo = db.repository();
+    let job = repo
+        .create(new_job("owner-1", "req-events"))
+        .await
+        .expect("create succeeds");
+    let claimant = worker("w-events");
+    repo.claim(&claimant, limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    let changed = tokio::time::timeout(Duration::from_secs(1), listener.changed())
+        .await
+        .expect("claim notifies within a second")
+        .expect("notification received");
+    assert_eq!(changed, job.id);
+
+    repo.set_progress(job.id, &claimant, ProgressPercent::new(40).expect("progress"))
+        .await
+        .expect("progress persists");
+    let changed = tokio::time::timeout(Duration::from_secs(1), listener.changed())
+        .await
+        .expect("progress notifies within a second")
+        .expect("notification received");
+    assert_eq!(changed, job.id);
+
+    repo.heartbeat(job.id, &claimant, Duration::from_secs(30))
+        .await
+        .expect("heartbeat succeeds");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), listener.changed())
+            .await
+            .is_err(),
+        "a lease-only update must not notify the events channel"
+    );
+
+    repo.mark_succeeded(job.id, &claimant, concat_result())
+        .await
+        .expect("job succeeds");
+    let changed = tokio::time::timeout(Duration::from_secs(1), listener.changed())
+        .await
+        .expect("terminal state notifies within a second")
+        .expect("notification received");
+    assert_eq!(changed, job.id);
+    db.dispose().await;
 }

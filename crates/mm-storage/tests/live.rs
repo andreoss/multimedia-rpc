@@ -89,10 +89,6 @@ fn chunked_body(payload: &[u8], chunk_size: usize) -> ObjectBody {
     Box::pin(futures_util::stream::iter(chunks))
 }
 
-fn fresh_bucket() -> String {
-    format!("mm-it-{}", JobId::generate())
-}
-
 async fn shared_bucket(store: &S3ObjectStore) -> String {
     let bucket = "mm-it-shared".to_string();
     store.ensure_bucket(&bucket).await.unwrap();
@@ -169,7 +165,7 @@ async fn get_of_a_missing_object_is_not_found() {
 #[tokio::test]
 async fn bucket_lifecycle_round_trips() {
     let store = test_store().await;
-    let bucket = fresh_bucket();
+    let bucket = "mm-storage-it".to_string();
     store.ensure_bucket(&bucket).await.unwrap();
     store.ensure_bucket(&bucket).await.unwrap();
     store.delete_bucket(&bucket).await.unwrap();
@@ -261,7 +257,7 @@ async fn wrong_credentials_are_rejected() {
         secret_access_key: "not-the-secret".to_string(),
     }))
     .await;
-    let result = impostor.ensure_bucket(&fresh_bucket()).await;
+    let result = impostor.ensure_bucket("mm-storage-it").await;
     assert!(matches!(result, Err(ObjectStoreError::Backend { .. })));
 }
 

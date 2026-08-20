@@ -10,7 +10,7 @@ use mm_domain::WorkerId;
 use mm_ffmpeg::Prober;
 use mm_jobstore::{PgCancelListener, PgJobEventListener, PgJobListener, PgJobRepository};
 use mm_server::ServerConfig;
-use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
+use mm_storage::{CredentialSource, S3ObjectStore, S3Settings, SqsCallbackPublisher, SqsSettings};
 use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, WorkerHandle};
 use sqlx::postgres::PgPoolOptions;
 
@@ -63,6 +63,9 @@ struct WorkerEnv {
     backoff_base: Duration,
     backoff_cap: Duration,
     notify: bool,
+    queue_endpoint: Option<String>,
+    queue_region: Option<String>,
+    queue_credentials: Option<(String, String)>,
 }
 
 fn stack_env(get: &dyn Fn(&str) -> Option<String>) -> Result<StackEnv, String> {
@@ -168,6 +171,15 @@ fn worker_env(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String>
             })?),
         };
     let notify = notify_var(get, "MM_WORKER_NOTIFY")?;
+    let queue_credentials = match (get("MM_QUEUE_ACCESS_KEY"), get("MM_QUEUE_SECRET_KEY")) {
+        (Some(access), Some(secret)) => Some((access, secret)),
+        (None, None) => None,
+        _ => {
+            return Err(String::from(
+                "MM_QUEUE_ACCESS_KEY and MM_QUEUE_SECRET_KEY must be set together",
+            ));
+        }
+    };
     Ok(WorkerEnv {
         stack,
         worker_id,
@@ -184,6 +196,9 @@ fn worker_env(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String>
         backoff_base: millis_var(get, "MM_WORKER_BACKOFF_BASE_MS", 1000)?,
         backoff_cap: millis_var(get, "MM_WORKER_BACKOFF_CAP_MS", 60000)?,
         notify,
+        queue_endpoint: get("MM_QUEUE_ENDPOINT"),
+        queue_region: get("MM_QUEUE_REGION"),
+        queue_credentials,
     })
 }
 
@@ -271,6 +286,22 @@ async fn start_worker(env: &WorkerEnv) -> Result<WorkerHandle, String> {
             .await
             .map_err(|error| format!("cancel listener failed: {error}"))?;
         config.cancellations = Some(Arc::new(cancels));
+    }
+    if let Some(endpoint) = env.queue_endpoint.clone() {
+        let credentials = match env.queue_credentials.clone() {
+            Some((access_key_id, secret_access_key)) => CredentialSource::Static {
+                access_key_id,
+                secret_access_key,
+            },
+            None => CredentialSource::DefaultChain,
+        };
+        let publisher = SqsCallbackPublisher::connect(SqsSettings {
+            endpoint: Some(endpoint),
+            region: env.queue_region.clone(),
+            credentials,
+        })
+        .await;
+        config.callbacks = Some(Arc::new(publisher));
     }
     let handle = mm_worker::start(config);
     println!("worker {} ready", env.worker_id);
@@ -540,6 +571,34 @@ mod tests {
         let mut map = complete();
         map.insert("MM_WORKER_NOTIFY".into(), "maybe".into());
         assert!(worker_from(&map).unwrap_err().contains("MM_WORKER_NOTIFY"));
+    }
+
+    #[test]
+    fn the_queue_settings_default_to_absent() {
+        let env = worker_from(&complete()).expect("environment parses");
+        assert_eq!(env.queue_endpoint, None);
+        assert_eq!(env.queue_region, None);
+        assert_eq!(env.queue_credentials, None);
+    }
+
+    #[test]
+    fn the_queue_settings_are_configurable() {
+        let mut map = complete();
+        map.insert("MM_QUEUE_ENDPOINT".into(), "http://h:9324".into());
+        map.insert("MM_QUEUE_REGION".into(), "local".into());
+        map.insert("MM_QUEUE_ACCESS_KEY".into(), "qa".into());
+        map.insert("MM_QUEUE_SECRET_KEY".into(), "qs".into());
+        let env = worker_from(&map).expect("environment parses");
+        assert_eq!(env.queue_endpoint, Some("http://h:9324".into()));
+        assert_eq!(env.queue_region, Some("local".into()));
+        assert_eq!(env.queue_credentials, Some(("qa".into(), "qs".into())));
+    }
+
+    #[test]
+    fn queue_credentials_require_both_halves() {
+        let mut map = complete();
+        map.insert("MM_QUEUE_ACCESS_KEY".into(), "qa".into());
+        assert!(worker_from(&map).unwrap_err().contains("MM_QUEUE"));
     }
 
     #[test]

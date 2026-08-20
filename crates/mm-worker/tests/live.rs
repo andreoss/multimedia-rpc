@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    ConcatSpec, JobId, JobRecord, JobRepository, JobState, MediaRef, NewJob, ObjectBody, ObjectRef,
-    ObjectStore, ObjectStoreError, OpResult, OpSpec, ProbeSpec, RequestId, UserId, WorkerId,
+    CallbackError, CallbackPublisher, ConcatSpec, JobId, JobRecord, JobRepository, JobState,
+    MediaRef, NewJob, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec,
+    ProbeSpec, QueueUrl, RequestId, UserId, WorkerId,
 };
 use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -483,6 +484,163 @@ async fn blocking_validation_fails_the_job_with_input_codes() {
     );
     assert_eq!(record.attempts, 1, "permanent failure was retried");
     assert!(record.next_attempt_at.is_none());
+    db.dispose().await;
+}
+
+#[derive(Default)]
+struct CountingFailures {
+    attempts: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait]
+impl CallbackPublisher for CountingFailures {
+    async fn publish(&self, _queue: &QueueUrl, _message: &str) -> Result<(), CallbackError> {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(CallbackError::Backend {
+            message: "injected callback failure".to_string(),
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_publish_failure_never_changes_the_terminal_state() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let foreign = fixture("blocked.mkv", 2, 30, "matroska");
+    let good = fixture("merge-b-3s.mp4", 3, 30, "mp4");
+    let refs = vec![
+        upload_input(&store, &foreign, "inputs/blocked-cb.mkv").await,
+        upload_input(&store, &good, "inputs/merge-b-3s-cb.mp4").await,
+    ];
+    let repository = db.repository();
+    let queue = QueueUrl::new("http://127.0.0.1:9324/queue/mm-worker-absent").unwrap();
+    let job = repository
+        .create(concat_job(refs).with_callback(queue))
+        .await
+        .unwrap();
+
+    let publisher = Arc::new(CountingFailures::default());
+    let mut config = base_config(&db, store.clone(), "worker-cb-fail");
+    config.retry = RetryPolicy {
+        max_attempts: 2,
+        base: Duration::from_millis(50),
+        cap: Duration::from_millis(100),
+    };
+    config.callbacks = Some(publisher.clone());
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, Duration::from_secs(60)).await;
+
+    let settle = Instant::now() + Duration::from_secs(10);
+    while publisher.attempts.load(std::sync::atomic::Ordering::SeqCst) < 2
+        && Instant::now() < settle
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed);
+    assert_eq!(
+        publisher.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "publish attempts are capped by the retry policy"
+    );
+    let refreshed = repository
+        .get(job.id)
+        .await
+        .expect("get succeeds")
+        .expect("job present");
+    assert_eq!(refreshed.state, JobState::Failed);
+    assert_eq!(
+        refreshed.failure.expect("failure recorded").code(),
+        codes::VALIDATION_BLOCKED
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let queue_endpoint = env_or("MM_QUEUE_ENDPOINT", "http://127.0.0.1:9324");
+    let queue_authority = queue_endpoint
+        .strip_prefix("http://")
+        .or_else(|| queue_endpoint.strip_prefix("https://"))
+        .expect("endpoint must be an http(s) url")
+        .trim_end_matches('/');
+    require_reachable(queue_authority, "queue");
+    let publisher = Arc::new(
+        mm_storage::SqsCallbackPublisher::connect(mm_storage::SqsSettings {
+            endpoint: Some(queue_endpoint.clone()),
+            region: Some("local".to_string()),
+            credentials: CredentialSource::Static {
+                access_key_id: "queue-access".to_string(),
+                secret_access_key: "queue-secret".to_string(),
+            },
+        })
+        .await,
+    );
+    let queue = publisher
+        .ensure_queue(&format!("mm-worker-cb-{}", Uuid::now_v7().simple()))
+        .await
+        .expect("queue exists");
+
+    let foreign = fixture("blocked.mkv", 2, 30, "matroska");
+    let good = fixture("merge-b-3s.mp4", 3, 30, "mp4");
+    let refs = vec![
+        upload_input(&store, &foreign, "inputs/blocked-queue.mkv").await,
+        upload_input(&store, &good, "inputs/merge-b-3s-queue.mp4").await,
+    ];
+    let repository = db.repository();
+    let job = repository
+        .create(concat_job(refs.clone()).with_callback(queue.clone()))
+        .await
+        .unwrap();
+
+    let mut config = base_config(&db, store.clone(), "worker-cb-blocked");
+    config.callbacks = Some(publisher.clone());
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, Duration::from_secs(60)).await;
+    assert_eq!(record.state, JobState::Failed);
+
+    let settle = Instant::now() + Duration::from_secs(20);
+    let bodies = loop {
+        let received = tokio::time::timeout(
+            Duration::from_secs(10),
+            publisher.receive(&queue, Duration::from_secs(2)),
+        )
+        .await
+        .expect("receive answers in time")
+        .expect("receive succeeds");
+        if !received.is_empty() {
+            break received;
+        }
+        assert!(Instant::now() < settle, "no callback message arrived");
+    };
+    handle.shutdown().await;
+
+    assert_eq!(bodies.len(), 1);
+    let decoded = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(&bodies[0])
+            .expect("message is base64")
+    };
+    let outcome =
+        <mm_proto::v1::JobOutcome as prost::Message>::decode(decoded.as_slice())
+            .expect("message is a job outcome");
+    assert_eq!(outcome.job_id, job.id.to_string());
+    assert_eq!(outcome.request_id, job.request.to_string());
+    assert_eq!(outcome.state, mm_proto::v1::JobState::Failed as i32);
+    assert_eq!(outcome.error_code, codes::VALIDATION_BLOCKED);
+    assert!(outcome.result.is_none());
+    assert!(!outcome.file_errors.is_empty());
+    assert_eq!(outcome.file_errors[0].code, "UnsupportedContainer");
+    assert_eq!(
+        outcome.file_errors[0].media_ref,
+        Some(mm_proto::v1::MediaRef::from(&refs[0]))
+    );
+    publisher.delete_queue(&queue).await.expect("queue removed");
     db.dispose().await;
 }
 

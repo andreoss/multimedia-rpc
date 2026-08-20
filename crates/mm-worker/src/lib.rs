@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mm_domain::{CancelNotifications, JobNotifications, JobRepository, ObjectStore, WorkerId};
+use mm_domain::{
+    CallbackPublisher, CancelNotifications, JobNotifications, JobRepository, ObjectStore, WorkerId,
+};
 use mm_ffmpeg::{ProbeLimits, Prober, Runner};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -40,6 +42,7 @@ pub struct WorkerConfig {
     pub retry: RetryPolicy,
     pub notifications: Option<Arc<dyn JobNotifications>>,
     pub cancellations: Option<Arc<dyn CancelNotifications>>,
+    pub callbacks: Option<Arc<dyn CallbackPublisher>>,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -73,6 +76,7 @@ impl WorkerConfig {
             retry: RetryPolicy::default(),
             notifications: None,
             cancellations: None,
+            callbacks: None,
             reserved: std::sync::Mutex::new(0),
         }
     }

@@ -43,7 +43,7 @@ pub use store::{
 pub use validate::{
     AudioReport, BlockCode, InputPolicy, InputReport, MediaKind, Verdict, VerdictCode,
     VerdictParseError, VideoReport, WarnCode, parse_rendered_verdicts, render_verdicts,
-    validate_concat_inputs, validate_inputs,
+    validate_concat_inputs, validate_inputs, validate_ladder_rungs,
 };
 
 pub use source::{InputSource, MediaSource, NodeRef, SourceError, TrimRange};

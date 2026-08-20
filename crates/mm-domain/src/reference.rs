@@ -14,6 +14,7 @@ pub fn verdict_code(name: &str) -> &str {
         "TotalDurationTooLong" => "ERROR_TOTAL_DURATION_EXCEEDED",
         "MediaKindMismatch" => "ERROR_MEDIA_KIND_MISMATCH",
         "ResolutionMismatch" => "ERROR_RESOLUTION_MISMATCH",
+        "RungUpscale" => "ERROR_UPSCALE_NOT_ALLOWED",
         other => other,
     }
 }

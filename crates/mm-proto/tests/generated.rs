@@ -304,6 +304,7 @@ fn file_error_pairs_ref_and_code() {
         step_index: Some(1),
         node_id: Some("join".to_string()),
         input_index: Some(0),
+        rung: None,
     };
     let decoded = v1::FileError::decode(error.encode_to_vec().as_slice()).unwrap();
     assert_eq!(decoded.code, "NO_VIDEO");

@@ -1381,6 +1381,7 @@ async fn a_blocked_job_publishes_its_error_code_and_file_errors() {
             step_index: None,
             node_id: None,
             input_index: Some(0),
+            rung: None,
         }
     );
     let recorded = record
@@ -2507,6 +2508,51 @@ async fn a_cancel_during_a_ladder_leaves_no_key_and_no_staged_file() {
         );
         let staged = scratch_dir("staging").join(format!("{}-rung{index}.mp4", job.id));
         assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ladder_rung_above_the_source_blocks_naming_the_rung() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("ladder-upscale-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/ladder-upscale-source.mp4").await;
+    let repository = db.repository();
+    let rungs = vec![
+        OutputProfile::from_raw(24.0, 400_000, 28, 64_000, 48_000, 640, 360).unwrap(),
+        OutputProfile::from_raw(24.0, 4_000_000, 23, 64_000, 48_000, 3840, 2160).unwrap(),
+    ];
+    let job = repository
+        .create(single_input_job(OpSpec::Ladder(
+            LadderSpec::new(input, rungs).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-ladder-upscale"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::VALIDATION_BLOCKED);
+    assert_eq!(failure.inputs().len(), 1);
+    let rung_failure = &failure.inputs()[0];
+    assert_eq!(rung_failure.rung(), Some(1));
+    assert_eq!(rung_failure.code(), "ERROR_UPSCALE_NOT_ALLOWED");
+    assert!(
+        failure.message().contains("rung 1: RungUpscale"),
+        "{failure:?}"
+    );
+    for index in 0..2 {
+        let key = ObjectRef::new(
+            BUCKET,
+            &format!("jobs/{}/renditions/{index}/output.mp4", job.id),
+        )
+        .unwrap();
+        assert!(store.head(&key).await.is_err(), "key {index} landed");
     }
     db.dispose().await;
 }

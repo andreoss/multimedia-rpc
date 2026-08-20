@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::jobs::{InputFailure, InputFailureError};
 use crate::op::OpKind;
+use crate::op::OutputProfile;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,7 @@ pub enum BlockCode {
     TotalDurationTooLong,
     MediaKindMismatch,
     ResolutionMismatch,
+    RungUpscale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,6 +90,7 @@ impl VerdictCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Verdict {
     pub input: Option<usize>,
+    pub rung: Option<usize>,
     pub code: VerdictCode,
 }
 
@@ -105,6 +108,7 @@ const MAX_LOUDNESS_DELTA_DB: f64 = 6.0;
 
 fn block(input: Option<usize>, code: BlockCode) -> Verdict {
     Verdict {
+        rung: None,
         input,
         code: VerdictCode::Block(code),
     }
@@ -112,6 +116,7 @@ fn block(input: Option<usize>, code: BlockCode) -> Verdict {
 
 fn warn(input: Option<usize>, code: WarnCode) -> Verdict {
     Verdict {
+        rung: None,
         input,
         code: VerdictCode::Warn(code),
     }
@@ -350,6 +355,24 @@ pub fn validate_inputs(kind: OpKind, inputs: &[InputReport]) -> Vec<Verdict> {
     verdicts
 }
 
+pub fn validate_ladder_rungs(rungs: &[OutputProfile], source: (u32, u32)) -> Vec<Verdict> {
+    rungs
+        .iter()
+        .enumerate()
+        .filter(|(_, profile)| {
+            let Some((width, height)) = profile.resolution() else {
+                return false;
+            };
+            width > source.0 || height > source.1
+        })
+        .map(|(rung, _)| Verdict {
+            input: None,
+            rung: Some(rung),
+            code: VerdictCode::Block(BlockCode::RungUpscale),
+        })
+        .collect()
+}
+
 pub fn validate_concat_inputs(inputs: &[InputReport]) -> Vec<Verdict> {
     validate_inputs(OpKind::Concat, inputs)
 }
@@ -359,9 +382,10 @@ pub fn render_verdicts(verdicts: &[Verdict]) -> String {
         .iter()
         .map(|verdict| {
             let code = verdict.code.name();
-            match verdict.input {
-                Some(index) => format!("input {index}: {code}"),
-                None => format!("inputs: {code}"),
+            match (verdict.input, verdict.rung) {
+                (Some(index), _) => format!("input {index}: {code}"),
+                (None, Some(rung)) => format!("rung {rung}: {code}"),
+                (None, None) => format!("inputs: {code}"),
             }
         })
         .collect::<Vec<_>>()
@@ -396,26 +420,37 @@ pub fn parse_rendered_verdicts(text: &str) -> Result<Vec<InputFailure>, VerdictP
                     code: code.to_string(),
                 });
             }
+            let parsed = |raw: &str| {
+                raw.parse::<usize>()
+                    .map_err(|_| VerdictParseError::Subject {
+                        subject: subject.to_string(),
+                    })
+            };
             let input = if subject == "inputs" {
                 None
             } else if let Some(raw) = subject.strip_prefix("input ") {
-                Some(
-                    raw.parse::<usize>()
-                        .map_err(|_| VerdictParseError::Subject {
-                            subject: subject.to_string(),
-                        })?,
-                )
+                Some(parsed(raw)?)
+            } else if subject.starts_with("rung ") {
+                None
             } else {
                 return Err(VerdictParseError::Subject {
                     subject: subject.to_string(),
                 });
             };
-            InputFailure::new(None, None, input, code).map_err(|source| {
+            let rung = match subject.strip_prefix("rung ") {
+                Some(raw) => Some(parsed(raw)?),
+                None => None,
+            };
+            let failure = InputFailure::new(None, None, input, code).map_err(|source| {
                 VerdictParseError::Invalid {
                     code: code.to_string(),
                     source,
                 }
-            })
+            })?;
+            match rung {
+                Some(rung) => Ok(failure.with_rung(rung)),
+                None => Ok(failure),
+            }
         })
         .collect()
 }

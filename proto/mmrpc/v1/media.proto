@@ -61,6 +61,7 @@ message FileError {
   optional uint32 step_index = 3;
   optional string node_id = 4;
   optional uint32 input_index = 5;
+  optional uint32 rung = 6;
 }
 
 message InputFailureList {

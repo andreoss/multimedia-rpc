@@ -91,14 +91,17 @@ fn unset_profile_fields_keep_the_target_defaults() {
 fn mixed_verdicts() -> Vec<Verdict> {
     vec![
         Verdict {
+            rung: None,
             input: Some(0),
             code: VerdictCode::Block(BlockCode::UnsupportedContainer),
         },
         Verdict {
+            rung: None,
             input: None,
             code: VerdictCode::Warn(WarnCode::FpsDrift),
         },
         Verdict {
+            rung: None,
             input: Some(1),
             code: VerdictCode::Block(BlockCode::DrmProtected),
         },

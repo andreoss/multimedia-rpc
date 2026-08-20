@@ -204,6 +204,7 @@ fn file_errors(record: &JobRecord) -> Vec<v1::FileError> {
             step_index: input.step().map(|step| step as u32),
             node_id: input.node().map(|node| node.as_str().to_string()),
             input_index: input.input().map(|position| position as u32),
+            rung: input.rung().map(|rung| rung as u32),
         })
         .collect()
 }

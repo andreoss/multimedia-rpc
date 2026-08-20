@@ -41,6 +41,7 @@ pub struct InputFailure {
     step: Option<usize>,
     node: Option<NodeId>,
     input: Option<usize>,
+    rung: Option<usize>,
     code: String,
 }
 
@@ -70,6 +71,7 @@ impl InputFailure {
                 .transpose()
                 .map_err(InputFailureError::Node)?,
             input,
+            rung: None,
             code: parse_text_id(code, Self::CODE_MAX_LENGTH).map_err(InputFailureError::Code)?,
         })
     }
@@ -95,6 +97,15 @@ impl InputFailure {
         self.input
     }
 
+    pub fn rung(&self) -> Option<usize> {
+        self.rung
+    }
+
+    pub fn with_rung(mut self, rung: usize) -> Self {
+        self.rung = Some(rung);
+        self
+    }
+
     pub fn code(&self) -> &str {
         &self.code
     }
@@ -114,6 +125,7 @@ impl From<&Verdict> for InputFailure {
             step: None,
             node: None,
             input: verdict.input,
+            rung: verdict.rung,
             code: verdict.code.name(),
         }
     }

@@ -504,14 +504,17 @@ fn rendered_verdicts_round_trip_through_parse() {
     use mm_domain::{InputFailure, parse_rendered_verdicts, render_verdicts};
     let verdicts = vec![
         Verdict {
+            rung: None,
             input: Some(0),
             code: VerdictCode::Block(BlockCode::UnsupportedContainer),
         },
         Verdict {
+            rung: None,
             input: None,
             code: VerdictCode::Block(BlockCode::TooFewInputs),
         },
         Verdict {
+            rung: None,
             input: Some(2),
             code: VerdictCode::Warn(WarnCode::FpsDrift),
         },

@@ -15,8 +15,8 @@ use mm_domain::{
     ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
     PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
     ResizeMode as DomainResizeMode, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, VideoStreamInfo, WorkerId,
-    resolve_media_ref, validate_inputs,
+    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId,
+    resolve_media_ref, validate_inputs, validate_ladder_rungs,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -1314,6 +1314,17 @@ async fn probe_still(ctx: &WorkerConfig, url: &str, index: usize) -> Result<Stil
         .map_err(|error| failed(codes::PROBE_FAILED, format!("input {index}: {error}")))
 }
 
+fn gate_rung_verdicts(verdicts: &[Verdict]) -> Result<(), Finish> {
+    let blocking = blocks(verdicts);
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    let failure = JobFailure::new(codes::VALIDATION_BLOCKED, &render_verdicts(&blocking))
+        .expect("worker failure codes are valid")
+        .with_inputs(blocking.iter().map(InputFailure::from).collect());
+    Err(Finish::Failed(failure))
+}
+
 fn gate_verdicts(id: JobId, kind: OpKind, reports: &[InputReport]) -> Result<(), Finish> {
     let verdicts = validate_inputs(kind, reports);
     let blocking = blocks(&verdicts);
@@ -1440,6 +1451,10 @@ async fn ladder_pipeline(
     check(signal)?;
     let info = probe_source(ctx, spec.input(), &url, 0).await?;
     gate_verdicts(job.id, OpKind::Ladder, &[input_report(&info)])?;
+    let source_shape = measured_rendition_shape(&info);
+    if let Some(shape) = source_shape {
+        gate_rung_verdicts(&validate_ladder_rungs(spec.rungs(), shape))?;
+    }
 
     let inputs = [spec.input().clone()];
     let infos = [info];

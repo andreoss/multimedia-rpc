@@ -421,6 +421,7 @@ async fn a_foreign_container_blocks_live() {
 
     let verdicts = validate_concat_inputs(&[to_report(&bad_info), to_report(&good_info)]);
     assert!(verdicts.contains(&Verdict {
+        rung: None,
         input: Some(0),
         code: VerdictCode::Block(BlockCode::UnsupportedContainer),
     }));
@@ -441,6 +442,7 @@ async fn frame_rate_drift_warns_live() {
 
     let verdicts = validate_concat_inputs(&[to_report(&main_info), to_report(&slow_info)]);
     assert!(verdicts.contains(&Verdict {
+        rung: None,
         input: None,
         code: VerdictCode::Warn(WarnCode::FpsDrift),
     }));

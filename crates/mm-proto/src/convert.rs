@@ -788,6 +788,7 @@ fn input_failure(failure: &InputFailure) -> v1::FileError {
         step_index: failure.step().map(position),
         node_id: failure.node().map(|node| node.as_str().to_string()),
         input_index: failure.input().map(position),
+        rung: failure.rung().map(position),
     }
 }
 
@@ -815,12 +816,16 @@ impl TryFrom<&v1::FileError> for InputFailure {
     type Error = InputFailureError;
 
     fn try_from(value: &v1::FileError) -> Result<Self, Self::Error> {
-        InputFailure::at_index(
+        let failure = InputFailure::at_index(
             value.step_index,
             value.node_id.as_deref(),
             value.input_index,
             &value.code,
-        )
+        )?;
+        match value.rung {
+            Some(rung) => Ok(failure.with_rung(rung as usize)),
+            None => Ok(failure),
+        }
     }
 }
 

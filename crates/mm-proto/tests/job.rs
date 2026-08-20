@@ -72,6 +72,7 @@ fn file_error(
         step_index: step,
         node_id: node.map(str::to_string),
         input_index: input,
+        rung: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn a_validation_failure_maps_file_errors_onto_the_spec_inputs() {
                 step_index: None,
                 node_id: None,
                 input_index: None,
+                rung: None,
             },
         ]
     );
@@ -124,6 +126,7 @@ fn a_file_error_reads_back_into_the_input_failure_the_row_carries() {
         step_index: Some(1),
         node_id: Some("join".to_string()),
         input_index: Some(0),
+        rung: None,
     })
     .expect("a rendered file error is a valid input failure");
 
@@ -141,6 +144,7 @@ fn a_file_error_read_back_and_rendered_again_reads_the_same() {
         step_index: Some(1),
         node_id: Some("join".to_string()),
         input_index: Some(0),
+        rung: None,
     };
 
     let failure = InputFailure::try_from(&rendered).expect("input failure");
@@ -158,6 +162,7 @@ fn a_file_error_that_names_no_valid_identity_is_refused() {
             step_index: None,
             node_id: Some("join step".to_string()),
             input_index: None,
+            rung: None,
         })
         .is_err()
     );
@@ -168,6 +173,7 @@ fn a_file_error_that_names_no_valid_identity_is_refused() {
             step_index: None,
             node_id: None,
             input_index: None,
+            rung: None,
         })
         .is_err()
     );

@@ -12,18 +12,30 @@ summary="$logdir/summary.txt"
 mkdir -p "$logdir"
 : > "$summary"
 
+stack_ready() {
+    for service in db objectstore queue; do
+        container=$(docker compose ps -q "$service" 2>/dev/null)
+        if [ -z "$container" ]; then
+            return 1
+        fi
+        state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null)
+        if [ "$state" != "healthy" ]; then
+            return 1
+        fi
+    done
+}
+
 wait_for_stack() {
     attempt=0
-    while [ "$attempt" -lt 60 ]; do
-        if nc -z -w 2 127.0.0.1 "${MM_DB_PORT:-5433}" 2>/dev/null \
-            && nc -z -w 2 127.0.0.1 "${MM_STORE_PORT:-8333}" 2>/dev/null \
-            && nc -z -w 2 127.0.0.1 "${MM_QUEUE_PORT:-9324}" 2>/dev/null; then
+    while [ "$attempt" -lt 120 ]; do
+        if stack_ready; then
             return 0
         fi
         attempt=$((attempt + 1))
         sleep 1
     done
-    echo "stability: the stack did not answer on every port" >&2
+    echo "stability: the stack did not report healthy on every service" >&2
+    docker compose ps >&2
     return 1
 }
 

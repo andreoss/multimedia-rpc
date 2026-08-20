@@ -13,7 +13,7 @@ use mm_domain::{
 };
 use mm_jobstore::{MIGRATOR, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
-use mm_worker::{WorkerConfig, codes, start};
+use mm_worker::{DiskBudget, WorkerConfig, codes, start};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -535,5 +535,49 @@ async fn a_passed_deadline_fails_before_any_work() {
     assert_eq!(record.state, JobState::Failed);
     let failure = record.failure.expect("failure recorded");
     assert_eq!(failure.code(), codes::INPUT_UNRESOLVABLE);
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_job_is_released_until_disk_frees() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let first = fixture("merge-a-4s.mp4", 4, 30, "mp4");
+    let second = fixture("merge-b-3s.mp4", 3, 30, "mp4");
+    let refs = vec![
+        upload_input(&store, &first, "inputs/merge-a-4s.mp4").await,
+        upload_input(&store, &second, "inputs/merge-b-3s.mp4").await,
+    ];
+    let repository = db.repository();
+    let job = repository.create(concat_job(refs)).await.unwrap();
+
+    let mut tight = base_config(&db, store.clone(), "worker-tight");
+    tight.disk_budget = DiskBudget::Fixed(1024);
+    tight.release_retry = Duration::from_millis(300);
+    let tight_handle = start(tight);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let record = repository.get(job.id).await.unwrap().unwrap();
+        assert!(
+            !record.state.is_terminal(),
+            "job finished under a tight budget: {:?}",
+            record.state
+        );
+        if record.state == JobState::Pending && record.next_attempt_at.is_some() {
+            assert_eq!(record.attempts, 0);
+            break;
+        }
+        assert!(Instant::now() < deadline, "job was never released");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tight_handle.shutdown().await;
+
+    let roomy = base_config(&db, store.clone(), "worker-roomy");
+    let roomy_handle = start(roomy);
+    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    roomy_handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
     db.dispose().await;
 }

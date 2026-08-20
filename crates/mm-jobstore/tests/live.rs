@@ -727,3 +727,61 @@ async fn corrupt_spec_bytes_surface_as_corrupt_record() {
     ));
     db.dispose().await;
 }
+
+#[tokio::test]
+async fn release_returns_a_claimed_job_to_pending_with_a_retry_delay() {
+    let db = fresh_db().await;
+    let repo = db.repository();
+    let job = repo
+        .create(new_job("owner-1", "req-release"))
+        .await
+        .expect("create succeeds");
+    let claimant = worker("w-release");
+    let claimed = repo
+        .claim(&claimant, limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed.len(), 1);
+
+    repo.release(job.id, &claimant, Duration::from_secs(60))
+        .await
+        .expect("release succeeds");
+    let record = repo
+        .get(job.id)
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert_eq!(record.state, JobState::Pending);
+    assert!(record.claimed_by.is_none());
+    assert!(record.lease_expires_at.is_none());
+    assert_eq!(record.attempts, 0);
+    assert_eq!(record.progress, ProgressPercent::ZERO);
+    let due = record.next_attempt_at.expect("retry scheduled");
+    assert!(due > SystemTime::now() + Duration::from_secs(30));
+
+    let reclaim = repo
+        .claim(&worker("w-other"), limit(1), Duration::from_secs(30))
+        .await
+        .expect("claim succeeds");
+    assert!(reclaim.is_empty(), "scheduled-for-later job was claimed");
+
+    let stale = repo
+        .mark_failed(
+            job.id,
+            &claimant,
+            JobFailure::new("stale", "finalize after release").expect("valid failure"),
+        )
+        .await;
+    assert!(matches!(
+        stale,
+        Err(JobStoreError::InvalidTransition { .. })
+    ));
+    let repeated = repo
+        .release(job.id, &claimant, Duration::from_secs(1))
+        .await;
+    assert!(matches!(
+        repeated,
+        Err(JobStoreError::InvalidTransition { .. })
+    ));
+    db.dispose().await;
+}

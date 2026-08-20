@@ -9,6 +9,7 @@ mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
 bytes.workspace = true
 futures-util.workspace = true
+libc.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = [
     "fs",

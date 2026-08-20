@@ -33,7 +33,50 @@ const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 enum Finish {
     Cancelled,
     LeaseLost,
+    Released,
     Failed(JobFailure),
+}
+
+struct Reservation<'a> {
+    ledger: &'a std::sync::Mutex<u64>,
+    amount: u64,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let mut reserved = self.ledger.lock().expect("ledger lock");
+        *reserved = reserved.saturating_sub(self.amount);
+    }
+}
+
+fn admit(ctx: &WorkerConfig, estimate: u64) -> Result<Option<Reservation<'_>>, u64> {
+    let Some(available) = ctx.disk_budget.available(&ctx.staging_dir) else {
+        return Ok(None);
+    };
+    let mut reserved = ctx.ledger().lock().expect("ledger lock");
+    if !crate::budget::admits(estimate, available, *reserved) {
+        return Err(available);
+    }
+    *reserved = reserved.saturating_add(estimate);
+    Ok(Some(Reservation {
+        ledger: ctx.ledger(),
+        amount: estimate,
+    }))
+}
+
+async fn estimate_bytes(ctx: &WorkerConfig, inputs: &[MediaRef], infos: &[MediaInfo]) -> u64 {
+    let mut total = 0u64;
+    for (input, info) in inputs.iter().zip(infos) {
+        let size = match info.size_bytes {
+            Some(size) => size,
+            None => match input {
+                MediaRef::Object(object) => ctx.store.head(object).await.unwrap_or(0),
+                MediaRef::Http(_) => 0,
+            },
+        };
+        total = total.saturating_add(size);
+    }
+    total
 }
 
 fn failed(code: &str, message: impl ToString) -> Finish {
@@ -130,7 +173,7 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
         Err(Finish::Cancelled) => {
             let _ = ctx.repository.mark_cancelled(job.id).await;
         }
-        Err(Finish::LeaseLost) => {}
+        Err(Finish::LeaseLost) | Err(Finish::Released) => {}
         Err(Finish::Failed(failure)) => {
             let _ = ctx
                 .repository
@@ -191,15 +234,32 @@ async fn pipeline(
         println!("job {} warnings: {}", job.id, render_verdicts(&warned));
     }
 
+    tokio::fs::create_dir_all(&ctx.staging_dir)
+        .await
+        .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+    let estimate = estimate_bytes(ctx, spec.inputs(), &infos).await;
+    let _reservation = match admit(ctx, estimate) {
+        Ok(reservation) => reservation,
+        Err(available) => {
+            println!(
+                "job {} released: estimated {estimate} bytes exceed the \
+                 available {available}",
+                job.id
+            );
+            let _ = ctx
+                .repository
+                .release(job.id, &ctx.worker_id, ctx.release_retry)
+                .await;
+            return Err(Finish::Released);
+        }
+    };
+
     let total: Duration = infos.iter().map(|info| info.duration).sum();
     let first_resolution = infos[0]
         .video
         .first()
         .map(|video| (video.width, video.height));
     let profile = target_profile(spec.profile());
-    tokio::fs::create_dir_all(&ctx.staging_dir)
-        .await
-        .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
     let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));
     let args = build_concat_args(
         &urls,

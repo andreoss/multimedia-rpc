@@ -369,6 +369,33 @@ impl JobRepository for PgJobRepository {
         .collect()
     }
 
+    async fn release(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        retry_after: Duration,
+    ) -> Result<(), JobStoreError> {
+        let updated = sqlx::query!(
+            "UPDATE jobs SET state = 'PENDING', claimed_by = NULL, \
+             lease_expires_at = NULL, progress_percent = 0, \
+             attempts = GREATEST(attempts - 1, 0), \
+             next_attempt_at = now() + make_interval(secs => $3) \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING'",
+            id.as_uuid(),
+            worker.as_str(),
+            retry_after.as_secs_f64()
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        if updated.rows_affected() == 0 {
+            return Err(self
+                .transition_conflict(id, JobState::Pending, Some(worker))
+                .await);
+        }
+        Ok(())
+    }
+
     async fn set_progress(
         &self,
         id: JobId,

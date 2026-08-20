@@ -440,6 +440,10 @@ async fn pipeline(
         OpSpec::Thumbnail(spec) => thumbnail_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Image(spec) => image_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Package(spec) => package_pipeline(ctx, job, spec, deadline_at, signal).await,
+        OpSpec::Batch(_) => Err(failed(
+            codes::UNSUPPORTED_OPERATION,
+            "batch execution is not implemented",
+        )),
     }
 }
 

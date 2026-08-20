@@ -65,6 +65,11 @@ message PackageSpec {
   double segment_seconds = 2;
 }
 
+message BatchSpec {
+  repeated OpSpec steps = 1;
+  optional bool stop_on_failure = 2;
+}
+
 message OpSpec {
   oneof op {
     ConcatSpec concat = 1;
@@ -74,6 +79,7 @@ message OpSpec {
     ThumbnailSpec thumbnail = 5;
     ImageSpec image = 6;
     PackageSpec package = 7;
+    BatchSpec batch = 8;
   }
 }
 
@@ -111,6 +117,24 @@ message PackageResult {
   repeated MediaRef segments = 2;
 }
 
+message StepFailure {
+  string code = 1;
+  string message = 2;
+  repeated FileError file_errors = 3;
+}
+
+message StepOutcome {
+  uint32 position = 1;
+  oneof outcome {
+    OpResult result = 2;
+    StepFailure failure = 3;
+  }
+}
+
+message BatchResult {
+  repeated StepOutcome steps = 1;
+}
+
 message OpResult {
   oneof op {
     ConcatResult concat = 1;
@@ -120,5 +144,6 @@ message OpResult {
     ThumbnailResult thumbnail = 5;
     ImageResult image = 6;
     PackageResult package = 7;
+    BatchResult batch = 8;
   }
 }

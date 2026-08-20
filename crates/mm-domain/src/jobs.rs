@@ -127,6 +127,8 @@ pub struct JobFailure {
 pub enum JobFailureError {
     #[error("failure code is invalid: {0}")]
     Code(#[from] TextIdError),
+    #[error(transparent)]
+    Inputs(#[from] InputFailureError),
 }
 
 impl JobFailure {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -6,15 +6,20 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
-    ConcatSpec, InputReport, JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef,
-    ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey,
-    ProbeResult, ProbeSpec, ProgressPercent, ThumbnailResult, ThumbnailSpec, TimedOutput,
+    ConcatSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputReport,
+    JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef, ObjectBody, ObjectRef,
+    ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, ProbeResult, ProbeSpec,
+    ProgressPercent, ResizeMode as DomainResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput,
     TranscodeResult, TranscodeSpec, TrimSpec, WorkerId, resolve_media_ref, validate_inputs,
 };
 use mm_ffmpeg::{
-    ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, ThumbnailTarget, TranscodeTarget,
-    TrimStrategy, TrimTarget, build_concat_args, build_thumbnail_args, build_transcode_args,
-    build_trim_args,
+    ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, StillInfo, ThumbnailTarget,
+    TranscodeTarget, TrimStrategy, TrimTarget, build_concat_args, build_thumbnail_args,
+    build_transcode_args, build_trim_args,
+};
+use mm_magick::{
+    ImageFormat as ToolImageFormat, ResizeMode as ToolResizeMode, ToolError as ImageToolError,
+    composite_args, convert_args, resize_args,
 };
 use prost::Message;
 use tokio::io::AsyncReadExt;
@@ -22,7 +27,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::WorkerConfig;
-use crate::report::{blocks, input_report, render_verdicts, target_profile, warnings};
+use crate::report::{
+    blocks, input_report, render_verdicts, still_report, target_profile, warnings,
+};
 
 pub mod codes {
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
@@ -34,10 +41,13 @@ pub mod codes {
     pub const MERGE_FAILED: &str = "merge_failed";
     pub const OUTPUT_INVALID: &str = "output_invalid";
     pub const OUTPUT_UPLOAD_FAILED: &str = "output_upload_failed";
+    pub const IMAGE_LAUNCH_FAILED: &str = "image_launch_failed";
+    pub const IMAGE_FAILED: &str = "image_failed";
 }
 
 const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const THUMBNAIL_RUN_SECONDS: u32 = 5;
+const IMAGE_RUN_SECONDS: std::time::Duration = std::time::Duration::from_secs(120);
 
 enum Finish {
     Cancelled,
@@ -349,6 +359,225 @@ async fn pipeline(
         OpSpec::Transcode(spec) => transcode_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Trim(spec) => trim_pipeline(ctx, job, spec, deadline_at, signal).await,
         OpSpec::Thumbnail(spec) => thumbnail_pipeline(ctx, job, spec, deadline_at, signal).await,
+        OpSpec::Image(spec) => image_pipeline(ctx, job, spec, deadline_at, signal).await,
+    }
+}
+
+async fn image_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &ImageSpec,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    let mut urls = Vec::with_capacity(spec.inputs().len());
+    for (index, input) in spec.inputs().iter().enumerate() {
+        check(signal)?;
+        urls.push(resolve_input(ctx, input, deadline_at, index).await?);
+    }
+
+    let mut stills = Vec::with_capacity(urls.len());
+    for (index, url) in urls.iter().enumerate() {
+        check(signal)?;
+        stills.push(probe_still(ctx, url, index).await?);
+    }
+    let reports: Vec<_> = stills.iter().map(still_report).collect();
+    gate_verdicts(job.id, spec.op().kind(), &reports)?;
+
+    let expected = image_frame_expectation(spec, &stills);
+    let inputs_bytes: u64 = stills
+        .iter()
+        .map(|still| still.size_bytes.unwrap_or_default())
+        .sum();
+    let (est_w, est_h) = image_estimate_frame(spec, &stills);
+    let estimate = inputs_bytes + staged_frame_bytes(1, est_w, est_h);
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+
+    let staged = ctx
+        .staging_dir
+        .join(format!("{}.{}", job.id, spec.format().extension()));
+    let args = image_args(spec, &urls, &staged.to_string_lossy());
+    let _ = remaining_limits(ctx, IMAGE_RUN_SECONDS, deadline_at)?;
+
+    check(signal)?;
+    let produced = run_image(ctx, job.id, &args, &staged, expected, spec.format(), signal).await;
+    let _ = tokio::fs::remove_file(&staged).await;
+    let outputs = produced?;
+    let result = ImageResult::new(outputs).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    Ok(OpResult::Image(result))
+}
+
+async fn run_image(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    args: &[String],
+    staged: &Path,
+    expected: FrameExpectation,
+    format: DomainImageFormat,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<Vec<MediaRef>, Finish> {
+    ctx.image_tool
+        .run(args, &ctx.image_limits)
+        .await
+        .map_err(|error| match error {
+            ImageToolError::Failed { stderr_tail, .. } => failed(codes::IMAGE_FAILED, stderr_tail),
+            other => failed(codes::IMAGE_LAUNCH_FAILED, other),
+        })?;
+    check(signal)?;
+
+    let info = ctx
+        .image_tool
+        .identify(&staged.to_string_lossy(), &ctx.image_limits)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    if !expected.holds(info.width, info.height) {
+        return Err(failed(
+            codes::OUTPUT_INVALID,
+            format!(
+                "the produced frame is {}x{}, not {}",
+                info.width,
+                info.height,
+                expected.describe()
+            ),
+        ));
+    }
+
+    let mut landed = Landed {
+        store: ctx.store.as_ref(),
+        keys: Vec::new(),
+    };
+    match upload_image(ctx, id, staged, format, &mut landed, signal).await {
+        Ok(outputs) => Ok(outputs),
+        Err(finish) => {
+            landed.discard().await;
+            Err(finish)
+        }
+    }
+}
+
+async fn upload_image(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    staged: &Path,
+    format: DomainImageFormat,
+    landed: &mut Landed<'_>,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<Vec<MediaRef>, Finish> {
+    let artifact = format!("image.{}", format.extension());
+    let object = OutputKey::new(&id, &artifact)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+        .into_object(&ctx.bucket)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let file = tokio::fs::File::open(staged)
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    ctx.store
+        .put_multipart(&object, file_body(file))
+        .await
+        .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    landed.record(object.clone());
+    check(signal)?;
+    Ok(vec![MediaRef::Object(object)])
+}
+
+fn image_format(format: DomainImageFormat) -> ToolImageFormat {
+    match format {
+        DomainImageFormat::Jpeg => ToolImageFormat::Jpeg,
+        DomainImageFormat::Png => ToolImageFormat::Png,
+    }
+}
+
+fn resize_mode(mode: DomainResizeMode) -> ToolResizeMode {
+    match mode {
+        DomainResizeMode::Fit => ToolResizeMode::Fit,
+        DomainResizeMode::Exact => ToolResizeMode::Exact,
+        DomainResizeMode::Fill => ToolResizeMode::Fill,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameExpectation {
+    exact: Option<(u32, u32)>,
+    bounded: Option<(u32, u32)>,
+    origin: &'static str,
+}
+
+impl FrameExpectation {
+    fn holds(self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        match (self.exact, self.bounded) {
+            (Some((wanted_w, wanted_h)), _) => (width, height) == (wanted_w, wanted_h),
+            (None, Some((max_w, max_h))) => width <= max_w && height <= max_h,
+            (None, None) => true,
+        }
+    }
+
+    fn describe(self) -> String {
+        match (self.exact, self.bounded) {
+            (Some((width, height)), _) => format!("{width}x{height}"),
+            (None, Some((max_w, max_h))) => format!("at most {max_w}x{max_h}"),
+            (None, None) => self.origin.to_string(),
+        }
+    }
+}
+
+fn image_frame_expectation(spec: &ImageSpec, stills: &[StillInfo]) -> FrameExpectation {
+    match spec.op() {
+        ImageOp::Resize => match spec.mode() {
+            DomainResizeMode::Fit => FrameExpectation {
+                exact: None,
+                bounded: Some((spec.width(), spec.height())),
+                origin: "a frame inside the requested box",
+            },
+            DomainResizeMode::Exact | DomainResizeMode::Fill => FrameExpectation {
+                exact: Some((spec.width(), spec.height())),
+                bounded: None,
+                origin: "the requested frame",
+            },
+        },
+        ImageOp::Convert => FrameExpectation {
+            exact: Some(frame_of(stills, 0)),
+            bounded: None,
+            origin: "the source frame",
+        },
+        ImageOp::Composite => FrameExpectation {
+            exact: Some(frame_of(stills, 1)),
+            bounded: None,
+            origin: "the base frame",
+        },
+    }
+}
+
+fn frame_of(stills: &[StillInfo], index: usize) -> (u32, u32) {
+    stills
+        .get(index)
+        .map(|still| (still.width, still.height))
+        .unwrap_or_default()
+}
+
+fn image_estimate_frame(spec: &ImageSpec, stills: &[StillInfo]) -> (u32, u32) {
+    match spec.op() {
+        ImageOp::Resize => (spec.width().max(1), spec.height().max(1)),
+        ImageOp::Convert => frame_of(stills, 0),
+        ImageOp::Composite => frame_of(stills, 1),
+    }
+}
+
+fn image_args(spec: &ImageSpec, urls: &[String], output: &str) -> Vec<String> {
+    let format = image_format(spec.format());
+    match spec.op() {
+        ImageOp::Resize => resize_args(
+            &urls[0],
+            spec.width(),
+            spec.height(),
+            resize_mode(spec.mode()),
+            format,
+            output,
+        ),
+        ImageOp::Convert => convert_args(&urls[0], format, output),
+        ImageOp::Composite => composite_args(&urls[0], &urls[1], format, output),
     }
 }
 
@@ -366,6 +595,13 @@ async fn resolve_input(
 async fn probe_input(ctx: &WorkerConfig, url: &str, index: usize) -> Result<MediaInfo, Finish> {
     ctx.prober
         .probe(url, &ctx.probe_limits)
+        .await
+        .map_err(|error| failed(codes::PROBE_FAILED, format!("input {index}: {error}")))
+}
+
+async fn probe_still(ctx: &WorkerConfig, url: &str, index: usize) -> Result<StillInfo, Finish> {
+    ctx.prober
+        .still(url, &ctx.probe_limits)
         .await
         .map_err(|error| failed(codes::PROBE_FAILED, format!("input {index}: {error}")))
 }

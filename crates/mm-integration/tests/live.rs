@@ -451,7 +451,7 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
         tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
             .expect("valid endpoint")
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
+            .timeout(mm_testkit::budget::RPC)
             .connect()
             .await
             .expect("dial announced address");
@@ -617,7 +617,7 @@ async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
         tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
             .expect("valid endpoint")
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
+            .timeout(mm_testkit::budget::RPC)
             .connect()
             .await
             .expect("dial announced address");
@@ -885,7 +885,7 @@ async fn a_probe_job_returns_stream_metadata_through_the_api() {
         tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
             .expect("valid endpoint")
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
+            .timeout(mm_testkit::budget::RPC)
             .connect()
             .await
             .expect("dial announced address");
@@ -1387,6 +1387,146 @@ async fn a_thumbnail_job_lands_every_key_through_server_and_worker() {
     drop_db(&admin, pool, &name).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_op_reaches_success_through_server_and_worker() {
+    let _slot = mm_testkit::stack_slot();
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let base_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-images");
+    std::fs::create_dir_all(&base_dir).unwrap();
+    let source = base_dir.join("e2e-source.png");
+    if !source.is_file() {
+        let generated = std::process::Command::new("magick")
+            .arg("-size")
+            .arg("600x400")
+            .arg("xc:teal")
+            .arg(&source)
+            .output()
+            .expect("the image tool must be runnable to generate fixtures");
+        assert!(generated.status.success(), "fixture generation failed");
+    }
+    let input = upload_object(&store, &source, "inputs/e2e-source.png").await;
+
+    let mut server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    server_config.job_events = Some(Arc::new(
+        mm_jobstore::PgJobEventListener::connect(&url)
+            .await
+            .expect("events listener connects"),
+    ));
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Image(
+        mm_domain::ImageSpec::new(
+            vec![input],
+            mm_domain::ImageOp::Resize,
+            200,
+            150,
+            mm_domain::ResizeMode::Exact,
+            Some(mm_domain::ImageFormat::Jpeg),
+        )
+        .expect("valid resize spec"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-image".to_string(),
+            idempotency_key: "req-image-resize".to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    assert!(created.created);
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-image-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-image-e2e").unwrap(),
+        staging,
+    );
+    worker_config.reconcile_interval = Duration::from_secs(30);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+
+    let final_job = loop {
+        let job = client
+            .get_job(mm_proto::v1::GetJobRequest {
+                user_id: "owner-image".to_string(),
+                job_id: created.job_id.clone(),
+            })
+            .await
+            .expect("get succeeds")
+            .into_inner()
+            .job
+            .expect("job present");
+        if job.state() != mm_proto::v1::JobState::Pending
+            && job.state() != mm_proto::v1::JobState::Running
+        {
+            break job;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        final_job.state(),
+        mm_proto::v1::JobState::Succeeded,
+        "image job did not succeed"
+    );
+    let result = mm_domain::OpResult::try_from(final_job.result.expect("result present"))
+        .expect("result decodes");
+    let mm_domain::OpResult::Image(image) = result else {
+        panic!("expected an image result");
+    };
+    assert_eq!(image.outputs().len(), 1);
+    let MediaRef::Object(object) = &image.outputs()[0] else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/image.jpg", created.job_id));
+    let output_url = resolve_media_ref(
+        store.as_ref(),
+        &MediaRef::Object(object.clone()),
+        SystemTime::now() + Duration::from_secs(300),
+        SystemTime::now(),
+    )
+    .await
+    .expect("image presigns");
+    let still = Prober::default()
+        .still(&output_url, &probe_limits())
+        .await
+        .expect("the produced image reports");
+    assert_eq!((still.width, still.height), (200, 150));
+    assert_eq!(still.codec, "mjpeg");
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}
+
 fn process_mentions(pid: u32, needle: &str) -> bool {
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
@@ -1458,7 +1598,7 @@ async fn a_mid_merge_cancel_kills_the_tool_and_cleans_every_output() {
         tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
             .expect("valid endpoint")
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
+            .timeout(mm_testkit::budget::RPC)
             .connect()
             .await
             .expect("dial announced address");

@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    CallbackError, CallbackPublisher, ConcatSpec, JobId, JobRecord, JobRepository, JobState,
-    MediaRef, NewJob, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec,
-    OutputProfile, ProbeSpec, QueueUrl, RequestId, ThumbnailSpec, TranscodeSpec, TrimSpec, UserId,
-    WorkerId, collect_body,
+    CallbackError, CallbackPublisher, ConcatSpec, ImageFormat, ImageOp, ImageSpec, JobId,
+    JobRecord, JobRepository, JobState, MediaRef, NewJob, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpResult, OpSpec, OutputProfile, ProbeSpec, QueueUrl, RequestId, ResizeMode,
+    ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -687,6 +687,202 @@ async fn a_thumbnail_set_over_the_disk_budget_is_released_until_it_fits() {
     roomy.shutdown().await;
 
     assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    db.dispose().await;
+}
+
+fn image_fixture(name: &str, width: u32, height: u32, colour: &str) -> PathBuf {
+    let dir = scratch_dir("fixtures");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    if path.is_file() && path.metadata().map(|meta| meta.len()).unwrap_or(0) > 0 {
+        return path;
+    }
+    let output = Command::new("magick")
+        .arg("-size")
+        .arg(format!("{width}x{height}"))
+        .arg(format!("xc:{colour}"))
+        .arg(&path)
+        .output()
+        .expect("the image tool must be runnable to generate fixtures");
+    assert!(output.status.success(), "fixture generation failed: {name}");
+    path
+}
+
+async fn identify_frame(store: &Arc<S3ObjectStore>, object: &ObjectRef) -> (u32, u32, String) {
+    let body = store.get(object).await.expect("output fetches");
+    let bytes = collect_body(body).await.expect("output body collects");
+    let name = object.key().replace('/', "_");
+    let local = scratch_dir("verify").join(name);
+    tokio::fs::write(&local, &bytes).await.unwrap();
+    let info = mm_magick::Tool::default()
+        .identify(&local.to_string_lossy(), &mm_magick::ToolLimits::default())
+        .await
+        .expect("the produced image reports");
+    (info.width, info.height, info.format)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resize_job_lands_an_image_at_the_requested_frame() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = image_fixture("resize-source.png", 800, 600, "green");
+    let input = upload_input(&store, &source, "inputs/resize-source.png").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Image(
+            ImageSpec::new(
+                vec![input],
+                ImageOp::Resize,
+                320,
+                240,
+                ResizeMode::Exact,
+                None,
+            )
+            .unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-resize"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Image(result) = record.result.expect("result recorded") else {
+        panic!("expected an image result");
+    };
+    assert_eq!(result.outputs().len(), 1);
+    let MediaRef::Object(object) = &result.outputs()[0] else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/image.png", job.id));
+    let (width, height, format) = identify_frame(&store, object).await;
+    assert_eq!((width, height), (320, 240));
+    assert_eq!(format, "PNG");
+    let staged = scratch_dir("staging").join(format!("{}.png", job.id));
+    assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_convert_job_lands_an_image_in_the_requested_format() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = image_fixture("convert-source.png", 200, 150, "blue");
+    let input = upload_input(&store, &source, "inputs/convert-source.png").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Image(
+            ImageSpec::new(
+                vec![input],
+                ImageOp::Convert,
+                0,
+                0,
+                ResizeMode::Fit,
+                Some(ImageFormat::Jpeg),
+            )
+            .unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-convert"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Image(result) = record.result.expect("result recorded") else {
+        panic!("expected an image result");
+    };
+    let MediaRef::Object(object) = &result.outputs()[0] else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/image.jpg", job.id));
+    let (width, height, format) = identify_frame(&store, object).await;
+    assert_eq!((width, height), (200, 150));
+    assert_eq!(format, "JPEG");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_composite_job_lands_the_base_frame_with_the_overlay() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let base = image_fixture("composite-base.png", 400, 300, "white");
+    let overlay = image_fixture("composite-overlay.png", 100, 100, "red");
+    let base_ref = upload_input(&store, &base, "inputs/composite-base.png").await;
+    let overlay_ref = upload_input(&store, &overlay, "inputs/composite-overlay.png").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Image(
+            ImageSpec::new(
+                vec![overlay_ref, base_ref],
+                ImageOp::Composite,
+                0,
+                0,
+                ResizeMode::Fit,
+                Some(ImageFormat::Jpeg),
+            )
+            .unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-composite"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Image(result) = record.result.expect("result recorded") else {
+        panic!("expected an image result");
+    };
+    let MediaRef::Object(object) = &result.outputs()[0] else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/image.jpg", job.id));
+    let (width, height, format) = identify_frame(&store, object).await;
+    assert_eq!((width, height), (400, 300));
+    assert_eq!(format, "JPEG");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_video_input_blocks_an_image_op_with_the_media_kind_code() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("image-op-video.mp4", 2, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/image-op-video.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Image(
+            ImageSpec::new(
+                vec![input],
+                ImageOp::Resize,
+                64,
+                64,
+                ResizeMode::Exact,
+                None,
+            )
+            .unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store, "worker-image-blocked"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::VALIDATION_BLOCKED);
+    assert!(
+        failure.message().contains("MediaKindMismatch"),
+        "{}",
+        failure.message()
+    );
     db.dispose().await;
 }
 

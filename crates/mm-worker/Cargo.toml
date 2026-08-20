@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 mm-domain = { path = "../mm-domain" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }
+mm-magick = { path = "../mm-magick" }
 mm-proto = { path = "../mm-proto" }
 base64.workspace = true
 bytes.workspace = true
@@ -27,6 +28,7 @@ tokio = { workspace = true, features = [
 async-trait.workspace = true
 mm-jobstore = { path = "../mm-jobstore" }
 mm-testkit = { path = "../mm-testkit" }
+mm-magick = { path = "../mm-magick" }
 mm-storage = { path = "../mm-storage" }
 sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

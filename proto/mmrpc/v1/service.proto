@@ -43,6 +43,7 @@ message CancelJobRequest {
 
 message CancelJobResponse {
   Job job = 1;
+  bool cancellation_accepted = 2;
 }
 
 message ListJobsRequest {

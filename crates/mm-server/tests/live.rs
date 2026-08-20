@@ -508,3 +508,139 @@ async fn a_malformed_job_id_is_invalid_argument_on_get() {
     handle.shutdown().await;
     db.dispose().await;
 }
+
+async fn create_job_id(
+    client: &mut MediaJobServiceClient<tonic::transport::Channel>,
+    user: &str,
+    key: &str,
+) -> String {
+    client
+        .create_job(create_request(user, key))
+        .await
+        .expect("create succeeds")
+        .into_inner()
+        .job_id
+}
+
+async fn cancel(
+    client: &mut MediaJobServiceClient<tonic::transport::Channel>,
+    user: &str,
+    job_id: &str,
+) -> v1::CancelJobResponse {
+    client
+        .cancel_job(v1::CancelJobRequest {
+            user_id: user.to_string(),
+            job_id: job_id.to_string(),
+        })
+        .await
+        .expect("cancel succeeds")
+        .into_inner()
+}
+
+#[tokio::test]
+async fn cancelling_a_pending_job_is_immediate() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let job_id = create_job_id(&mut client, "owner-1", "req-1").await;
+    let response = cancel(&mut client, "owner-1", &job_id).await;
+    assert!(response.cancellation_accepted);
+    let job = response.job.expect("job present");
+    assert_eq!(job.state, v1::JobState::Cancelled as i32);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_running_job_requests_cancellation() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let job_id = create_job_id(&mut client, "owner-1", "req-1").await;
+    let repo = db.repository();
+    let worker: mm_domain::WorkerId = "worker-a".parse().expect("valid worker id");
+    let claimed = repo
+        .claim(
+            &worker,
+            std::num::NonZeroU32::new(1).expect("nonzero"),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("claim succeeds");
+    assert_eq!(claimed.len(), 1);
+    let response = cancel(&mut client, "owner-1", &job_id).await;
+    assert!(response.cancellation_accepted);
+    let job = response.job.expect("job present");
+    assert_eq!(job.state, v1::JobState::Running as i32);
+    let record = repo
+        .get(job_id.parse().expect("job id parses"))
+        .await
+        .expect("get succeeds")
+        .expect("job exists");
+    assert!(record.cancel_requested);
+    assert_eq!(record.state, mm_domain::JobState::Running);
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn cancelling_a_terminal_job_returns_it_unchanged() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let cancelled_id = create_job_id(&mut client, "owner-1", "req-1").await;
+    cancel(&mut client, "owner-1", &cancelled_id).await;
+    let again = cancel(&mut client, "owner-1", &cancelled_id).await;
+    assert!(!again.cancellation_accepted);
+    assert_eq!(
+        again.job.expect("job present").state,
+        v1::JobState::Cancelled as i32
+    );
+
+    let succeeded_id = create_job_id(&mut client, "owner-1", "req-2").await;
+    let repo = db.repository();
+    let worker: mm_domain::WorkerId = "worker-a".parse().expect("valid worker id");
+    repo.claim(
+        &worker,
+        std::num::NonZeroU32::new(1).expect("nonzero"),
+        Duration::from_secs(60),
+    )
+    .await
+    .expect("claim succeeds");
+    let result = mm_domain::OpResult::Concat(
+        mm_domain::TimedOutput::new(
+            MediaRef::object_uri("s3://media/jobs/x/out.mp4").expect("valid ref"),
+            10.0,
+        )
+        .expect("valid result"),
+    );
+    repo.mark_succeeded(
+        succeeded_id.parse().expect("job id parses"),
+        &worker,
+        result,
+    )
+    .await
+    .expect("succeed succeeds");
+    let response = cancel(&mut client, "owner-1", &succeeded_id).await;
+    assert!(!response.cancellation_accepted);
+    assert_eq!(
+        response.job.expect("job present").state,
+        v1::JobState::Succeeded as i32
+    );
+    handle.shutdown().await;
+    db.dispose().await;
+}
+
+#[tokio::test]
+async fn cancel_is_owner_scoped() {
+    let (db, handle) = healthy_server().await;
+    let mut client = job_client(&handle).await;
+    let job_id = create_job_id(&mut client, "owner-1", "req-1").await;
+    let status = client
+        .cancel_job(v1::CancelJobRequest {
+            user_id: "owner-2".to_string(),
+            job_id,
+        })
+        .await
+        .expect_err("foreign cancel is not found");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    handle.shutdown().await;
+    db.dispose().await;
+}

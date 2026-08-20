@@ -18,6 +18,14 @@ impl MediaJobs {
     pub(crate) fn new(repository: Arc<dyn JobRepository>) -> Self {
         Self { repository }
     }
+
+    async fn refetch(&self, id: JobId) -> Result<JobRecord, Status> {
+        self.repository
+            .get(id)
+            .await
+            .map_err(store_failure)?
+            .ok_or_else(not_found)
+    }
 }
 
 fn parse_user(value: &str) -> Result<UserId, Status> {
@@ -132,9 +140,34 @@ impl MediaJobService for MediaJobs {
 
     async fn cancel_job(
         &self,
-        _request: Request<v1::CancelJobRequest>,
+        request: Request<v1::CancelJobRequest>,
     ) -> Result<Response<v1::CancelJobResponse>, Status> {
-        Err(Status::unimplemented("CancelJob is not implemented yet"))
+        let message = request.into_inner();
+        let owner = parse_user(&message.user_id)?;
+        let id = parse_job_id(&message.job_id)?;
+        let record = self
+            .repository
+            .get_owned(&owner, id)
+            .await
+            .map_err(store_failure)?
+            .ok_or_else(not_found)?;
+        let (record, accepted) = match record.state {
+            JobState::Pending => match self.repository.mark_cancelled(id).await {
+                Ok(cancelled) => (cancelled, true),
+                Err(JobStoreError::InvalidTransition { .. }) => (self.refetch(id).await?, false),
+                Err(error) => return Err(store_failure(error)),
+            },
+            JobState::Running => match self.repository.request_cancel(id).await {
+                Ok(()) => (self.refetch(id).await?, true),
+                Err(JobStoreError::InvalidTransition { .. }) => (self.refetch(id).await?, false),
+                Err(error) => return Err(store_failure(error)),
+            },
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled => (record, false),
+        };
+        Ok(Response::new(v1::CancelJobResponse {
+            job: Some(job_to_proto(&record)),
+            cancellation_accepted: accepted,
+        }))
     }
 
     async fn list_jobs(

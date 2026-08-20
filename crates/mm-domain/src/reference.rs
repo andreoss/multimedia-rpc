@@ -37,6 +37,7 @@ pub fn failure_code(failure: &JobFailure) -> &str {
         "image_failed" => "ERROR_IMAGE_FAILED",
         "package_launch_failed" => "ERROR_PACKAGE_LAUNCH_FAILED",
         "package_failed" => "ERROR_PACKAGE_FAILED",
+        "ladder_pack_failed" => "ERROR_LADDER_PACK_FAILED",
         code if code.starts_with("ERROR_") => code,
         _ => INTERNAL,
     }

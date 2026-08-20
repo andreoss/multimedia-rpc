@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 mm-domain = { path = "../mm-domain" }
 mm-observability = { path = "../mm-observability" }
 mm-ffmpeg = { path = "../mm-ffmpeg" }

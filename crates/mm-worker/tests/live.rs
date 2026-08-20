@@ -17,7 +17,9 @@ use mm_domain::{
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
-use mm_worker::{DiskBudget, RetryPolicy, WorkerConfig, codes, start};
+use mm_worker::{
+    DiskBudget, LadderPackError, LadderPacked, RetryPolicy, RungPacker, WorkerConfig, codes, start,
+};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -2553,6 +2555,185 @@ async fn a_ladder_rung_above_the_source_blocks_naming_the_rung() {
         )
         .unwrap();
         assert!(store.head(&key).await.is_err(), "key {index} landed");
+    }
+    db.dispose().await;
+}
+
+struct RecordingPacker {
+    calls: tokio::sync::Mutex<Vec<(JobId, usize, f64)>>,
+}
+
+#[async_trait]
+impl RungPacker for RecordingPacker {
+    fn name(&self) -> &'static str {
+        "recording"
+    }
+
+    async fn pack(
+        &self,
+        job: JobId,
+        rung: usize,
+        _media: &ObjectRef,
+        staging_dir: &Path,
+        segment_seconds: f64,
+    ) -> Result<LadderPacked, LadderPackError> {
+        self.calls.lock().await.push((job, rung, segment_seconds));
+        Ok(stub_packed(staging_dir, rung))
+    }
+}
+
+struct FailingPacker {
+    calls: tokio::sync::Mutex<usize>,
+}
+
+#[async_trait]
+impl RungPacker for FailingPacker {
+    fn name(&self) -> &'static str {
+        "failing"
+    }
+
+    async fn pack(
+        &self,
+        _job: JobId,
+        _rung: usize,
+        _media: &ObjectRef,
+        _staging_dir: &Path,
+        _segment_seconds: f64,
+    ) -> Result<LadderPacked, LadderPackError> {
+        let mut calls = self.calls.lock().await;
+        *calls += 1;
+        Err(LadderPackError::Refused(
+            "the packer refused this rung".to_string(),
+        ))
+    }
+}
+
+fn stub_packed(staging: &Path, rung: usize) -> LadderPacked {
+    std::fs::create_dir_all(staging).expect("staging dir");
+    let segment_name = format!("seg{rung:05}.m4s");
+    let init = staging.join("init.mp4");
+    std::fs::write(&init, b"init").expect("init staged");
+    let segment = staging.join(&segment_name);
+    std::fs::write(&segment, b"segment").expect("segment staged");
+    let segments = vec![segment];
+    let playlist = staging.join("playlist.m3u8");
+    std::fs::write(
+        &playlist,
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.000,\n{segment_name}\n#EXT-X-ENDLIST\n"
+        ),
+    )
+    .expect("playlist staged");
+    LadderPacked {
+        init,
+        playlist,
+        segments,
+    }
+}
+
+fn packed_ladder_job(source: &MediaRef) -> NewJob {
+    let rungs = vec![
+        OutputProfile::from_raw(24.0, 400_000, 28, 64_000, 48_000, 640, 360).unwrap(),
+        OutputProfile::from_raw(24.0, 900_000, 26, 64_000, 48_000, 1280, 720).unwrap(),
+    ];
+    let spec = LadderSpec::new(source.clone(), rungs)
+        .unwrap()
+        .with_segment_seconds(1.0)
+        .unwrap();
+    single_input_job(OpSpec::Ladder(spec))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_packer_answers_a_ladder_end_to_end() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("packer-port-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/packer-port-source.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(packed_ladder_job(&input)).await.unwrap();
+
+    let packer = Arc::new(RecordingPacker {
+        calls: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let mut config = base_config(&db, store.clone(), "worker-packer-port");
+    config.ladder_packer = Some(packer.clone());
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let calls = packer.calls.lock().await.clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "the port was called once per rung: {calls:?}"
+    );
+    assert_eq!(calls[0].0, job.id);
+    assert_eq!(calls[0].1, 0);
+    assert_eq!(calls[1].1, 1);
+    assert_eq!(calls[0].2, 1.0);
+    let OpResult::Ladder(result) = record.result.expect("result recorded") else {
+        panic!("expected a ladder result");
+    };
+    assert_eq!(result.master_playlist(), None);
+    for (index, rendition) in result.renditions().iter().enumerate() {
+        assert!(
+            rendition.playlist().is_some(),
+            "rung {index} has no playlist"
+        );
+        assert_eq!(rendition.segments().len(), 1);
+        let MediaRef::Object(playlist) = rendition.playlist().expect("playlist") else {
+            panic!("expected an object playlist");
+        };
+        assert_eq!(
+            playlist.key(),
+            format!("jobs/{}/renditions/{index}/playlist.m3u8", job.id)
+        );
+        assert!(store.head(playlist).await.expect("playlist exists") > 0);
+    }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_packer_refusal_ends_the_ladder_and_cleans_every_key() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("packer-port-fail.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/packer-port-fail.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(packed_ladder_job(&input)).await.unwrap();
+
+    let packer = Arc::new(FailingPacker {
+        calls: tokio::sync::Mutex::new(0),
+    });
+    let mut config = base_config(&db, store.clone(), "worker-packer-port-fail");
+    config.retry = RetryPolicy {
+        max_attempts: 1,
+        base: Duration::from_millis(100),
+        cap: Duration::from_millis(100),
+    };
+    config.ladder_packer = Some(packer.clone());
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::LADDER_PACK_FAILED);
+    assert_eq!(
+        *packer.calls.lock().await,
+        1,
+        "the ladder stopped at the first refusal"
+    );
+    for index in 0..2 {
+        let key = ObjectRef::new(
+            BUCKET,
+            &format!("jobs/{}/renditions/{index}/output.mp4", job.id),
+        )
+        .unwrap();
+        assert!(store.head(&key).await.is_err(), "key {index} survived");
     }
     db.dispose().await;
 }

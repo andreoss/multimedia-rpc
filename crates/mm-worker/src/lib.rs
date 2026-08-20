@@ -1,4 +1,5 @@
 mod budget;
+mod packer;
 mod pipeline;
 mod report;
 mod retry;
@@ -18,6 +19,7 @@ use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 pub use budget::{DiskBudget, admits};
+pub use packer::{GstRungPacker, LadderPackError, LadderPacked, RungPacker, packer_name};
 pub use pipeline::codes;
 pub use report::{blocks, input_report, render_verdicts, still_report, target_profile, warnings};
 pub use retry::{RetryPolicy, is_transient};
@@ -48,6 +50,7 @@ pub struct WorkerConfig {
     pub cancellations: Option<Arc<dyn CancelNotifications>>,
     pub callbacks: Option<Arc<dyn CallbackPublisher>>,
     pub metrics: Metrics,
+    pub ladder_packer: Option<Arc<dyn RungPacker>>,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -85,6 +88,7 @@ impl WorkerConfig {
             cancellations: None,
             callbacks: None,
             metrics: Registry::new().1,
+            ladder_packer: None,
             reserved: std::sync::Mutex::new(0),
         }
     }

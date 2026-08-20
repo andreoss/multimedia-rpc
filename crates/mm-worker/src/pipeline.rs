@@ -38,10 +38,10 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::WorkerConfig;
 use crate::report::{
     blocks, input_report, render_verdicts, still_report, target_profile, warnings,
 };
+use crate::{RungPacker, WorkerConfig};
 
 pub mod codes {
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
@@ -57,8 +57,9 @@ pub mod codes {
     pub const IMAGE_FAILED: &str = "image_failed";
     pub const PACKAGE_LAUNCH_FAILED: &str = "package_launch_failed";
     pub const PACKAGE_FAILED: &str = "package_failed";
+    pub const LADDER_PACK_FAILED: &str = "ladder_pack_failed";
 
-    pub const ALL: [&str; 13] = [
+    pub const ALL: [&str; 14] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -72,13 +73,14 @@ pub mod codes {
         IMAGE_FAILED,
         PACKAGE_LAUNCH_FAILED,
         PACKAGE_FAILED,
+        LADDER_PACK_FAILED,
     ];
 }
 
 const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
 const THUMBNAIL_RUN_SECONDS: u32 = 5;
 const IMAGE_RUN_SECONDS: std::time::Duration = std::time::Duration::from_secs(120);
-const PACKAGE_RUN_SECONDS: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const PACKAGE_RUN_SECONDS: std::time::Duration = std::time::Duration::from_secs(600);
 const SEGMENT_ESTIMATE_BYTES: u64 = 4 * 1024 * 1024;
 
 enum Finish {
@@ -1438,6 +1440,58 @@ async fn probe_pipeline(
     Ok(OpResult::Probe(result))
 }
 
+fn rung_packer(ctx: &WorkerConfig) -> &dyn RungPacker {
+    crate::packer::selected(ctx)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn pack_rung(
+    ctx: &Arc<WorkerConfig>,
+    job: JobId,
+    rung: usize,
+    media: &ObjectRef,
+    prefix: &str,
+    segment_seconds: f64,
+    packer: &dyn RungPacker,
+    landed: &mut Landed<'_>,
+) -> Result<(ObjectRef, Vec<ObjectRef>), Finish> {
+    let staging = ctx
+        .staging_dir
+        .join(job.to_string())
+        .join(format!("rung{rung}"));
+    std::fs::create_dir_all(&staging).map_err(|error| failed(codes::LADDER_PACK_FAILED, error))?;
+    let packed = packer
+        .pack(job, rung, media, &staging, segment_seconds)
+        .await
+        .map_err(|error| {
+            failed(
+                codes::LADDER_PACK_FAILED,
+                format!("rung {rung} via {}: {error}", packer.name()),
+            )
+        })?;
+
+    let init = artifact_object_named(ctx, job, prefix, "init.mp4").await?;
+    upload_object(ctx, &init, &packed.init).await?;
+    landed.record(init.clone());
+    let playlist = artifact_object_named(ctx, job, prefix, mm_gst::playlist_name()).await?;
+    upload_object(ctx, &playlist, &packed.playlist).await?;
+    landed.record(playlist.clone());
+    let mut segments = Vec::with_capacity(packed.segments.len());
+    for path in &packed.segments {
+        let key = artifact_object_named(ctx, job, prefix, &segment_name(path)).await?;
+        upload_object(ctx, &key, path).await?;
+        landed.record(key.clone());
+        segments.push(key);
+    }
+    for path in std::iter::once(&packed.init)
+        .chain(packed.segments.iter())
+        .chain(std::iter::once(&packed.playlist))
+    {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    Ok((playlist, segments))
+}
+
 async fn ladder_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
@@ -1461,6 +1515,7 @@ async fn ladder_pipeline(
     let estimate = estimate_bytes(ctx, &inputs, &infos).await;
     let _reservation = admit_or_release(ctx, job.id, estimate).await?;
 
+    let packer = rung_packer(ctx);
     let source = spec.input().media();
     let mut landed = Landed {
         store: ctx.store.as_ref(),
@@ -1480,6 +1535,8 @@ async fn ladder_pipeline(
         &mut landed,
         &mut staged,
         &mut renditions,
+        spec.segment_seconds(),
+        packer,
     )
     .await;
     let highest = staged.last().cloned();
@@ -1516,6 +1573,8 @@ async fn encode_rungs(
     landed: &mut Landed<'_>,
     staged: &mut Vec<PathBuf>,
     renditions: &mut Vec<RenditionResult>,
+    segment_seconds: Option<f64>,
+    packer: &dyn RungPacker,
 ) -> Result<(), Finish> {
     let total = spec.rungs().len();
     for (index, profile) in spec.rungs().iter().enumerate() {
@@ -1579,12 +1638,39 @@ async fn encode_rungs(
         landed.record(media.clone());
         ctx.metrics.output_bytes.add(bytes);
         scope.done.fetch_add(1, Ordering::Relaxed);
+        let packed = match segment_seconds {
+            Some(seconds) => {
+                Some(pack_rung(ctx, job.id, index, &media, &prefix, seconds, packer, landed).await?)
+            }
+            None => None,
+        };
+        let (playlist, segments) = match packed {
+            Some((playlist, segments)) => (playlist, segments),
+            None => {
+                renditions.push(
+                    RenditionResult::new(
+                        *profile,
+                        MediaRef::Object(media),
+                        None,
+                        Vec::new(),
+                        measured.duration.as_secs_f64(),
+                    )
+                    .map_err(|error| failed(codes::OUTPUT_INVALID, error))?
+                    .with_measurement(
+                        width,
+                        height,
+                        rendition_bandwidth(profile, &measured),
+                    ),
+                );
+                continue;
+            }
+        };
         renditions.push(
             RenditionResult::new(
                 *profile,
                 MediaRef::Object(media),
-                None,
-                Vec::new(),
+                Some(MediaRef::Object(playlist)),
+                segments.into_iter().map(MediaRef::Object).collect(),
                 measured.duration.as_secs_f64(),
             )
             .map_err(|error| failed(codes::OUTPUT_INVALID, error))?

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use mm_domain::{
     AudioSpec, BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, Colour, ConcatSpec,
     GradeAdjustments, GradeScope, GradeSpec, GraphNode, GraphSpec, ImageFormat, ImageOp, ImageSpec,
-    InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec, LoudnessSpec,
+    InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, LadderSpec, LoudnessSpec,
     LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore,
     ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
     ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks, TitleSpec,
@@ -250,7 +250,7 @@ fn base_config(db: &TestDb, store: Arc<dyn ObjectStore>, name: &str) -> WorkerCo
         store,
         BUCKET.to_string(),
         worker_id(name),
-        scratch_dir("staging"),
+        scratch_dir(&format!("staging/{}", db.name)),
     );
     config.reconcile_interval = Duration::from_millis(200);
     config
@@ -4132,5 +4132,203 @@ async fn a_required_encoder_the_host_lacks_fails_by_name() {
         "{}",
         failure.message()
     );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planted_journal_for_a_failed_job_reclaims_staged_and_landed() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("journal-failed.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/journal-failed.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Probe(
+            ProbeSpec::new(input).expect("a bare reference cuts nothing"),
+        )))
+        .await
+        .unwrap();
+    repository
+        .claim(
+            &worker_id("journal-planter"),
+            std::num::NonZeroU32::new(1).unwrap(),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+    repository
+        .mark_failed(
+            job.id,
+            &worker_id("journal-planter"),
+            JobFailure::new(codes::MERGE_FAILED, "planted").unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let config = base_config(&db, store.clone(), "journal-reclaim");
+    let staging = config.staging_dir.clone();
+    tokio::fs::create_dir_all(staging.join("journals"))
+        .await
+        .unwrap();
+    let staged = staging.join(format!("{}.mp4", job.id));
+    tokio::fs::write(&staged, b"staged").await.unwrap();
+    let landed = ObjectRef::new(BUCKET, &format!("jobs/{}/output.mp4", job.id)).unwrap();
+    mm_testkit::upload_object(store.as_ref(), &source, BUCKET, landed.key()).await;
+    let journal = staging.join("journals").join(format!("{}.json", job.id));
+    let entry = format!(
+        "{{\"job_id\":\"{}\",\"staged\":[\"{}\"],\"landed\":[{{\"bucket\":\"{}\",\"key\":\"{}\"}}]}}",
+        job.id,
+        staged.display(),
+        BUCKET,
+        landed.key()
+    );
+    tokio::fs::write(&journal, entry).await.unwrap();
+    let handle = start(config);
+    wait_for(|| async {
+        !staged.exists() && store.head(&landed).await.is_err() && !journal.exists()
+    })
+    .await;
+    handle.shutdown().await;
+
+    assert!(!staged.exists(), "the staged file was not reclaimed");
+    assert!(
+        store.head(&landed).await.is_err(),
+        "the landed key of a failed job survived"
+    );
+    assert!(!journal.exists(), "the journal entry survived");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_planted_journal_for_a_running_job_is_left_for_its_holder() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("journal-running.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/journal-running.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Probe(
+            ProbeSpec::new(input).expect("a bare reference cuts nothing"),
+        )))
+        .await
+        .unwrap();
+    repository
+        .claim(
+            &worker_id("journal-holder"),
+            std::num::NonZeroU32::new(1).unwrap(),
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+    let config = base_config(&db, store.clone(), "journal-observer");
+    let staging = config.staging_dir.clone();
+    tokio::fs::create_dir_all(staging.join("journals"))
+        .await
+        .unwrap();
+    let staged = staging.join(format!("{}.mp4", job.id));
+    tokio::fs::write(&staged, b"staged").await.unwrap();
+    let landed = ObjectRef::new(BUCKET, &format!("jobs/{}/output.mp4", job.id)).unwrap();
+    mm_testkit::upload_object(store.as_ref(), &source, BUCKET, landed.key()).await;
+    let journal = staging.join("journals").join(format!("{}.json", job.id));
+    tokio::fs::write(
+        &journal,
+        format!(
+            "{{\"job_id\":\"{}\",\"staged\":[\"{}\"],\"landed\":[{{\"bucket\":\"{}\",\"key\":\"{}\"}}]}}",
+            job.id,
+            staged.display(),
+            BUCKET,
+            landed.key()
+        ),
+    )
+    .await
+    .unwrap();
+    let handle = start(config);
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    handle.shutdown().await;
+
+    assert!(staged.exists(), "a running job's staged file was reclaimed");
+    assert!(
+        store.head(&landed).await.is_ok(),
+        "a running job's landed key was deleted"
+    );
+    assert!(journal.exists(), "a running job's journal was removed");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_journal_is_moved_aside_not_deleted() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let config = base_config(&db, store.clone(), "journal-corrupt");
+    let staging = config.staging_dir.clone();
+    tokio::fs::create_dir_all(staging.join("journals"))
+        .await
+        .unwrap();
+    let journal = staging.join("journals").join("not-json.json");
+    tokio::fs::write(&journal, b"{not json").await.unwrap();
+    let handle = start(config);
+    wait_for(|| async { !journal.exists() }).await;
+    handle.shutdown().await;
+
+    let moved = std::fs::read_dir(staging.join("journals"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .find(|name| name.starts_with("not-json.corrupt-"));
+    assert!(
+        moved.is_some(),
+        "an unreadable journal was not moved under a named file"
+    );
+    db.dispose().await;
+}
+
+async fn wait_for<F, Fut>(check: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if check().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the condition was not met before the deadline");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_job_removes_its_journal_and_staged_files() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("journal-success.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/journal-success.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Probe(
+            ProbeSpec::new(input).expect("a bare reference cuts nothing"),
+        )))
+        .await
+        .unwrap();
+    let config = base_config(&db, store.clone(), "journal-success");
+    let staging = config.staging_dir.clone();
+    let journal = staging.join("journals").join(format!("{}.json", job.id));
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    wait_for(|| async { !journal.exists() }).await;
+    let staged: Vec<String> = std::fs::read_dir(&staging)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with(&job.id.to_string()))
+        .collect();
+    assert!(staged.is_empty(), "staged paths survived: {staged:?}");
     db.dispose().await;
 }

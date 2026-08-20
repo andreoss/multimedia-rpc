@@ -1,4 +1,5 @@
 mod budget;
+pub(crate) mod journal;
 mod packer;
 mod pipeline;
 mod report;
@@ -132,6 +133,7 @@ pub fn start(config: WorkerConfig) -> WorkerHandle {
 }
 
 async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
+    journal::reconcile(&ctx).await;
     let _ = ctx
         .encoders
         .get_or_init(|| async {

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::journal;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
@@ -77,8 +78,9 @@ pub mod codes {
     pub const AUDIO_INVALID: &str = "audio_invalid";
     pub const TITLE_FAILED: &str = "title_failed";
     pub const ENCODER_UNAVAILABLE: &str = "encoder_unavailable";
+    pub const JOURNAL_FAILED: &str = "journal_failed";
 
-    pub const ALL: [&str; 21] = [
+    pub const ALL: [&str; 22] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -100,6 +102,7 @@ pub mod codes {
         AUDIO_INVALID,
         TITLE_FAILED,
         ENCODER_UNAVAILABLE,
+        JOURNAL_FAILED,
     ];
 }
 
@@ -348,6 +351,7 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelR
     );
     let outcome = run_job(ctx, &job, registry).await;
     let terminal = outcome.is_some();
+    journal::finish(ctx, job.id, outcome).await;
     ctx.metrics.jobs_finished.add(1);
     ctx.metrics
         .job_duration
@@ -407,6 +411,24 @@ async fn run_job(
         }
         return None;
     }
+    let journal_stop = match journal::start(ctx, job.id).await {
+        Ok(stop) => stop,
+        Err(error) => {
+            let failure = failed(codes::JOURNAL_FAILED, error);
+            let Finish::Failed(failure) = failure else {
+                return None;
+            };
+            if let Ok(record) = ctx
+                .repository
+                .mark_failed(job.id, &ctx.worker_id, failure, None)
+                .await
+            {
+                publish_outcome(ctx, &record).await;
+                return Some(record.state);
+            }
+            return None;
+        }
+    };
     let (sender, mut signal) = watch::channel(Signal::Run);
     registry.register(job.id, sender.clone());
     let registered = Registered {
@@ -423,6 +445,7 @@ async fn run_job(
         sender,
     );
     let outcome = pipeline(ctx, job, deadline_at, &mut signal).await;
+    let _ = journal_stop.send(true);
     drop(supervisor);
     drop(registered);
     match outcome {
@@ -716,6 +739,9 @@ async fn run_leaf(
         OpSpec::Audio(spec) => audio_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
         OpSpec::Title(spec) => title_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
     };
+    let mut landed = Vec::new();
+    collect_outputs(&result, &mut landed);
+    let _ = journal::record_landed(ctx, job.id, &landed).await;
     scope.done.fetch_add(1, Ordering::Relaxed);
     Ok(result)
 }

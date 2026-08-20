@@ -530,7 +530,8 @@ async fn a_created_job_merges_end_to_end_through_server_and_worker() {
         .await
         .expect("server starts");
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let staging =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../scratch/e2e-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -696,7 +697,8 @@ async fn a_merge_with_a_callback_delivers_one_decoded_queue_message() {
         .await
         .expect("server starts");
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let staging =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../scratch/e2e-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -881,7 +883,8 @@ async fn a_watch_stream_observes_a_live_merge_to_completion() {
         .expect("watch starts")
         .into_inner();
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let staging =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../scratch/e2e-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -1031,7 +1034,8 @@ async fn a_watch_stream_names_a_failing_ladder_rung() {
         .expect("watch starts")
         .into_inner();
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-ladder-staging");
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../scratch/e2e-ladder-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -1125,7 +1129,8 @@ async fn a_probe_job_returns_stream_metadata_through_the_api() {
         .await
         .expect("server starts");
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let staging =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../scratch/e2e-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -1273,7 +1278,8 @@ async fn a_transcode_job_streams_progress_and_lands_a_verified_output() {
         .expect("watch starts")
         .into_inner();
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-staging");
+    let staging =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../scratch/e2e-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -1443,7 +1449,8 @@ async fn a_trim_job_reaches_success_through_server_and_worker() {
         .into_inner();
     assert!(created.created);
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-trim-staging");
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../scratch/e2e-trim-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -1570,7 +1577,8 @@ async fn transcode_through_server_and_worker(
         .expect("create succeeds")
         .into_inner();
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-cut-staging");
+    let staging =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../scratch/e2e-cut-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -1774,7 +1782,8 @@ async fn a_thumbnail_job_lands_every_key_through_server_and_worker() {
         .into_inner();
     assert!(created.created);
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-thumbnail-staging");
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../scratch/e2e-thumbnail-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -1925,7 +1934,8 @@ async fn an_image_op_reaches_success_through_server_and_worker() {
         .into_inner();
     assert!(created.created);
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-image-staging");
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../scratch/e2e-image-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -2038,7 +2048,8 @@ async fn a_mid_merge_cancel_kills_the_tool_and_cleans_every_output() {
         .await
         .expect("server starts");
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-cancel-staging");
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../scratch/e2e-cancel-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -2278,7 +2289,8 @@ async fn a_package_job_reaches_success_through_server_and_worker() {
         .into_inner();
     assert!(created.created);
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-package-staging");
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../scratch/e2e-package-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),
@@ -2370,7 +2382,7 @@ async fn a_package_job_reaches_success_through_server_and_worker() {
         .concat();
     playable.extend(segment);
     let local = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scratch/e2e-package-staging")
+        .join(format!("../../scratch/e2e-package-staging/{name}"))
         .join(format!("{}-probe.mp4", created.job_id));
     std::fs::write(&local, playable).expect("the probe copy writes");
     let info = Prober::default()
@@ -2478,7 +2490,8 @@ async fn an_upload_target_lands_bytes_a_job_reads_back() {
         .expect("create job")
         .into_inner();
 
-    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-upload-staging");
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../scratch/e2e-upload-staging/{name}"));
     let mut worker_config = mm_worker::WorkerConfig::new(
         repository.clone(),
         store.clone(),

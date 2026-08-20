@@ -135,6 +135,8 @@ fn every_worker_failure_code_carries_the_reference_vocabulary() {
         ("grade_invalid", "ERROR_GRADE_INVALID"),
         ("audio_invalid", "ERROR_AUDIO_INVALID"),
         ("title_failed", "ERROR_TITLE_FAILED"),
+        ("encoder_unavailable", "ERROR_ENCODER_UNAVAILABLE"),
+        ("journal_failed", "ERROR_STAGING_JOURNAL"),
     ];
     for (code, reference) in expected {
         assert_eq!(failure_code(&failure(code, Vec::new())), reference);

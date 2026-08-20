@@ -2100,6 +2100,8 @@ dependencies = [
  "mm-storage",
  "mm-testkit",
  "prost",
+ "serde",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",

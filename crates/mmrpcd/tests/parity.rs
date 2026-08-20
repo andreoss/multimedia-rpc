@@ -267,7 +267,12 @@ impl Drop for Daemon {
 }
 
 fn spawn_daemon(database_url: &str, worker_id: &str, extra: &[(&str, &str)]) -> Daemon {
-    let staging = scratch_dir("staging");
+    let database = database_url
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("staging");
+    let staging = scratch_dir(&format!("staging/{database}"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_mmrpcd"));
     command
         .arg("combined")

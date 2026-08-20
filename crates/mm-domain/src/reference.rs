@@ -46,6 +46,7 @@ pub fn failure_code(failure: &JobFailure) -> &str {
         "audio_invalid" => "ERROR_AUDIO_INVALID",
         "title_failed" => "ERROR_TITLE_FAILED",
         "encoder_unavailable" => "ERROR_ENCODER_UNAVAILABLE",
+        "journal_failed" => "ERROR_STAGING_JOURNAL",
         code if code.starts_with("ERROR_") => code,
         _ => INTERNAL,
     }

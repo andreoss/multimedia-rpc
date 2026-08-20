@@ -94,9 +94,48 @@ enum Signal {
     Deadline,
 }
 
+pub(crate) struct CancelRegistry {
+    entries: std::sync::Mutex<std::collections::HashMap<JobId, watch::Sender<Signal>>>,
+}
+
+impl CancelRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn register(&self, id: JobId, sender: watch::Sender<Signal>) {
+        self.entries
+            .lock()
+            .expect("registry lock")
+            .insert(id, sender);
+    }
+
+    fn deregister(&self, id: JobId) {
+        self.entries.lock().expect("registry lock").remove(&id);
+    }
+
+    pub(crate) fn cancel(&self, id: JobId) {
+        if let Some(sender) = self.entries.lock().expect("registry lock").get(&id) {
+            let _ = sender.send(Signal::Cancel);
+        }
+    }
+}
+
+struct Registered<'a> {
+    registry: &'a CancelRegistry,
+    id: JobId,
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.registry.deregister(self.id);
+    }
+}
+
 struct Supervisor {
     task: JoinHandle<()>,
-    signal: watch::Receiver<Signal>,
 }
 
 impl Supervisor {
@@ -107,9 +146,15 @@ impl Supervisor {
         interval: Duration,
         lease: Duration,
         deadline_at: SystemTime,
+        sender: watch::Sender<Signal>,
     ) -> Self {
-        let (sender, signal) = watch::channel(Signal::Run);
         let task = tokio::spawn(async move {
+            if let Ok(Some(record)) = repository.get(id).await
+                && record.cancel_requested
+            {
+                let _ = sender.send(Signal::Cancel);
+                return;
+            }
             loop {
                 let remaining = deadline_at
                     .duration_since(SystemTime::now())
@@ -140,11 +185,7 @@ impl Supervisor {
                 }
             }
         });
-        Self { task, signal }
-    }
-
-    fn signal(&self) -> watch::Receiver<Signal> {
-        self.signal.clone()
+        Self { task }
     }
 }
 
@@ -167,7 +208,7 @@ fn timeout_failure() -> JobFailure {
     JobFailure::new(codes::TIMEOUT, "job deadline passed").expect("worker failure codes are valid")
 }
 
-pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
+pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord, registry: &CancelRegistry) {
     if job.cancel_requested {
         let _ = ctx.repository.mark_cancelled(job.id).await;
         return;
@@ -182,6 +223,12 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
             .await;
         return;
     }
+    let (sender, mut signal) = watch::channel(Signal::Run);
+    registry.register(job.id, sender.clone());
+    let registered = Registered {
+        registry,
+        id: job.id,
+    };
     let supervisor = Supervisor::start(
         ctx.repository.clone(),
         job.id,
@@ -189,10 +236,11 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
         ctx.heartbeat_interval,
         ctx.lease,
         deadline_at,
+        sender,
     );
-    let mut signal = supervisor.signal();
     let outcome = pipeline(ctx, &job, deadline_at, &mut signal).await;
     drop(supervisor);
+    drop(registered);
     match outcome {
         Ok(result) => {
             let _ = ctx
@@ -416,6 +464,7 @@ async fn merge_and_upload(
         }
     }
 
+    check(signal)?;
     let info = ctx
         .prober
         .probe(&output_path.to_string_lossy(), &ctx.probe_limits)
@@ -429,6 +478,10 @@ async fn merge_and_upload(
         .put_multipart(&object, file_body(file))
         .await
         .map_err(|error| failed(codes::OUTPUT_UPLOAD_FAILED, error))?;
+    if let Err(finish) = check(signal) {
+        let _ = ctx.store.delete(&object).await;
+        return Err(finish);
+    }
 
     let timed = TimedOutput::new(MediaRef::Object(object), info.duration.as_secs_f64())
         .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;

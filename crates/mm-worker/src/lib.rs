@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mm_domain::{JobNotifications, JobRepository, ObjectStore, WorkerId};
+use mm_domain::{CancelNotifications, JobNotifications, JobRepository, ObjectStore, WorkerId};
 use mm_ffmpeg::{ProbeLimits, Prober, Runner};
 use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -39,6 +39,7 @@ pub struct WorkerConfig {
     pub release_retry: Duration,
     pub retry: RetryPolicy,
     pub notifications: Option<Arc<dyn JobNotifications>>,
+    pub cancellations: Option<Arc<dyn CancelNotifications>>,
     reserved: std::sync::Mutex<u64>,
 }
 
@@ -71,6 +72,7 @@ impl WorkerConfig {
             release_retry: Duration::from_secs(30),
             retry: RetryPolicy::default(),
             notifications: None,
+            cancellations: None,
             reserved: std::sync::Mutex::new(0),
         }
     }
@@ -109,11 +111,22 @@ pub fn start(config: WorkerConfig) -> WorkerHandle {
 async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
     let semaphore = Arc::new(Semaphore::new(ctx.max_concurrent));
     let wake = Arc::new(Notify::new());
+    let registry = Arc::new(pipeline::CancelRegistry::new());
     let mut jobs = JoinSet::new();
+    let watcher = ctx.cancellations.clone().map(|listener| {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(id) = listener.cancelled().await {
+                    registry.cancel(id);
+                }
+            }
+        })
+    });
     loop {
         let _ = ctx.repository.requeue_expired().await;
         let _ = ctx.repository.fail_overdue().await;
-        claim_available(&ctx, &semaphore, &wake, &mut jobs).await;
+        claim_available(&ctx, &semaphore, &wake, &registry, &mut jobs).await;
         while jobs.try_join_next().is_some() {}
         tokio::select! {
             changed = shutdown.changed() => {
@@ -127,6 +140,9 @@ async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
         }
     }
     while jobs.join_next().await.is_some() {}
+    if let Some(watcher) = watcher {
+        watcher.abort();
+    }
 }
 
 async fn job_ready(notifications: Option<&dyn JobNotifications>) {
@@ -144,6 +160,7 @@ async fn claim_available(
     ctx: &Arc<WorkerConfig>,
     semaphore: &Arc<Semaphore>,
     wake: &Arc<Notify>,
+    registry: &Arc<pipeline::CancelRegistry>,
     jobs: &mut JoinSet<()>,
 ) {
     loop {
@@ -165,9 +182,10 @@ async fn claim_available(
                 .expect("claim size never exceeds available permits");
             let ctx = ctx.clone();
             let wake = wake.clone();
+            let registry = registry.clone();
             jobs.spawn(async move {
                 let _permit = permit;
-                pipeline::execute(&ctx, job).await;
+                pipeline::execute(&ctx, job, &registry).await;
                 wake.notify_one();
             });
         }

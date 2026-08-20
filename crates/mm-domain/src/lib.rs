@@ -1,5 +1,6 @@
 mod id;
 mod op;
+mod resolve;
 mod state;
 mod store;
 
@@ -9,6 +10,8 @@ pub use op::{
     OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ThumbnailResult,
     ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec,
 };
+pub use resolve::{ResolveError, resolve_media_ref};
+
 pub use store::{
     ObjectBody, ObjectStore, ObjectStoreError, OutputKey, OutputKeyError, body_from_bytes,
     collect_body,

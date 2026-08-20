@@ -1,10 +1,12 @@
 use std::env;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use mm_domain::{
-    JobId, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OutputKey, collect_body,
+    JobId, MediaRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OutputKey, collect_body,
+    resolve_media_ref,
 };
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
 
@@ -91,11 +93,16 @@ fn fresh_bucket() -> String {
     format!("mm-it-{}", JobId::generate())
 }
 
+async fn shared_bucket(store: &S3ObjectStore) -> String {
+    let bucket = "mm-it-shared".to_string();
+    store.ensure_bucket(&bucket).await.unwrap();
+    bucket
+}
+
 #[tokio::test]
 async fn multipart_round_trip_lands_under_the_job_scope() {
     let store = test_store().await;
-    let bucket = fresh_bucket();
-    store.ensure_bucket(&bucket).await.unwrap();
+    let bucket = shared_bucket(&store).await;
 
     let job_id = JobId::generate();
     let key = OutputKey::new(&job_id, "out.bin").unwrap();
@@ -120,16 +127,14 @@ async fn multipart_round_trip_lands_under_the_job_scope() {
         store.head(&target).await.unwrap_err(),
         ObjectStoreError::NotFound { .. }
     ));
-    store.delete_bucket(&bucket).await.unwrap();
 }
 
 #[tokio::test]
 async fn streaming_put_round_trips() {
     let store = test_store().await;
-    let bucket = fresh_bucket();
-    store.ensure_bucket(&bucket).await.unwrap();
+    let bucket = shared_bucket(&store).await;
 
-    let target = ObjectRef::new(&bucket, "small.bin").unwrap();
+    let target = ObjectRef::new(&bucket, &format!("{}/small.bin", JobId::generate())).unwrap();
     let payload = deterministic_payload(64 * 1024);
     store
         .put(
@@ -146,22 +151,106 @@ async fn streaming_put_round_trips() {
     assert!(read == payload);
 
     store.delete(&target).await.unwrap();
-    store.delete_bucket(&bucket).await.unwrap();
 }
 
 #[tokio::test]
 async fn get_of_a_missing_object_is_not_found() {
     let store = test_store().await;
-    let bucket = fresh_bucket();
-    store.ensure_bucket(&bucket).await.unwrap();
+    let bucket = shared_bucket(&store).await;
 
-    let target = ObjectRef::new(&bucket, "absent.bin").unwrap();
+    let target = ObjectRef::new(&bucket, &format!("{}/absent.bin", JobId::generate())).unwrap();
     match store.get(&target).await {
         Err(ObjectStoreError::NotFound { .. }) => {}
         Err(other) => panic!("expected NotFound, got {other}"),
         Ok(_) => panic!("expected NotFound, got a body"),
     }
+}
+
+#[tokio::test]
+async fn bucket_lifecycle_round_trips() {
+    let store = test_store().await;
+    let bucket = fresh_bucket();
+    store.ensure_bucket(&bucket).await.unwrap();
+    store.ensure_bucket(&bucket).await.unwrap();
     store.delete_bucket(&bucket).await.unwrap();
+}
+
+fn http_get_once(url: &str, read_timeout: Duration) -> (u16, Vec<u8>) {
+    let without_scheme = url
+        .strip_prefix("http://")
+        .expect("presigned url must be plain http against the local store");
+    let (authority, target) = without_scheme
+        .split_once('/')
+        .expect("presigned url must carry a path");
+    let address = authority
+        .to_socket_addrs()
+        .expect("authority must resolve")
+        .next()
+        .expect("authority must resolve to an address");
+    let mut connection =
+        TcpStream::connect_timeout(&address, Duration::from_secs(2)).expect("connect");
+    connection
+        .set_read_timeout(Some(read_timeout))
+        .expect("read timeout");
+    connection
+        .write_all(
+            format!("GET /{target} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .expect("request");
+    let mut raw = Vec::new();
+    connection.read_to_end(&mut raw).expect("response");
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("header separator");
+    let head = String::from_utf8_lossy(&raw[..split]).to_string();
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .expect("status code")
+        .parse()
+        .expect("numeric status");
+    (status, raw[split + 4..].to_vec())
+}
+
+#[tokio::test]
+async fn presigned_object_is_fetchable_over_plain_http() {
+    let store = test_store().await;
+    let bucket = shared_bucket(&store).await;
+
+    let job_id = JobId::generate();
+    let key = OutputKey::new(&job_id, "clip.bin").unwrap();
+    let target = key.clone().into_object(&bucket).unwrap();
+    let payload = deterministic_payload(32 * 1024);
+    store
+        .put(
+            &target,
+            chunked_body(&payload, 8 * 1024),
+            payload.len() as u64,
+        )
+        .await
+        .unwrap();
+
+    let media = MediaRef::object_uri(&format!("s3://{bucket}/{key}")).unwrap();
+    let now = SystemTime::now();
+    let url = resolve_media_ref(&store, &media, now + Duration::from_secs(120), now)
+        .await
+        .unwrap();
+    assert!(url.starts_with(&format!("{}/{bucket}/{key}?", endpoint())));
+    assert!(url.contains("X-Amz-Expires=120"));
+
+    let (status, body) = http_get_once(&url, Duration::from_secs(10));
+    assert_eq!(status, 200);
+    assert!(body == payload);
+
+    let (anonymous_status, _) = http_get_once(
+        &format!("{}/{bucket}/{key}", endpoint()),
+        Duration::from_secs(10),
+    );
+    assert_eq!(anonymous_status, 403);
+
+    store.delete(&target).await.unwrap();
 }
 
 #[tokio::test]

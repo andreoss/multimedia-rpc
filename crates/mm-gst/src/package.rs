@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,4 +92,128 @@ pub fn render_playlist(init: Option<&str>, segment_seconds: f64, segments: &[Str
     }
     playlist.push_str("#EXT-X-ENDLIST\n");
     playlist
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantDescriptor {
+    uri: String,
+    bandwidth_bps: u32,
+    average_bandwidth_bps: Option<u32>,
+    width: u32,
+    height: u32,
+    codecs: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MasterPlaylistError {
+    #[error("a master playlist needs at least one rendition")]
+    NoRenditions,
+    #[error("rendition {uri:?} has no uri")]
+    MissingUri { uri: String },
+    #[error("rendition {uri:?} has no bandwidth")]
+    MissingBandwidth { uri: String },
+    #[error("rendition {uri:?} names no resolution")]
+    MissingResolution { uri: String },
+    #[error("renditions are not in ascending bandwidth: {previous} then {next}")]
+    NotAscending { previous: String, next: String },
+}
+
+impl VariantDescriptor {
+    pub fn new(uri: &str, bandwidth_bps: u32, width: u32, height: u32) -> Self {
+        Self {
+            uri: uri.to_string(),
+            bandwidth_bps,
+            average_bandwidth_bps: None,
+            width,
+            height,
+            codecs: None,
+        }
+    }
+
+    pub fn with_average_bandwidth(mut self, average_bandwidth_bps: u32) -> Self {
+        self.average_bandwidth_bps = Some(average_bandwidth_bps);
+        self
+    }
+
+    pub fn with_codecs(mut self, codecs: &str) -> Self {
+        self.codecs = Some(codecs.to_string());
+        self
+    }
+
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    pub fn bandwidth_bps(&self) -> u32 {
+        self.bandwidth_bps
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+pub fn master_playlist_name() -> &'static str {
+    "master.m3u8"
+}
+
+pub fn render_master_playlist(
+    variants: &[VariantDescriptor],
+) -> Result<String, MasterPlaylistError> {
+    if variants.is_empty() {
+        return Err(MasterPlaylistError::NoRenditions);
+    }
+    let mut playlist = String::from(
+        "#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-INDEPENDENT-SEGMENTS
+",
+    );
+    for (index, variant) in variants.iter().enumerate() {
+        if variant.uri.is_empty() {
+            return Err(MasterPlaylistError::MissingUri {
+                uri: variant.uri.clone(),
+            });
+        }
+        if variant.bandwidth_bps == 0 {
+            return Err(MasterPlaylistError::MissingBandwidth {
+                uri: variant.uri.clone(),
+            });
+        }
+        if variant.width == 0 || variant.height == 0 {
+            return Err(MasterPlaylistError::MissingResolution {
+                uri: variant.uri.clone(),
+            });
+        }
+        if index > 0 && variants[index - 1].bandwidth_bps >= variant.bandwidth_bps {
+            return Err(MasterPlaylistError::NotAscending {
+                previous: variants[index - 1].uri.clone(),
+                next: variant.uri.clone(),
+            });
+        }
+        playlist.push_str("#EXT-X-STREAM-INF:BANDWIDTH=");
+        playlist.push_str(&variant.bandwidth_bps.to_string());
+        if let Some(average) = variant.average_bandwidth_bps {
+            playlist.push_str(",AVERAGE-BANDWIDTH=");
+            playlist.push_str(&average.to_string());
+        }
+        playlist.push_str(&format!(",RESOLUTION={}x{}", variant.width, variant.height));
+        if let Some(codecs) = &variant.codecs {
+            playlist.push_str(",CODECS=\"");
+            playlist.push_str(codecs);
+            playlist.push('"');
+        }
+        playlist.push('\n');
+        playlist.push_str(&variant.uri);
+        playlist.push('\n');
+    }
+    playlist.push_str(
+        "#EXT-X-ENDLIST
+",
+    );
+    Ok(playlist)
 }

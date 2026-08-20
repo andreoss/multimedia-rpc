@@ -1440,6 +1440,72 @@ async fn probe_pipeline(
     Ok(OpResult::Probe(result))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn master_playlist(
+    ctx: &Arc<WorkerConfig>,
+    job: JobId,
+    prefix: &str,
+    renditions: &[RenditionResult],
+    landed: &mut Landed<'_>,
+) -> Result<ObjectRef, Finish> {
+    let mut variants = Vec::with_capacity(renditions.len());
+    for (index, rendition) in renditions.iter().enumerate() {
+        let Some(playlist) = rendition.playlist() else {
+            return Err(failed(
+                codes::OUTPUT_INVALID,
+                format!("rung {index} was not packaged"),
+            ));
+        };
+        let uri = match playlist {
+            MediaRef::Object(object) => relative_artifact_key(object.key()).ok_or_else(|| {
+                failed(codes::OUTPUT_INVALID, "the playlist is not a job artifact")
+            })?,
+            MediaRef::Http(_) => {
+                return Err(failed(
+                    codes::OUTPUT_INVALID,
+                    "the playlist is not a job artifact",
+                ));
+            }
+        };
+        let mut descriptor = mm_gst::VariantDescriptor::new(
+            &uri,
+            rendition.bandwidth_bps(),
+            rendition.width(),
+            rendition.height(),
+        );
+        if let Some(codecs) = rendition_codecs(&uri) {
+            descriptor = descriptor.with_codecs(&codecs);
+        }
+        variants.push(descriptor);
+    }
+    let text = mm_gst::render_master_playlist(&variants)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let staging = ctx.staging_dir.join(job.to_string()).join("master.m3u8");
+    std::fs::create_dir_all(staging.parent().expect("a staging parent"))
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    std::fs::write(&staging, text).map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    let master = artifact_object_named(ctx, job, prefix, mm_gst::master_playlist_name()).await?;
+    upload_object(ctx, &master, &staging).await?;
+    landed.record(master.clone());
+    let _ = tokio::fs::remove_file(&staging).await;
+    Ok(master)
+}
+
+fn relative_artifact_key(key: &str) -> Option<String> {
+    let parts: Vec<&str> = key.split('/').collect();
+    match parts.as_slice() {
+        ["jobs", _job, rest @ ..] if !rest.is_empty() => Some(rest.join("/")),
+        _ => None,
+    }
+}
+
+fn rendition_codecs(uri: &str) -> Option<String> {
+    let rung = uri.split('/').nth(1)?;
+    rung.parse::<u32>()
+        .ok()
+        .map(|_| "avc1.64001f,mp4a.40.2".to_string())
+}
+
 fn rung_packer(ctx: &WorkerConfig) -> &dyn RungPacker {
     crate::packer::selected(ctx)
 }
@@ -1548,8 +1614,14 @@ async fn ladder_pipeline(
             if let (Some(poster_seconds), Some(path)) = (spec.poster_seconds(), highest) {
                 extract_poster(ctx, job, scope, &path, poster_seconds, deadline_at, signal).await?;
             }
+            let master = match spec.segment_seconds() {
+                Some(_) => Some(
+                    master_playlist(ctx, job.id, &scope.prefix, &renditions, &mut landed).await?,
+                ),
+                None => None,
+            };
             Ok(OpResult::Ladder(
-                LadderResult::new(None, renditions)
+                LadderResult::new(master.map(MediaRef::Object), renditions)
                     .map_err(|error| failed(codes::OUTPUT_INVALID, error))?,
             ))
         }

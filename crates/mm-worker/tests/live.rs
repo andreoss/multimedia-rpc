@@ -2676,7 +2676,10 @@ async fn a_registered_packer_answers_a_ladder_end_to_end() {
     let OpResult::Ladder(result) = record.result.expect("result recorded") else {
         panic!("expected a ladder result");
     };
-    assert_eq!(result.master_playlist(), None);
+    assert!(
+        result.master_playlist().is_some(),
+        "a packaged ladder answers a master playlist"
+    );
     for (index, rendition) in result.renditions().iter().enumerate() {
         assert!(
             rendition.playlist().is_some(),
@@ -2735,5 +2738,200 @@ async fn a_packer_refusal_ends_the_ladder_and_cleans_every_key() {
         .unwrap();
         assert!(store.head(&key).await.is_err(), "key {index} survived");
     }
+    db.dispose().await;
+}
+struct MediaPacker;
+
+#[async_trait::async_trait]
+impl RungPacker for MediaPacker {
+    fn name(&self) -> &'static str {
+        "media"
+    }
+
+    async fn pack(
+        &self,
+        _job: mm_domain::JobId,
+        _rung: usize,
+        _media: &ObjectRef,
+        staging_dir: &Path,
+        _segment_seconds: f64,
+    ) -> Result<LadderPacked, mm_worker::LadderPackError> {
+        let init = staging_dir.join("init.mp4");
+        std::fs::write(&init, b"init").expect("init staged");
+        let segment = staging_dir.join("seg00000.m4s");
+        std::fs::write(&segment, b"segment").expect("segment staged");
+        let playlist = staging_dir.join("playlist.m3u8");
+        std::fs::write(
+            &playlist,
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.000,\nseg00000.m4s\n#EXT-X-ENDLIST\n",
+        )
+        .expect("playlist staged");
+        Ok(LadderPacked {
+            init,
+            playlist,
+            segments: vec![segment],
+        })
+    }
+}
+
+fn master_ladder_job(source: &MediaRef) -> NewJob {
+    let rungs = vec![
+        OutputProfile::from_raw(24.0, 400_000, 28, 64_000, 48_000, 640, 360).unwrap(),
+        OutputProfile::from_raw(24.0, 900_000, 26, 64_000, 48_000, 1280, 720).unwrap(),
+    ];
+    let spec = LadderSpec::new(source.clone(), rungs)
+        .unwrap()
+        .with_segment_seconds(1.0)
+        .unwrap();
+    single_input_job(OpSpec::Ladder(spec))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_packaged_ladder_lands_a_master_playlist_naming_every_rendition() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("master-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/master-source.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(master_ladder_job(&input)).await.unwrap();
+
+    let mut config = base_config(&db, store.clone(), "worker-master");
+    config.ladder_packer = Some(Arc::new(MediaPacker));
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Ladder(result) = record.result.expect("result recorded") else {
+        panic!("expected a ladder result");
+    };
+    let MediaRef::Object(master) = result.master_playlist().expect("a master playlist") else {
+        panic!("expected an object master playlist");
+    };
+    assert_eq!(master.key(), format!("jobs/{}/master.m3u8", job.id));
+    let body = store.get(master).await.expect("master playlist fetches");
+    let text = String::from_utf8(collect_body(body).await.unwrap()).expect("utf-8");
+    assert!(text.starts_with("#EXTM3U\n#EXT-X-VERSION:7\n"), "{text}");
+    assert!(text.contains("#EXT-X-INDEPENDENT-SEGMENTS\n"), "{text}");
+
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("#EXT-X-STREAM-INF"))
+        .collect();
+    assert_eq!(rows.len(), 2, "{text}");
+    let bandwidths: Vec<u32> = rows
+        .iter()
+        .map(|row| {
+            let field = row
+                .split("BANDWIDTH=")
+                .nth(1)
+                .and_then(|rest| rest.split(',').next())
+                .expect("a bandwidth field");
+            field.parse().expect("a numeric bandwidth")
+        })
+        .collect();
+    assert!(bandwidths[0] < bandwidths[1], "ascending: {bandwidths:?}");
+    assert!(rows[0].contains("RESOLUTION=640x360"), "{}", rows[0]);
+    assert!(rows[1].contains("RESOLUTION=1280x720"), "{}", rows[1]);
+    assert!(text.contains("renditions/0/playlist.m3u8"), "{text}");
+    assert!(text.contains("renditions/1/playlist.m3u8"), "{text}");
+
+    for (index, rendition) in result.renditions().iter().enumerate() {
+        let MediaRef::Object(playlist) = rendition.playlist().expect("rung playlist") else {
+            panic!("expected an object playlist");
+        };
+        assert_eq!(
+            playlist.key(),
+            format!("jobs/{}/renditions/{index}/playlist.m3u8", job.id)
+        );
+        assert!(store.head(playlist).await.expect("playlist exists") > 0);
+        for segment in rendition.segments() {
+            let MediaRef::Object(segment) = segment else {
+                panic!("expected an object segment");
+            };
+            assert_eq!(
+                segment.key(),
+                format!("jobs/{}/renditions/{index}/seg00000.m4s", job.id)
+            );
+            assert!(store.head(segment).await.expect("segment exists") > 0);
+        }
+    }
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ladder_without_a_segment_length_lands_no_playlist_at_all() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("master-none-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/master-none-source.mp4").await;
+    let repository = db.repository();
+    let rungs = vec![
+        OutputProfile::from_raw(24.0, 400_000, 28, 64_000, 48_000, 640, 360).unwrap(),
+        OutputProfile::from_raw(24.0, 900_000, 26, 64_000, 48_000, 1280, 720).unwrap(),
+    ];
+    let job = repository
+        .create(single_input_job(OpSpec::Ladder(
+            LadderSpec::new(input, rungs).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-master-none"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Ladder(result) = record.result.expect("result recorded") else {
+        panic!("expected a ladder result");
+    };
+    assert_eq!(result.master_playlist(), None);
+    for rendition in result.renditions() {
+        assert_eq!(rendition.playlist(), None);
+        assert!(rendition.segments().is_empty());
+    }
+    let master = ObjectRef::new(BUCKET, &format!("jobs/{}/master.m3u8", job.id)).unwrap();
+    assert!(
+        store.head(&master).await.is_err(),
+        "a master playlist landed"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_rungs_of_one_ladder_never_share_a_segment_name() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("master-collide-source.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/master-collide-source.mp4").await;
+    let repository = db.repository();
+    let job = repository.create(master_ladder_job(&input)).await.unwrap();
+
+    let mut config = base_config(&db, store.clone(), "worker-master-collide");
+    config.ladder_packer = Some(Arc::new(MediaPacker));
+    let handle = start(config);
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Ladder(result) = record.result.expect("result recorded") else {
+        panic!("expected a ladder result");
+    };
+    let mut keys = Vec::new();
+    for rendition in result.renditions() {
+        for segment in rendition.segments() {
+            let MediaRef::Object(segment) = segment else {
+                panic!("expected an object segment");
+            };
+            keys.push(segment.key().to_string());
+        }
+    }
+    let mut unique = keys.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), keys.len(), "two rungs share a key: {keys:?}");
     db.dispose().await;
 }

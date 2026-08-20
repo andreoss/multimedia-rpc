@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use mm_domain::{
     CallbackError, CallbackPublisher, ConcatSpec, JobId, JobRecord, JobRepository, JobState,
     MediaRef, NewJob, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec,
-    OutputProfile, ProbeSpec, QueueUrl, RequestId, TranscodeSpec, TrimSpec, UserId, WorkerId,
-    collect_body,
+    OutputProfile, ProbeSpec, QueueUrl, RequestId, ThumbnailSpec, TranscodeSpec, TrimSpec, UserId,
+    WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -219,6 +219,18 @@ fn concat_job(inputs: Vec<MediaRef>) -> NewJob {
     )
 }
 
+fn unsupported_spec() -> OpSpec {
+    OpSpec::Thumbnail(
+        ThumbnailSpec::new(
+            MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
+            vec![0.0],
+            320,
+            180,
+        )
+        .unwrap(),
+    )
+}
+
 fn base_config(db: &TestDb, store: Arc<dyn ObjectStore>, name: &str) -> WorkerConfig {
     let mut config = WorkerConfig::new(
         db.repository(),
@@ -412,6 +424,56 @@ async fn a_transcode_job_succeeds_with_a_verified_output() {
     assert!((info.video[0].avg_fps.unwrap() - 24.0).abs() < 0.1);
     assert_eq!(info.audio[0].codec, "aac");
     assert_eq!(info.audio[0].sample_rate, Some(48_000));
+    let staged = scratch_dir("staging").join(format!("{}.mp4", job.id));
+    assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trim_job_succeeds_with_a_verified_output() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("trim-30fps-6s.mp4", 6, 30, "mp4");
+    let input = upload_input(&store, &source, "inputs/trim-30fps-6s.mp4").await;
+    let repository = db.repository();
+    let job = repository
+        .create(single_input_job(OpSpec::Trim(
+            TrimSpec::new(input, 1.0, 2.0).unwrap(),
+        )))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-trim"));
+    let record = await_terminal(&repository, job.id, Duration::from_secs(120)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    assert_eq!(record.progress.value(), 100);
+    let OpResult::Trim(result) = record.result.expect("result recorded") else {
+        panic!("expected a trim result");
+    };
+    let MediaRef::Object(object) = result.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/output.mp4", job.id));
+    let wanted = result.duration_seconds();
+    assert!((wanted - 2.0).abs() < 0.3, "the result claims {wanted}s");
+
+    let body = store.get(&object).await.expect("output fetches");
+    let bytes = collect_body(body).await.expect("output body collects");
+    let local = scratch_dir("verify").join(format!("{}.mp4", job.id));
+    tokio::fs::write(&local, &bytes).await.unwrap();
+    let info = mm_ffmpeg::Prober::default()
+        .probe(&local.to_string_lossy(), &mm_ffmpeg::ProbeLimits::default())
+        .await
+        .expect("output probes");
+    assert!(
+        (info.duration.as_secs_f64() - 2.0).abs() < 0.3,
+        "the stored trim is {}s long",
+        info.duration.as_secs_f64()
+    );
+    assert!(info.container.split(',').any(|token| token == "mp4"));
     let staged = scratch_dir("staging").join(format!("{}.mp4", job.id));
     assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
     db.dispose().await;
@@ -894,14 +956,7 @@ async fn an_unsupported_operation_fails_with_a_typed_code() {
             id,
             owner(),
             RequestId::from_str(&format!("req-{id}")).unwrap(),
-            OpSpec::Trim(
-                TrimSpec::new(
-                    MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
-                    0.0,
-                    2.0,
-                )
-                .unwrap(),
-            ),
+            unsupported_spec(),
             None,
         ))
         .await
@@ -914,7 +969,11 @@ async fn an_unsupported_operation_fails_with_a_typed_code() {
     assert_eq!(record.state, JobState::Failed);
     let failure = record.failure.expect("failure recorded");
     assert_eq!(failure.code(), codes::UNSUPPORTED_OPERATION);
-    assert!(failure.message().contains("trim"), "{}", failure.message());
+    assert!(
+        failure.message().contains("thumbnail"),
+        "{}",
+        failure.message()
+    );
     db.dispose().await;
 }
 
@@ -1095,14 +1154,7 @@ async fn a_created_job_is_claimed_via_notify_well_before_any_tick() {
                 id,
                 owner(),
                 RequestId::from_str(&format!("req-{id}-{attempt}")).unwrap(),
-                OpSpec::Trim(
-                    TrimSpec::new(
-                        MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
-                        0.0,
-                        2.0,
-                    )
-                    .unwrap(),
-                ),
+                unsupported_spec(),
                 None,
             ))
             .await
@@ -1152,14 +1204,7 @@ async fn without_a_listener_a_job_still_starts_within_one_tick() {
             id,
             owner(),
             RequestId::from_str(&format!("req-{id}")).unwrap(),
-            OpSpec::Trim(
-                TrimSpec::new(
-                    MediaRef::object_uri(&format!("s3://{BUCKET}/inputs/none.mp4")).unwrap(),
-                    0.0,
-                    2.0,
-                )
-                .unwrap(),
-            ),
+            unsupported_spec(),
             None,
         ))
         .await

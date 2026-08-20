@@ -1128,6 +1128,132 @@ async fn a_transcode_job_streams_progress_and_lands_a_verified_output() {
     drop_db(&admin, pool, &name).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trim_job_reaches_success_through_server_and_worker() {
+    let _slot = mm_testkit::stack_slot();
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let source = fixture("trim-e2e-6s.mp4", 6, 30, "mp4");
+    let input = upload_object(&store, &source, "inputs/trim-e2e-6s.mp4").await;
+
+    let mut server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    server_config.job_events = Some(Arc::new(
+        mm_jobstore::PgJobEventListener::connect(&url)
+            .await
+            .expect("events listener connects"),
+    ));
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Trim(
+        mm_domain::TrimSpec::new(input, 1.0, 2.0).expect("valid trim spec"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-trim".to_string(),
+            idempotency_key: "req-trim".to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+    assert!(created.created);
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-trim-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-trim-e2e").unwrap(),
+        staging,
+    );
+    worker_config.reconcile_interval = Duration::from_secs(30);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+
+    let final_job = loop {
+        let job = client
+            .get_job(mm_proto::v1::GetJobRequest {
+                user_id: "owner-trim".to_string(),
+                job_id: created.job_id.clone(),
+            })
+            .await
+            .expect("get succeeds")
+            .into_inner()
+            .job
+            .expect("job present");
+        if job.state() == mm_proto::v1::JobState::Succeeded
+            || job.state() == mm_proto::v1::JobState::Failed
+            || job.state() == mm_proto::v1::JobState::Cancelled
+        {
+            break job;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        final_job.state(),
+        mm_proto::v1::JobState::Succeeded,
+        "trim job did not succeed"
+    );
+    let result = mm_domain::OpResult::try_from(final_job.result.expect("result present"))
+        .expect("result decodes");
+    let mm_domain::OpResult::Trim(trimmed) = result else {
+        panic!("expected a trim result");
+    };
+    let MediaRef::Object(object) = trimmed.output().clone() else {
+        panic!("expected an object output");
+    };
+    assert_eq!(object.key(), format!("jobs/{}/output.mp4", created.job_id));
+    assert!(store.head(&object).await.expect("output exists") > 0);
+
+    let output_url = resolve_media_ref(
+        store.as_ref(),
+        &MediaRef::Object(object),
+        SystemTime::now() + Duration::from_secs(300),
+        SystemTime::now(),
+    )
+    .await
+    .expect("output presigns");
+    let info = Prober::default()
+        .probe(&output_url, &probe_limits())
+        .await
+        .expect("output probes");
+    assert!(
+        (info.duration.as_secs_f64() - 2.0).abs() < 0.4,
+        "the trimmed output is {}s long",
+        info.duration.as_secs_f64()
+    );
+    assert!(info.container.split(',').any(|token| token == "mp4"));
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}
+
 fn process_mentions(pid: u32, needle: &str) -> bool {
     std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))

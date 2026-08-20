@@ -267,17 +267,18 @@ fn every_spec_names_its_kind() {
 
 #[test]
 fn executable_kinds_pass_the_support_gate() {
-    for kind in [OpKind::Concat, OpKind::Probe, OpKind::Transcode] {
+    for kind in [
+        OpKind::Concat,
+        OpKind::Probe,
+        OpKind::Transcode,
+        OpKind::Trim,
+    ] {
         assert!(kind.ensure_executable().is_ok());
     }
 }
 
 #[test]
-fn trim_and_thumbnail_answer_a_typed_unsupported_error() {
-    assert_eq!(
-        OpKind::Trim.ensure_executable().unwrap_err(),
-        UnsupportedOp { kind: OpKind::Trim }
-    );
+fn thumbnail_answers_a_typed_unsupported_error() {
     let error = OpKind::Thumbnail.ensure_executable().unwrap_err();
     assert_eq!(
         error,
@@ -286,10 +287,6 @@ fn trim_and_thumbnail_answer_a_typed_unsupported_error() {
         }
     );
     assert_eq!(error.to_string(), "thumbnail is not supported yet");
-    assert_eq!(
-        OpKind::Trim.ensure_executable().unwrap_err().to_string(),
-        "trim is not supported yet"
-    );
 }
 
 #[test]

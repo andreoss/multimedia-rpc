@@ -6,6 +6,8 @@ use crate::time::Ticks;
 pub enum CaptionFormat {
     Srt,
     WebVtt,
+    Scc,
+    Embedded,
 }
 
 impl CaptionFormat {
@@ -13,6 +15,8 @@ impl CaptionFormat {
         match self {
             CaptionFormat::Srt => "srt",
             CaptionFormat::WebVtt => "vtt",
+            CaptionFormat::Scc => "scc",
+            CaptionFormat::Embedded => "embedded",
         }
     }
 
@@ -20,6 +24,69 @@ impl CaptionFormat {
         match name.to_ascii_lowercase().as_str() {
             "srt" | "subrip" => Some(CaptionFormat::Srt),
             "vtt" | "webvtt" => Some(CaptionFormat::WebVtt),
+            "scc" => Some(CaptionFormat::Scc),
+            "embedded" => Some(CaptionFormat::Embedded),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CaptionFormat::Srt => "srt",
+            CaptionFormat::WebVtt => "webvtt",
+            CaptionFormat::Scc => "scc",
+            CaptionFormat::Embedded => "embedded",
+        }
+    }
+}
+
+impl std::fmt::Display for CaptionFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaptionFormat::Srt => write!(f, "Srt"),
+            CaptionFormat::WebVtt => write!(f, "WebVtt"),
+            CaptionFormat::Scc => write!(f, "Scc"),
+            CaptionFormat::Embedded => write!(f, "Embedded"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BroadcastCodec {
+    Eia608,
+    DvbTeletext,
+    DvbSubtitle,
+    DvdSubtitle,
+    MovText,
+    SubRip,
+    Ass,
+    WebVtt,
+}
+
+impl BroadcastCodec {
+    pub fn name(self) -> &'static str {
+        match self {
+            BroadcastCodec::Eia608 => "eia_608",
+            BroadcastCodec::DvbTeletext => "dvb_teletext",
+            BroadcastCodec::DvbSubtitle => "dvb_subtitle",
+            BroadcastCodec::DvdSubtitle => "dvd_subtitle",
+            BroadcastCodec::MovText => "mov_text",
+            BroadcastCodec::SubRip => "subrip",
+            BroadcastCodec::Ass => "ass",
+            BroadcastCodec::WebVtt => "webvtt",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "eia_608" => Some(BroadcastCodec::Eia608),
+            "dvb_teletext" => Some(BroadcastCodec::DvbTeletext),
+            "dvb_subtitle" => Some(BroadcastCodec::DvbSubtitle),
+            "dvd_subtitle" => Some(BroadcastCodec::DvdSubtitle),
+            "mov_text" => Some(BroadcastCodec::MovText),
+            "subrip" => Some(BroadcastCodec::SubRip),
+            "ass" => Some(BroadcastCodec::Ass),
+            "webvtt" => Some(BroadcastCodec::WebVtt),
             _ => None,
         }
     }
@@ -58,6 +125,11 @@ impl CaptionDocument {
         let cues = match format {
             CaptionFormat::Srt => parse_srt(&lines)?,
             CaptionFormat::WebVtt => parse_webvtt(&lines)?,
+            CaptionFormat::Scc => return Err(CaptionError::UnsupportedFormat {
+                format,
+                message: "SCC parsing not yet fully implemented".to_string(),
+            }),
+            CaptionFormat::Embedded => parse_webvtt(&lines)?,
         };
         if cues.is_empty() {
             return Err(CaptionError::EmptyDocument);
@@ -92,6 +164,16 @@ pub enum CaptionError {
     MissingWebVttHeader,
     #[error("caption document has more than {max} cues")]
     TooManyCues { max: usize },
+    #[error("SCC timecode at line is malformed")]
+    MalformedSccTimecode { line: usize },
+    #[error("caption at line never ends")]
+    UnterminatedCue { line: usize },
+    #[error("caption format {format} is not supported by this function")]
+    UnsupportedFormat { format: CaptionFormat, message: String },
+    #[error("SCC document is missing its header")]
+    MissingSccHeader,
+    #[error("SCC word at line carries a malformed hex value")]
+    MalformedSccWord { line: usize },
 }
 
 const MAX_CUES: usize = 10_000;

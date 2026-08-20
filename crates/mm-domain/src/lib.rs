@@ -14,7 +14,7 @@ mod time;
 mod validate;
 
 pub use callback::{CallbackError, CallbackPublisher, QueueUrl, QueueUrlError};
-pub use caption::{CaptionDocument, CaptionError, CaptionFormat, Cue};
+pub use caption::{BroadcastCodec, CaptionDocument, CaptionError, CaptionFormat, Cue};
 pub use id::{
     JobId, JobIdError, NodeId, NodeIdError, ParameterName, ParameterNameError, RequestId,
     RequestIdError, TemplateId, TemplateIdError, TemplateName, TemplateNameError, TextIdError,

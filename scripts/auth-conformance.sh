@@ -26,17 +26,13 @@ fi
 echo "auth-conformance: building the daemon"
 cargo build -p mmrpcd --quiet
 
-if command -v sqlx >/dev/null 2>&1; then
-    echo "auth-conformance: applying migrations to $database_url"
-    sqlx migrate run --source crates/mm-jobstore/migrations --database-url "$database_url" >/dev/null
-fi
-
 echo "auth-conformance: minting a published key and a token set outside this repository"
 node scripts/auth-conformance.mjs keys "$jwks" "$tokens"
 
 echo "auth-conformance: starting a server that verifies that key"
 MM_BIND_ADDR=127.0.0.1:0 \
 MM_DATABASE_URL="$database_url" \
+MM_MIGRATE=on \
 MM_OBJECTSTORE_ENDPOINT="$store_endpoint" \
 MM_OBJECTSTORE_BUCKET="$bucket" \
 MM_OBJECTSTORE_ACCESS_KEY="$access_key" \

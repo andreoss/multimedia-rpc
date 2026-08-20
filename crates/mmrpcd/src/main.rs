@@ -38,6 +38,7 @@ struct StackEnv {
     store_bucket: String,
     store_region: Option<String>,
     store_credentials: Option<(String, String)>,
+    migrate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +95,7 @@ fn stack_env(get: &dyn Fn(&str) -> Option<String>) -> Result<StackEnv, String> {
         store_bucket,
         store_region: get("MM_OBJECTSTORE_REGION"),
         store_credentials,
+        migrate: migrate_var(get)?,
     })
 }
 
@@ -102,6 +104,14 @@ fn notify_var(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<bool, 
         None | Some("on") => Ok(true),
         Some("off") => Ok(false),
         Some(other) => Err(format!("{name} must be on or off: {other}")),
+    }
+}
+
+fn migrate_var(get: &dyn Fn(&str) -> Option<String>) -> Result<bool, String> {
+    match get("MM_MIGRATE").as_deref() {
+        None | Some("off") => Ok(false),
+        Some("on") => Ok(true),
+        Some(other) => Err(format!("MM_MIGRATE must be on or off: {other}")),
     }
 }
 
@@ -212,6 +222,12 @@ async fn connect_stack(
         .connect(&stack.database_url)
         .await
         .map_err(|error| format!("database connection failed: {error}"))?;
+    if stack.migrate {
+        mm_jobstore::MIGRATOR
+            .run(&pool)
+            .await
+            .map_err(|error| format!("migrations failed: {error}"))?;
+    }
     let repository = Arc::new(PgJobRepository::new(pool));
     let credentials = match stack.store_credentials.clone() {
         Some((access_key_id, secret_access_key)) => CredentialSource::Static {
@@ -500,6 +516,19 @@ mod tests {
         assert_eq!(env.stack.store_bucket, "media");
         assert_eq!(env.stack.store_region, None);
         assert_eq!(env.stack.store_credentials, None);
+        assert!(!env.stack.migrate);
+    }
+
+    #[test]
+    fn migrations_are_applied_only_when_the_setting_asks_for_it() {
+        let mut map = complete();
+        map.insert("MM_MIGRATE".into(), "on".into());
+        assert!(env_from(&map).expect("environment parses").stack.migrate);
+        assert!(worker_from(&map).expect("environment parses").stack.migrate);
+        map.insert("MM_MIGRATE".into(), "off".into());
+        assert!(!env_from(&map).expect("environment parses").stack.migrate);
+        map.insert("MM_MIGRATE".into(), "sometimes".into());
+        assert!(env_from(&map).unwrap_err().contains("MM_MIGRATE"));
     }
 
     #[test]

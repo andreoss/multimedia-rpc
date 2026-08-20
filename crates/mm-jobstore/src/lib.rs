@@ -483,6 +483,29 @@ impl JobRepository for PgJobRepository {
         .transpose()
     }
 
+    async fn find_by_request(
+        &self,
+        owner: &UserId,
+        request: &RequestId,
+    ) -> Result<Option<JobRecord>, JobStoreError> {
+        sqlx::query_as!(
+            JobRow,
+            "SELECT id, user_id, request_id, spec, state, progress_percent, \
+             error_code, error_message, result, created_at, started_at, \
+             finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
+             lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
+             input_failures, requester_id, requester_type, input_sequence \
+             FROM jobs WHERE user_id = $1 AND request_id = $2",
+            owner.as_str(),
+            request.as_str()
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(backend)?
+        .map(to_record)
+        .transpose()
+    }
+
     async fn list(
         &self,
         owner: &UserId,

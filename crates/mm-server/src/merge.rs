@@ -3,8 +3,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use mm_domain::{
-    JobId, JobRecord, JobRepository, JobState, JobStoreError, MediaRef, NewJob, ObjectStore,
-    ObjectStoreError, OpSpec, QueueUrl, RequestId,
+    JobId, JobRecord, JobRepository, JobRequester, JobState, JobStoreError, MediaRef, NewJob,
+    ObjectStore, ObjectStoreError, OpSpec, QueueUrl, RequestId, RequesterId,
 };
 use mm_proto::merge::{self, MergeJobError};
 use mm_proto::vm::v1::{
@@ -44,9 +44,24 @@ impl VideoMergeService for MergeJobs {
             .ok_or_else(|| Status::invalid_argument("a reference create names no job"))?;
         let request_id = RequestId::from_str(merge::request_id(&message).map_err(invalid_merge)?)
             .map_err(invalid)?;
+        let kind = merge::requester_kind(
+            Requester::try_from(job.requester).unwrap_or(Requester::Unspecified),
+        )
+        .map_err(invalid_merge)?;
+        if let Some(existing) = self
+            .repository
+            .find_by_request(&owner, &request_id)
+            .await
+            .map_err(store)?
+        {
+            return Ok(Response::new(merge::created_response(&existing, false)));
+        }
         let spec = merge::op_spec(&job).map_err(invalid_merge)?;
         let order = merge::input_order(&job).map_err(invalid_merge)?;
-        let requester = merge::requester(&job).map_err(invalid_merge)?;
+        let requester = JobRequester::new(
+            RequesterId::parse(request_id.as_str()).map_err(invalid)?,
+            kind,
+        );
         self.ensure_media(&spec).await?;
 
         let mut new_job = NewJob::new(JobId::generate(), owner.clone(), request_id, spec, None)

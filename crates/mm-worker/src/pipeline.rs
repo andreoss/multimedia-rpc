@@ -6,11 +6,15 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use mm_domain::{
-    JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef, ObjectBody, ObjectRef,
-    ObjectStoreError, OpResult, OpSpec, OutputKey, ProgressPercent, TimedOutput, WorkerId,
-    resolve_media_ref, validate_concat_inputs,
+    ConcatSpec, InputReport, JobFailure, JobId, JobRecord, JobRepository, JobStoreError, MediaRef,
+    ObjectBody, ObjectRef, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, ProbeResult,
+    ProbeSpec, ProgressPercent, TimedOutput, TranscodeResult, TranscodeSpec, UnsupportedOp,
+    WorkerId, resolve_media_ref, validate_inputs,
 };
-use mm_ffmpeg::{MediaInfo, RunLimits, RunOutcome, build_concat_args};
+use mm_ffmpeg::{
+    MediaInfo, RunLimits, RunOutcome, ScaleMode, TranscodeTarget, build_concat_args,
+    build_transcode_args,
+};
 use prost::Message;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
@@ -337,37 +341,39 @@ async fn pipeline(
     deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
-    let OpSpec::Concat(spec) = &job.spec else {
-        return Err(failed(
+    match &job.spec {
+        OpSpec::Concat(spec) => concat_pipeline(ctx, job, spec, deadline_at, signal).await,
+        OpSpec::Probe(spec) => probe_pipeline(ctx, spec, deadline_at, signal).await,
+        OpSpec::Transcode(spec) => transcode_pipeline(ctx, job, spec, deadline_at, signal).await,
+        unsupported => Err(failed(
             codes::UNSUPPORTED_OPERATION,
-            "only concat jobs are executable",
-        ));
-    };
-
-    let mut urls = Vec::with_capacity(spec.inputs().len());
-    for (index, input) in spec.inputs().iter().enumerate() {
-        check(signal)?;
-        let url = resolve_media_ref(ctx.store.as_ref(), input, deadline_at, SystemTime::now())
-            .await
-            .map_err(|error| {
-                failed(codes::INPUT_UNRESOLVABLE, format!("input {index}: {error}"))
-            })?;
-        urls.push(url);
+            UnsupportedOp {
+                kind: unsupported.kind(),
+            },
+        )),
     }
+}
 
-    let mut infos: Vec<MediaInfo> = Vec::with_capacity(urls.len());
-    for (index, url) in urls.iter().enumerate() {
-        check(signal)?;
-        let info = ctx
-            .prober
-            .probe(url, &ctx.probe_limits)
-            .await
-            .map_err(|error| failed(codes::PROBE_FAILED, format!("input {index}: {error}")))?;
-        infos.push(info);
-    }
+async fn resolve_input(
+    ctx: &WorkerConfig,
+    input: &MediaRef,
+    deadline_at: SystemTime,
+    index: usize,
+) -> Result<String, Finish> {
+    resolve_media_ref(ctx.store.as_ref(), input, deadline_at, SystemTime::now())
+        .await
+        .map_err(|error| failed(codes::INPUT_UNRESOLVABLE, format!("input {index}: {error}")))
+}
 
-    let reports: Vec<_> = infos.iter().map(input_report).collect();
-    let verdicts = validate_concat_inputs(&reports);
+async fn probe_input(ctx: &WorkerConfig, url: &str, index: usize) -> Result<MediaInfo, Finish> {
+    ctx.prober
+        .probe(url, &ctx.probe_limits)
+        .await
+        .map_err(|error| failed(codes::PROBE_FAILED, format!("input {index}: {error}")))
+}
+
+fn gate_verdicts(id: JobId, kind: OpKind, reports: &[InputReport]) -> Result<(), Finish> {
+    let verdicts = validate_inputs(kind, reports);
     let blocking = blocks(&verdicts);
     if !blocking.is_empty() {
         return Err(failed(
@@ -378,31 +384,147 @@ async fn pipeline(
     let warned = warnings(&verdicts);
     if !warned.is_empty() {
         log_line(format_args!(
-            "job {} warnings: {}",
-            job.id,
+            "job {id} warnings: {}",
             render_verdicts(&warned)
         ));
     }
+    Ok(())
+}
 
+async fn admit_or_release<'a>(
+    ctx: &'a Arc<WorkerConfig>,
+    id: JobId,
+    estimate: u64,
+) -> Result<Option<Reservation<'a>>, Finish> {
     tokio::fs::create_dir_all(&ctx.staging_dir)
         .await
         .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
-    let estimate = estimate_bytes(ctx, spec.inputs(), &infos).await;
-    let _reservation = match admit(ctx, estimate) {
-        Ok(reservation) => reservation,
+    match admit(ctx, estimate) {
+        Ok(reservation) => Ok(reservation),
         Err(available) => {
             log_line(format_args!(
-                "job {} released: estimated {estimate} bytes exceed the \
-                 available {available}",
-                job.id
+                "job {id} released: estimated {estimate} bytes exceed the \
+                 available {available}"
             ));
             let _ = ctx
                 .repository
-                .release(job.id, &ctx.worker_id, ctx.release_retry)
+                .release(id, &ctx.worker_id, ctx.release_retry)
                 .await;
-            return Err(Finish::Released);
+            Err(Finish::Released)
         }
+    }
+}
+
+fn remaining_limits(
+    ctx: &WorkerConfig,
+    total: Duration,
+    deadline_at: SystemTime,
+) -> Result<RunLimits, Finish> {
+    let remaining = deadline_at
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO);
+    if remaining.is_zero() {
+        return Err(Finish::TimedOut);
+    }
+    Ok(RunLimits {
+        total_duration: total,
+        deadline: remaining,
+        stderr_tail_bytes: ctx.stderr_tail_bytes,
+    })
+}
+
+fn stream_count(streams: usize) -> u32 {
+    u32::try_from(streams).unwrap_or(u32::MAX)
+}
+
+async fn probe_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    spec: &ProbeSpec,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_input(ctx, &url, 0).await?;
+    check(signal)?;
+    let result = ProbeResult::new(
+        info.duration.as_secs_f64(),
+        stream_count(info.video.len()),
+        stream_count(info.audio.len()),
+        info.container.clone(),
+    )
+    .map_err(|error| failed(codes::PROBE_FAILED, error))?;
+    Ok(OpResult::Probe(result))
+}
+
+async fn transcode_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &TranscodeSpec,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_input(ctx, &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Transcode, &[input_report(&info)])?;
+
+    let inputs = [spec.input().clone()];
+    let infos = [info];
+    let estimate = estimate_bytes(ctx, &inputs, &infos).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+
+    let target = TranscodeTarget {
+        scale_mode: ScaleMode::PadToFit,
+        profile: target_profile(Some(spec.profile())),
+        ..TranscodeTarget::default()
     };
+    let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));
+    let args = build_transcode_args(&url, &target, &output_path.to_string_lossy())
+        .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+    let limits = remaining_limits(ctx, infos[0].duration, deadline_at)?;
+
+    check(signal)?;
+    let transcoded = run_and_upload(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        &output_path,
+        signal,
+        OutputShape::Transcode,
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&output_path).await;
+    transcoded
+}
+
+async fn concat_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &ConcatSpec,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    let mut urls = Vec::with_capacity(spec.inputs().len());
+    for (index, input) in spec.inputs().iter().enumerate() {
+        check(signal)?;
+        urls.push(resolve_input(ctx, input, deadline_at, index).await?);
+    }
+
+    let mut infos: Vec<MediaInfo> = Vec::with_capacity(urls.len());
+    for (index, url) in urls.iter().enumerate() {
+        check(signal)?;
+        infos.push(probe_input(ctx, url, index).await?);
+    }
+
+    let reports: Vec<_> = infos.iter().map(input_report).collect();
+    gate_verdicts(job.id, OpKind::Concat, &reports)?;
+
+    let estimate = estimate_bytes(ctx, spec.inputs(), &infos).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
 
     let total: Duration = infos.iter().map(|info| info.duration).sum();
     let first_resolution = infos[0]
@@ -418,31 +540,36 @@ async fn pipeline(
         &output_path.to_string_lossy(),
     )
     .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
-    let remaining = deadline_at
-        .duration_since(SystemTime::now())
-        .unwrap_or(Duration::ZERO);
-    if remaining.is_zero() {
-        return Err(Finish::TimedOut);
-    }
-    let limits = RunLimits {
-        total_duration: total,
-        deadline: remaining,
-        stderr_tail_bytes: ctx.stderr_tail_bytes,
-    };
+    let limits = remaining_limits(ctx, total, deadline_at)?;
 
     check(signal)?;
-    let merged = merge_and_upload(ctx, job.id, &args, &limits, &output_path, signal).await;
+    let merged = run_and_upload(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        &output_path,
+        signal,
+        OutputShape::Concat,
+    )
+    .await;
     let _ = tokio::fs::remove_file(&output_path).await;
     merged
 }
 
-async fn merge_and_upload(
+enum OutputShape {
+    Concat,
+    Transcode,
+}
+
+async fn run_and_upload(
     ctx: &Arc<WorkerConfig>,
     id: JobId,
     args: &[String],
     limits: &RunLimits,
     output_path: &PathBuf,
     signal: &mut watch::Receiver<Signal>,
+    shape: OutputShape,
 ) -> Result<OpResult, Finish> {
     let mut run = ctx
         .runner
@@ -543,9 +670,16 @@ async fn merge_and_upload(
         return Err(finish);
     }
 
-    let timed = TimedOutput::new(MediaRef::Object(object), info.duration.as_secs_f64())
-        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
-    Ok(OpResult::Concat(timed))
+    match shape {
+        OutputShape::Concat => {
+            let timed = TimedOutput::new(MediaRef::Object(object), info.duration.as_secs_f64())
+                .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+            Ok(OpResult::Concat(timed))
+        }
+        OutputShape::Transcode => Ok(OpResult::Transcode(TranscodeResult::new(MediaRef::Object(
+            object,
+        )))),
+    }
 }
 
 fn output_object(ctx: &WorkerConfig, id: JobId) -> Result<ObjectRef, String> {

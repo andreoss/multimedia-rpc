@@ -26,10 +26,29 @@ message Job {
   Callback callback = 9;
 }
 
+enum RungState {
+  RUNG_STATE_UNSPECIFIED = 0;
+  RUNG_STATE_PENDING = 1;
+  RUNG_STATE_RUNNING = 2;
+  RUNG_STATE_FINISHED = 3;
+  RUNG_STATE_FAILED = 4;
+}
+
+message RungEvent {
+  uint32 rung = 1;
+  RungState state = 2;
+  string error_code = 3;
+}
+
+message RungProgressList {
+  repeated RungEvent rungs = 1;
+}
+
 message JobEvent {
   oneof kind {
     JobState state = 1;
     uint32 progress_percent = 2;
+    RungEvent rung = 3;
   }
 }
 

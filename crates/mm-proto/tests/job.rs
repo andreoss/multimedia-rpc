@@ -2,7 +2,8 @@ use std::time::SystemTime;
 
 use mm_domain::{
     ConcatSpec, InputFailure, JobFailure, JobId, JobRecord, JobState, MediaRef, OpResult, OpSpec,
-    ProbeResult, ProgressPercent, QueueUrl, RequestId, TimedOutput, TraceId, UserId,
+    ProbeResult, ProgressPercent, QueueUrl, RequestId, RungProgress, RungState, TimedOutput,
+    TraceId, UserId,
 };
 use mm_proto::v1;
 use std::str::FromStr;
@@ -44,6 +45,7 @@ fn record(state: JobState, failure: Option<JobFailure>, result: Option<OpResult>
         requester: None,
         input_order: None,
         duration_ms: None,
+        rungs: Vec::new(),
     }
 }
 
@@ -347,4 +349,21 @@ fn the_stitch_half_omits_a_duration_nothing_measured() {
     let stitch = stitch_of(&record(JobState::Failed, Some(blocked()), None));
 
     assert_eq!(stitch.duration_ms, None);
+}
+
+#[test]
+fn a_rung_progress_list_round_trips() {
+    let rungs = vec![
+        RungProgress::new(0, RungState::Running),
+        RungProgress::new(1, RungState::Finished),
+        RungProgress::failed(2, "ERROR_UPSCALE_NOT_ALLOWED").expect("valid code"),
+    ];
+    let list = v1::RungProgressList::from(rungs.as_slice());
+    assert_eq!(list.rungs.len(), 3);
+    assert_eq!(list.rungs[0].rung, 0);
+    assert_eq!(list.rungs[2].rung, 2);
+    assert_eq!(list.rungs[2].state, v1::RungState::Failed as i32);
+    assert_eq!(list.rungs[2].error_code, "ERROR_UPSCALE_NOT_ALLOWED");
+    let back = Vec::<RungProgress>::try_from(list).expect("the list converts back");
+    assert_eq!(back, rungs);
 }

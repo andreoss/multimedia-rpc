@@ -7,7 +7,8 @@ use std::time::Duration;
 use mm_domain::{
     JobEventNotifications, JobId, JobRecord, JobRepository, JobState, JobStoreError, NewJob,
     ObjectRef, ObjectStore, OpSpec, ParameterDeclaration, ParameterName, ParameterValue,
-    ProgressPercent, QueueUrl, RequestId, Template, TemplateError, TemplateId, render,
+    ProgressPercent, QueueUrl, RequestId, RungProgress, Template, TemplateError, TemplateId,
+    render,
 };
 use mm_proto::v1;
 use mm_proto::v1::media_job_service_server::MediaJobService;
@@ -118,6 +119,32 @@ fn progress_event(progress: ProgressPercent) -> v1::WatchJobResponse {
     }
 }
 
+fn rung_event(rung: &RungProgress) -> v1::WatchJobResponse {
+    v1::WatchJobResponse {
+        event: Some(v1::JobEvent {
+            kind: Some(v1::job_event::Kind::Rung(v1::RungEvent::from(rung))),
+        }),
+    }
+}
+
+async fn emit_rung_changes(
+    sink: &mpsc::Sender<Result<v1::WatchJobResponse, Status>>,
+    seen: &mut Vec<RungProgress>,
+    current: &[RungProgress],
+) -> bool {
+    for rung in current {
+        if seen.iter().any(|entry| entry == rung) {
+            continue;
+        }
+        if sink.send(Ok(rung_event(rung))).await.is_err() {
+            return false;
+        }
+    }
+    seen.clear();
+    seen.extend_from_slice(current);
+    true
+}
+
 async fn wait_for_change(
     changes: &mut Option<broadcast::Receiver<JobId>>,
     poll: Duration,
@@ -155,10 +182,14 @@ async fn follow_job(
     let id = snapshot.id;
     let mut state = snapshot.state;
     let mut progress = snapshot.progress;
+    let mut rungs: Vec<RungProgress> = Vec::new();
     if sink.send(Ok(state_event(state))).await.is_err() || state.is_terminal() {
         return;
     }
     if progress > ProgressPercent::ZERO && sink.send(Ok(progress_event(progress))).await.is_err() {
+        return;
+    }
+    if !emit_rung_changes(&sink, &mut rungs, &snapshot.rungs).await {
         return;
     }
     loop {
@@ -174,6 +205,9 @@ async fn follow_job(
                 return;
             }
         };
+        if !emit_rung_changes(&sink, &mut rungs, &current.rungs).await {
+            return;
+        }
         if current.state != state
             && !current.state.is_terminal()
             && sink.send(Ok(state_event(current.state))).await.is_err()

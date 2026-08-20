@@ -7,8 +7,8 @@ use mm_domain::{
     CancelNotifications, InputFailure, InputMetadata, InputOrder, JobEventNotifications,
     JobFailure, JobId, JobNotifications, JobPage, JobRecord, JobRepository, JobRequester, JobState,
     JobStoreError, MediaRef, NewJob, OpResult, OpSpec, PageCursor, ParameterDeclaration,
-    ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType, Template, TemplateId, UserId,
-    WorkerId,
+    ProgressPercent, QueueUrl, RequestId, RequesterId, RequesterType, RungProgress, RungState,
+    Template, TemplateId, UserId, WorkerId,
 };
 use prost::Message;
 use sqlx::PgPool;
@@ -185,6 +185,7 @@ struct JobRow {
     requester_type: Option<String>,
     input_sequence: Option<Vec<u8>>,
     output_duration_ms: Option<i64>,
+    rung_states: Option<Vec<u8>>,
 }
 
 fn backend(error: sqlx::Error) -> JobStoreError {
@@ -275,6 +276,16 @@ fn decode_input_failures(id: JobId, bytes: &[u8]) -> Result<Vec<InputFailure>, J
         .and_then(|list| Vec::<InputFailure>::try_from(list).map_err(|error| corrupt(id, error)))
 }
 
+fn encode_rung_states(rungs: &[RungProgress]) -> Vec<u8> {
+    mm_proto::v1::RungProgressList::from(rungs).encode_to_vec()
+}
+
+fn decode_rung_states(id: JobId, bytes: &[u8]) -> Result<Vec<RungProgress>, JobStoreError> {
+    mm_proto::v1::RungProgressList::decode(bytes)
+        .map_err(|error| corrupt(id, error))
+        .and_then(|list| Vec::<RungProgress>::try_from(list).map_err(|error| corrupt(id, error)))
+}
+
 fn to_system(value: OffsetDateTime) -> SystemTime {
     value.into()
 }
@@ -359,6 +370,12 @@ fn to_record(row: JobRow) -> Result<JobRecord, JobStoreError> {
             .map(|bytes| decode_input_order(id, bytes))
             .transpose()?,
         duration_ms: row.output_duration_ms,
+        rungs: row
+            .rung_states
+            .as_deref()
+            .map(|bytes| decode_rung_states(id, bytes))
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -412,7 +429,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states",
             job.id().as_uuid(),
             job.owner().as_str(),
             job.request().as_str(),
@@ -452,7 +469,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states \
              FROM jobs WHERE id = $1",
             id.as_uuid()
         )
@@ -474,7 +491,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states \
              FROM jobs WHERE id = $1 AND user_id = $2",
             id.as_uuid(),
             owner.as_str()
@@ -497,7 +514,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states \
              FROM jobs WHERE user_id = $1 AND request_id = $2",
             owner.as_str(),
             request.as_str()
@@ -528,7 +545,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states \
              FROM jobs \
              WHERE user_id = $1 \
                AND ($2::timestamptz IS NULL \
@@ -587,7 +604,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states",
             worker.as_str(),
             lease.as_secs_f64(),
             i64::from(limit.get())
@@ -632,7 +649,7 @@ impl JobRepository for PgJobRepository {
     async fn requeue_expired(&self) -> Result<Vec<JobId>, JobStoreError> {
         sqlx::query_scalar!(
             "UPDATE jobs SET state = 'PENDING', claimed_by = NULL, \
-             lease_expires_at = NULL, progress_percent = 0 \
+             lease_expires_at = NULL, progress_percent = 0, rung_states = NULL \
              WHERE state = 'RUNNING' AND lease_expires_at <= now() \
              RETURNING id"
         )
@@ -668,7 +685,7 @@ impl JobRepository for PgJobRepository {
     ) -> Result<(), JobStoreError> {
         let updated = sqlx::query!(
             "UPDATE jobs SET state = 'PENDING', claimed_by = NULL, \
-             lease_expires_at = NULL, progress_percent = 0, \
+             lease_expires_at = NULL, progress_percent = 0, rung_states = NULL, \
              attempts = GREATEST(attempts - 1, 0), \
              next_attempt_at = now() + make_interval(secs => $3) \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING'",
@@ -696,7 +713,7 @@ impl JobRepository for PgJobRepository {
     ) -> Result<(), JobStoreError> {
         let updated = sqlx::query!(
             "UPDATE jobs SET state = 'PENDING', claimed_by = NULL, \
-             lease_expires_at = NULL, progress_percent = 0, \
+             lease_expires_at = NULL, progress_percent = 0, rung_states = NULL, \
              error_code = $3, error_message = $4, input_failures = $5, \
              next_attempt_at = now() + make_interval(secs => $6) \
              WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING'",
@@ -742,6 +759,58 @@ impl JobRepository for PgJobRepository {
         Ok(())
     }
 
+    async fn set_rung_state(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        rung: usize,
+        state: RungState,
+        error_code: Option<&str>,
+    ) -> Result<(), JobStoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let current = sqlx::query!(
+            "SELECT rung_states FROM jobs \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING' \
+             FOR UPDATE",
+            id.as_uuid(),
+            worker.as_str()
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let Some(current) = current else {
+            tx.rollback().await.map_err(backend)?;
+            return Err(self
+                .transition_conflict(id, JobState::Running, Some(worker))
+                .await);
+        };
+        let mut rungs = match current.rung_states {
+            Some(bytes) => decode_rung_states(id, &bytes)?,
+            None => Vec::new(),
+        };
+        let progress = match error_code {
+            Some(code) => RungProgress::failed(rung, code).map_err(|error| corrupt(id, error))?,
+            None => RungProgress::new(rung, state),
+        };
+        match rungs.iter_mut().find(|entry| entry.rung() == rung) {
+            Some(entry) => *entry = progress,
+            None => rungs.push(progress),
+        }
+        rungs.sort_by_key(|entry| entry.rung());
+        sqlx::query!(
+            "UPDATE jobs SET rung_states = $3 \
+             WHERE id = $1 AND claimed_by = $2 AND state = 'RUNNING'",
+            id.as_uuid(),
+            worker.as_str(),
+            encode_rung_states(&rungs)
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(())
+    }
+
     async fn mark_succeeded(
         &self,
         id: JobId,
@@ -758,7 +827,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states",
             id.as_uuid(),
             worker.as_str(),
             encode_result(&result),
@@ -792,7 +861,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states",
             id.as_uuid(),
             worker.as_str(),
             failure.code(),
@@ -821,7 +890,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms",
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states",
             id.as_uuid()
         )
         .fetch_optional(&self.pool)
@@ -859,7 +928,7 @@ impl JobRepository for PgJobRepository {
              error_code, error_message, result, created_at, started_at, \
              finished_at, attempts, next_attempt_at, deadline_at, claimed_by, \
              lease_expires_at, cancel_requested, callback_queue_url, trace_id, \
-             input_failures, requester_id, requester_type, input_sequence, output_duration_ms \
+             input_failures, requester_id, requester_type, input_sequence, output_duration_ms, rung_states \
              FROM jobs \
              WHERE state IN ('SUCCEEDED', 'FAILED', 'CANCELLED') \
                AND callback_queue_url IS NOT NULL \

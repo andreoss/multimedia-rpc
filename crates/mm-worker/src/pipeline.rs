@@ -15,9 +15,9 @@ use mm_domain::{
     LadderResult, LadderSpec, MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody, ObjectRef,
     ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
     PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
-    ResizeMode as DomainResizeMode, StepOutcome, StepState, ThumbnailResult, ThumbnailSpec,
-    TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId,
-    resolve_media_ref, validate_inputs, validate_ladder_rungs,
+    ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, ThumbnailResult,
+    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo,
+    WorkerId, resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
     ImageFormat, MediaInfo, RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo,
@@ -1587,7 +1587,18 @@ async fn ladder_pipeline(
     gate_verdicts(job.id, OpKind::Ladder, &[input_report(&info)])?;
     let source_shape = measured_rendition_shape(&info);
     if let Some(shape) = source_shape {
-        gate_rung_verdicts(&validate_ladder_rungs(spec.rungs(), shape))?;
+        let verdicts = validate_ladder_rungs(spec.rungs(), shape);
+        for verdict in &verdicts {
+            if let Some(rung) = verdict.rung {
+                let name = verdict.code.name();
+                let code = verdict_code(&name);
+                let _ = ctx
+                    .repository
+                    .set_rung_state(job.id, &ctx.worker_id, rung, RungState::Failed, Some(code))
+                    .await;
+            }
+        }
+        gate_rung_verdicts(&verdicts)?;
     }
 
     let inputs = [spec.input().clone()];
@@ -1732,6 +1743,53 @@ async fn encode_one_rung(
     url: String,
     source: Option<MediaSource>,
     deadline_at: SystemTime,
+    signal: watch::Receiver<Signal>,
+    landed: Arc<tokio::sync::Mutex<Landed>>,
+    output_path: PathBuf,
+    segment_seconds: Option<f64>,
+    packer: &dyn RungPacker,
+    aborted: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(usize, RenditionResult), Finish> {
+    let result = encode_one_rung_inner(
+        ctx.clone(),
+        job,
+        profile,
+        index,
+        total,
+        scope,
+        url,
+        source,
+        deadline_at,
+        signal,
+        landed,
+        output_path,
+        segment_seconds,
+        packer,
+        aborted,
+    )
+    .await;
+    if let Err(finish) = &result
+        && let Some(code) = rung_failure_code(finish)
+    {
+        let _ = ctx
+            .repository
+            .set_rung_state(job, &ctx.worker_id, index, RungState::Failed, Some(code))
+            .await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn encode_one_rung_inner(
+    ctx: Arc<WorkerConfig>,
+    job: JobId,
+    profile: OutputProfile,
+    index: usize,
+    total: usize,
+    scope: Scope,
+    url: String,
+    source: Option<MediaSource>,
+    deadline_at: SystemTime,
     mut signal: watch::Receiver<Signal>,
     landed: Arc<tokio::sync::Mutex<Landed>>,
     output_path: PathBuf,
@@ -1739,6 +1797,10 @@ async fn encode_one_rung(
     packer: &dyn RungPacker,
     aborted: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(usize, RenditionResult), Finish> {
+    let _ = ctx
+        .repository
+        .set_rung_state(job, &ctx.worker_id, index, RungState::Running, None)
+        .await;
     check(&signal)?;
     if aborted.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(Finish::Cancelled);
@@ -1838,7 +1900,19 @@ async fn encode_one_rung(
         Some(init) => rendition.with_init_segment(MediaRef::Object(init)),
         None => rendition,
     };
+    let _ = ctx
+        .repository
+        .set_rung_state(job, &ctx.worker_id, index, RungState::Finished, None)
+        .await;
     Ok((index, rendition))
+}
+
+fn rung_failure_code(finish: &Finish) -> Option<&str> {
+    match finish {
+        Finish::Failed(failure) => Some(failure.code()),
+        Finish::TimedOut => Some(codes::TIMEOUT),
+        _ => None,
+    }
 }
 
 pub fn ladder_estimate_bytes(

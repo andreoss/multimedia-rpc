@@ -922,6 +922,7 @@ async fn a_watch_stream_observes_a_live_merge_to_completion() {
         .filter_map(|kind| match kind {
             Kind::State(state) => Some(*state),
             Kind::ProgressPercent(_) => None,
+            Kind::Rung(_) => None,
         })
         .collect();
     assert_eq!(
@@ -945,6 +946,7 @@ async fn a_watch_stream_observes_a_live_merge_to_completion() {
         .filter_map(|kind| match kind {
             Kind::ProgressPercent(value) => Some(*value),
             Kind::State(_) => None,
+            Kind::Rung(_) => None,
         })
         .collect();
     assert!(
@@ -957,6 +959,145 @@ async fn a_watch_stream_observes_a_live_merge_to_completion() {
         "fewer than three distinct progress values: {progress:?}"
     );
     assert_eq!(progress.last(), Some(&100));
+
+    worker.shutdown().await;
+    server.shutdown().await;
+    drop_db(&admin, pool, &name).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watch_stream_names_a_failing_ladder_rung() {
+    let _slot = mm_testkit::stack_slot();
+    let (admin, pool, url, name) = fresh_pool().await;
+    let store = Arc::new(test_store().await);
+    let repository: Arc<dyn mm_domain::JobRepository> =
+        Arc::new(mm_jobstore::PgJobRepository::new(pool.clone()));
+
+    let source = fixture("watch-ladder-upscale.mp4", 2, 24, "mp4");
+    let input = upload_object(&store, &source, "inputs/watch-ladder-upscale.mp4").await;
+
+    let mut server_config = mm_server::ServerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        Prober::default(),
+    )
+    .expect("valid server config");
+    server_config.watch_poll_interval = Duration::from_secs(600);
+    server_config.job_events = Some(Arc::new(
+        mm_jobstore::PgJobEventListener::connect(&url)
+            .await
+            .expect("events listener connects"),
+    ));
+    let server = mm_server::start(server_config)
+        .await
+        .expect("server starts");
+
+    let channel =
+        tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+            .expect("valid endpoint")
+            .connect_timeout(Duration::from_secs(2))
+            .connect()
+            .await
+            .expect("dial announced address");
+    let mut client = mm_proto::v1::media_job_service_client::MediaJobServiceClient::new(channel);
+
+    let rungs = vec![
+        mm_domain::OutputProfile::from_raw(24.0, 400_000, 28, 64_000, 48_000, 640, 360)
+            .expect("valid rung"),
+        mm_domain::OutputProfile::from_raw(24.0, 4_000_000, 23, 64_000, 48_000, 3840, 2160)
+            .expect("valid rung"),
+    ];
+    let spec = mm_proto::v1::OpSpec::from(&mm_domain::OpSpec::Ladder(
+        mm_domain::LadderSpec::new(input, rungs).expect("valid ladder"),
+    ));
+    let created = client
+        .create_job(mm_proto::v1::CreateJobRequest {
+            user_id: "owner-ladder-watch".to_string(),
+            idempotency_key: "req-ladder-watch".to_string(),
+            spec: Some(spec),
+            callback: None,
+        })
+        .await
+        .expect("create succeeds")
+        .into_inner();
+
+    let mut stream = client
+        .watch_job(mm_proto::v1::WatchJobRequest {
+            user_id: "owner-ladder-watch".to_string(),
+            job_id: created.job_id.clone(),
+        })
+        .await
+        .expect("watch starts")
+        .into_inner();
+
+    let staging = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scratch/e2e-ladder-staging");
+    let mut worker_config = mm_worker::WorkerConfig::new(
+        repository.clone(),
+        store.clone(),
+        BUCKET.to_string(),
+        std::str::FromStr::from_str("worker-ladder-watch").unwrap(),
+        staging,
+    );
+    worker_config.reconcile_interval = Duration::from_secs(30);
+    worker_config.notifications = Some(Arc::new(
+        mm_jobstore::PgJobListener::connect(&url)
+            .await
+            .expect("listener connects"),
+    ));
+    let worker = mm_worker::start(worker_config);
+
+    use mm_proto::v1::job_event::Kind;
+    let mut kinds = Vec::new();
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(60), stream.message())
+            .await
+            .expect("an event arrives within a minute")
+            .expect("stream stays healthy");
+        match message {
+            Some(response) => {
+                let kind = response
+                    .event
+                    .expect("event present")
+                    .kind
+                    .expect("kind present");
+                let terminal = matches!(
+                    &kind,
+                    Kind::State(state) if *state == mm_proto::v1::JobState::Failed as i32
+                );
+                kinds.push(kind);
+                if terminal {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+
+    let rung_position = kinds.iter().position(|kind| {
+        matches!(
+            kind,
+            Kind::Rung(event)
+                if event.rung == 1 && event.state == mm_proto::v1::RungState::Failed as i32
+        )
+    });
+    let terminal_position = kinds.iter().position(|kind| {
+        matches!(kind, Kind::State(state) if *state == mm_proto::v1::JobState::Failed as i32)
+    });
+    let rung_position = rung_position.expect("a rung event names the failing rung: {kinds:?}");
+    let terminal_position = terminal_position.expect("the terminal state is delivered");
+    assert!(
+        rung_position < terminal_position,
+        "the rung event is delivered before the terminal state: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.iter().find_map(|kind| match kind {
+            Kind::Rung(event) if event.rung == 1 => Some(event.error_code.clone()),
+            _ => None,
+        }),
+        Some("ERROR_UPSCALE_NOT_ALLOWED".to_string()),
+        "the rung event names the rung's own refusal"
+    );
 
     worker.shutdown().await;
     server.shutdown().await;
@@ -1173,6 +1314,7 @@ async fn a_transcode_job_streams_progress_and_lands_a_verified_output() {
         .filter_map(|kind| match kind {
             Kind::State(state) => Some(*state),
             Kind::ProgressPercent(_) => None,
+            Kind::Rung(_) => None,
         })
         .collect();
     assert_eq!(
@@ -1188,6 +1330,7 @@ async fn a_transcode_job_streams_progress_and_lands_a_verified_output() {
         .filter_map(|kind| match kind {
             Kind::ProgressPercent(value) => Some(*value),
             Kind::State(_) => None,
+            Kind::Rung(_) => None,
         })
         .collect();
     assert!(

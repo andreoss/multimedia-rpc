@@ -6,10 +6,10 @@ use mm_domain::{
     LadderSpec, MediaRef, MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult,
     OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError, OutputRange,
     PackageResult, PackageSpec, ParameterDeclaration, ParameterName, ParameterType, ParameterValue,
-    ProbeResult, ProbeSpec, QueueUrl, RenditionResult, ResizeMode, SourceError, StepOutcome,
-    StepState, Template, TemplateError, ThumbnailResult, ThumbnailSpec, TimedOutput,
-    TranscodeResult, TranscodeSpec, TrimRange, TrimSpec, VideoStreamInfo, failure_code,
-    verdict_code,
+    ProbeResult, ProbeSpec, QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState,
+    SourceError, StepOutcome, StepState, Template, TemplateError, TextIdError, ThumbnailResult,
+    ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange, TrimSpec,
+    VideoStreamInfo, failure_code, verdict_code,
 };
 
 impl TryFrom<v1::MediaRef> for MediaRef {
@@ -856,6 +856,67 @@ impl TryFrom<v1::InputFailureList> for Vec<InputFailure> {
 
     fn try_from(value: v1::InputFailureList) -> Result<Self, Self::Error> {
         value.failures.iter().map(InputFailure::try_from).collect()
+    }
+}
+
+impl From<RungState> for v1::RungState {
+    fn from(value: RungState) -> Self {
+        match value {
+            RungState::Pending => v1::RungState::Pending,
+            RungState::Running => v1::RungState::Running,
+            RungState::Finished => v1::RungState::Finished,
+            RungState::Failed => v1::RungState::Failed,
+        }
+    }
+}
+
+impl From<v1::RungState> for RungState {
+    fn from(value: v1::RungState) -> Self {
+        match value {
+            v1::RungState::Running => RungState::Running,
+            v1::RungState::Finished => RungState::Finished,
+            v1::RungState::Failed => RungState::Failed,
+            v1::RungState::Unspecified | v1::RungState::Pending => RungState::Pending,
+        }
+    }
+}
+
+impl From<&RungProgress> for v1::RungEvent {
+    fn from(value: &RungProgress) -> Self {
+        Self {
+            rung: value.rung() as u32,
+            state: v1::RungState::from(value.state()) as i32,
+            error_code: value.error_code().unwrap_or("").to_string(),
+        }
+    }
+}
+
+impl TryFrom<&v1::RungEvent> for RungProgress {
+    type Error = TextIdError;
+
+    fn try_from(value: &v1::RungEvent) -> Result<Self, Self::Error> {
+        let state = RungState::from(v1::RungState::try_from(value.state).unwrap_or_default());
+        if value.error_code.is_empty() {
+            Ok(RungProgress::new(value.rung as usize, state))
+        } else {
+            RungProgress::failed(value.rung as usize, &value.error_code)
+        }
+    }
+}
+
+impl From<&[RungProgress]> for v1::RungProgressList {
+    fn from(value: &[RungProgress]) -> Self {
+        Self {
+            rungs: value.iter().map(v1::RungEvent::from).collect(),
+        }
+    }
+}
+
+impl TryFrom<v1::RungProgressList> for Vec<RungProgress> {
+    type Error = TextIdError;
+
+    fn try_from(value: v1::RungProgressList) -> Result<Self, Self::Error> {
+        value.rungs.iter().map(RungProgress::try_from).collect()
     }
 }
 

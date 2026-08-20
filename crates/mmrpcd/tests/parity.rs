@@ -1115,6 +1115,7 @@ async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
         .filter_map(|kind| match kind {
             Kind::State(state) => Some(*state),
             Kind::ProgressPercent(_) => None,
+            Kind::Rung(_) => None,
         })
         .collect();
     assert_eq!(
@@ -1141,6 +1142,7 @@ async fn p07_a_watch_stream_runs_snapshot_to_terminal_and_closes() {
         .filter_map(|kind| match kind {
             Kind::ProgressPercent(value) => Some(*value),
             Kind::State(_) => None,
+            Kind::Rung(_) => None,
         })
         .collect();
     assert!(

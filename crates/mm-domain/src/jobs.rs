@@ -36,6 +36,86 @@ impl ProgressPercent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RungState {
+    Pending,
+    Running,
+    Finished,
+    Failed,
+}
+
+impl RungState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RungState::Pending => "PENDING",
+            RungState::Running => "RUNNING",
+            RungState::Finished => "FINISHED",
+            RungState::Failed => "FAILED",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, RungStateError> {
+        match value {
+            "PENDING" => Ok(RungState::Pending),
+            "RUNNING" => Ok(RungState::Running),
+            "FINISHED" => Ok(RungState::Finished),
+            "FAILED" => Ok(RungState::Failed),
+            other => Err(RungStateError {
+                value: other.to_string(),
+            }),
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, RungState::Finished | RungState::Failed)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("rung state {value:?} is not one this service knows")]
+pub struct RungStateError {
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RungProgress {
+    rung: usize,
+    state: RungState,
+    error_code: Option<String>,
+}
+
+impl RungProgress {
+    pub const CODE_MAX_LENGTH: usize = 64;
+
+    pub fn new(rung: usize, state: RungState) -> Self {
+        Self {
+            rung,
+            state,
+            error_code: None,
+        }
+    }
+
+    pub fn failed(rung: usize, code: &str) -> Result<Self, TextIdError> {
+        Ok(Self {
+            rung,
+            state: RungState::Failed,
+            error_code: Some(parse_text_id(code, Self::CODE_MAX_LENGTH)?),
+        })
+    }
+
+    pub fn rung(&self) -> usize {
+        self.rung
+    }
+
+    pub fn state(&self) -> RungState {
+        self.state
+    }
+
+    pub fn error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputFailure {
     step: Option<usize>,
@@ -290,6 +370,7 @@ pub struct JobRecord {
     pub requester: Option<JobRequester>,
     pub input_order: Option<InputOrder>,
     pub duration_ms: Option<i64>,
+    pub rungs: Vec<RungProgress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +491,14 @@ pub trait JobRepository: Send + Sync {
         id: JobId,
         worker: &WorkerId,
         progress: ProgressPercent,
+    ) -> Result<(), JobStoreError>;
+    async fn set_rung_state(
+        &self,
+        id: JobId,
+        worker: &WorkerId,
+        rung: usize,
+        state: RungState,
+        error_code: Option<&str>,
     ) -> Result<(), JobStoreError>;
     async fn mark_succeeded(
         &self,

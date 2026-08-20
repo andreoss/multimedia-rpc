@@ -12,8 +12,8 @@ use mm_domain::{
     BatchSpec, CallbackError, CallbackPublisher, ConcatSpec, GraphNode, GraphSpec, ImageFormat,
     ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec,
     MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult,
-    OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, StepState,
-    ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, RungState,
+    StepState, ThumbnailSpec, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_jobstore::{MIGRATOR, PgCancelListener, PgJobListener, PgJobRepository};
 use mm_storage::{CredentialSource, S3ObjectStore, S3Settings};
@@ -2556,6 +2556,13 @@ async fn a_ladder_rung_above_the_source_blocks_naming_the_rung() {
     assert!(
         failure.message().contains("rung 1: RungUpscale"),
         "{failure:?}"
+    );
+    assert_eq!(record.rungs.len(), 1, "{:?}", record.rungs);
+    assert_eq!(record.rungs[0].rung(), 1);
+    assert_eq!(record.rungs[0].state(), RungState::Failed);
+    assert_eq!(
+        record.rungs[0].error_code(),
+        Some("ERROR_UPSCALE_NOT_ALLOWED")
     );
     for index in 0..2 {
         let key = ObjectRef::new(

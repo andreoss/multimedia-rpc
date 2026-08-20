@@ -234,6 +234,7 @@ fn record(state: JobState, result: Option<OpResult>, failure: Option<JobFailure>
         )),
         input_order: Some(InputOrder::new(vec![0, 1]).expect("the order")),
         duration_ms: None,
+        rungs: Vec::new(),
     }
 }
 

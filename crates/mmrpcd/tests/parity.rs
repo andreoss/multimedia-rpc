@@ -27,6 +27,9 @@ const DEFAULT_QUEUE_ENDPOINT: &str = "http://127.0.0.1:9324";
 const DEFAULT_ACCESS_KEY: &str = "mm-test-access";
 const DEFAULT_SECRET_KEY: &str = "mm-test-secret";
 const BUCKET: &str = "mm-parity";
+const STACK_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const STACK_READY_POLL: Duration = Duration::from_millis(250);
+const STACK_READY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn env_or(name: &str, fallback: &str) -> String {
     env::var(name).unwrap_or_else(|_| fallback.to_string())
@@ -68,16 +71,37 @@ fn require_reachable(authority: &str, what: &str) {
     }
 }
 
-fn require_stack() {
-    let url = admin_url();
-    let db_authority = url
-        .split('@')
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .expect("database url must contain an authority");
-    require_reachable(db_authority, "database");
-    require_reachable(&authority(&store_endpoint()), "object store");
-    require_reachable(&authority(&queue_endpoint()), "queue");
+async fn database_answers() -> bool {
+    PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(STACK_READY_ATTEMPT_TIMEOUT)
+        .connect(&admin_url())
+        .await
+        .is_ok()
+}
+
+async fn wait_for_stack() {
+    let deadline = Instant::now() + STACK_READY_TIMEOUT;
+    loop {
+        if database_answers().await {
+            let url = admin_url();
+            let db_authority = url
+                .split('@')
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .expect("database url must contain an authority");
+            require_reachable(db_authority, "database");
+            require_reachable(&authority(&store_endpoint()), "object store");
+            require_reachable(&authority(&queue_endpoint()), "queue");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stack did not accept a database connection within {STACK_READY_TIMEOUT:?}; \
+             start it with 'docker compose up -d' and let it report healthy"
+        );
+        tokio::time::sleep(STACK_READY_POLL).await;
+    }
 }
 
 struct TestDb {
@@ -87,7 +111,7 @@ struct TestDb {
 }
 
 async fn fresh_db() -> TestDb {
-    require_stack();
+    wait_for_stack().await;
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&admin_url())

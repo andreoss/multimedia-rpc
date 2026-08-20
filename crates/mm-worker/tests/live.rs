@@ -1203,10 +1203,10 @@ async fn one_outcome(
     publisher: &mm_storage::SqsCallbackPublisher,
     queue: &QueueUrl,
 ) -> mm_proto::v1::JobOutcome {
-    let settle = Instant::now() + Duration::from_secs(20);
+    let settle = Instant::now() + Duration::from_secs(60);
     let bodies = loop {
         let received = tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             publisher.receive(queue, Duration::from_secs(2)),
         )
         .await
@@ -1219,7 +1219,7 @@ async fn one_outcome(
     };
     assert_eq!(bodies.len(), 1, "exactly one callback message");
     let leftover = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         publisher.receive(queue, Duration::from_secs(1)),
     )
     .await

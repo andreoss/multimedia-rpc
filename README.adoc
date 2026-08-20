@@ -11,6 +11,7 @@ object storage.
 - mm-integration — live integration suite
 - mm-jobstore — migrations and the job repository
 - mm-magick — identify and convert argv, parsing, runner
+- mm-observability — metrics registry, scrape endpoint, records
 - mm-proto — v1 contract and conversions
 - mmrpcd — daemon: server, worker, combined
 - mm-server — gRPC service, auth interceptor, health

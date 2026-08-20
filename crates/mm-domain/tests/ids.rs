@@ -1,4 +1,6 @@
-use mm_domain::{JobId, JobIdError, RequestId, RequestIdError, UserId, UserIdError};
+use mm_domain::{
+    JobId, JobIdError, RequestId, RequestIdError, TraceId, TraceIdError, UserId, UserIdError,
+};
 
 #[test]
 fn generated_job_id_round_trips() {
@@ -148,4 +150,40 @@ fn id_errors_render_messages() {
         .to_string()
         .is_empty()
     );
+}
+
+#[test]
+fn generated_trace_id_round_trips() {
+    let id = TraceId::generate();
+    let parsed: TraceId = id.to_string().parse().expect("round trip");
+    assert_eq!(parsed, id);
+    assert_eq!(parsed.as_uuid(), id.as_uuid());
+}
+
+#[test]
+fn trace_id_rejects_a_malformed_value() {
+    assert_eq!(
+        "not-a-uuid".parse::<TraceId>().unwrap_err(),
+        TraceIdError::Malformed
+    );
+}
+
+#[test]
+fn trace_id_rejects_the_nil_uuid() {
+    assert_eq!(
+        "00000000-0000-0000-0000-000000000000"
+            .parse::<TraceId>()
+            .unwrap_err(),
+        TraceIdError::Nil
+    );
+    assert_eq!(
+        TraceId::from_uuid(uuid::Uuid::nil()).unwrap_err(),
+        TraceIdError::Nil
+    );
+}
+
+#[test]
+fn trace_id_errors_render_messages() {
+    assert!(!TraceIdError::Malformed.to_string().is_empty());
+    assert!(!TraceIdError::Nil.to_string().is_empty());
 }

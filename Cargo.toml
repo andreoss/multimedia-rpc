@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/mm-domain",
+    "crates/mm-observability",
     "crates/mm-auth",
     "crates/mm-proto",
     "crates/mm-ffmpeg",

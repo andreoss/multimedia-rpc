@@ -2006,6 +2006,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-observability"
+version = "0.1.0"
+dependencies = [
+ "mm-domain",
+ "tokio",
+]
+
+[[package]]
 name = "mm-proto"
 version = "0.1.0"
 dependencies = [

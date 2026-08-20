@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use mm_domain::{
-    AudioReport, BlockCode, InputReport, JobId, MediaRef, ObjectBody, ObjectStore,
+    AudioReport, BlockCode, InputReport, JobId, MediaKind, MediaRef, ObjectBody, ObjectStore,
     ObjectStoreError, OutputKey, Verdict, VerdictCode, VideoReport, WarnCode, resolve_media_ref,
     validate_concat_inputs,
 };
@@ -235,6 +235,7 @@ fn to_report(info: &MediaInfo) -> InputReport {
         duration: info.duration,
         size_bytes: info.size_bytes,
         drm: info.drm,
+        kind: MediaKind::Video,
         video: info
             .video
             .iter()

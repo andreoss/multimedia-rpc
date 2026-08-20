@@ -112,6 +112,7 @@ async fn run_loop(ctx: Arc<WorkerConfig>, mut shutdown: watch::Receiver<bool>) {
     let mut jobs = JoinSet::new();
     loop {
         let _ = ctx.repository.requeue_expired().await;
+        let _ = ctx.repository.fail_overdue().await;
         claim_available(&ctx, &semaphore, &wake, &mut jobs).await;
         while jobs.try_join_next().is_some() {}
         tokio::select! {

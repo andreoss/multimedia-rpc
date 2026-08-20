@@ -196,6 +196,7 @@ pub trait JobRepository: Send + Sync {
         lease: Duration,
     ) -> Result<SystemTime, JobStoreError>;
     async fn requeue_expired(&self) -> Result<Vec<JobId>, JobStoreError>;
+    async fn fail_overdue(&self) -> Result<Vec<JobId>, JobStoreError>;
     async fn release(
         &self,
         id: JobId,

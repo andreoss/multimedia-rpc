@@ -21,7 +21,7 @@ pub mod codes {
     pub const INPUT_UNRESOLVABLE: &str = "input_unresolvable";
     pub const PROBE_FAILED: &str = "probe_failed";
     pub const VALIDATION_BLOCKED: &str = "validation_blocked";
-    pub const DEADLINE_EXCEEDED: &str = "deadline_exceeded";
+    pub const TIMEOUT: &str = "timeout";
     pub const MERGE_LAUNCH_FAILED: &str = "merge_launch_failed";
     pub const MERGE_FAILED: &str = "merge_failed";
     pub const OUTPUT_INVALID: &str = "output_invalid";
@@ -34,6 +34,7 @@ enum Finish {
     Cancelled,
     LeaseLost,
     Released,
+    TimedOut,
     Failed(JobFailure),
 }
 
@@ -90,6 +91,7 @@ enum Signal {
     Run,
     Cancel,
     LeaseLost,
+    Deadline,
 }
 
 struct Supervisor {
@@ -104,11 +106,23 @@ impl Supervisor {
         worker: WorkerId,
         interval: Duration,
         lease: Duration,
+        deadline_at: SystemTime,
     ) -> Self {
         let (sender, signal) = watch::channel(Signal::Run);
         let task = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(interval).await;
+                let remaining = deadline_at
+                    .duration_since(SystemTime::now())
+                    .unwrap_or(Duration::ZERO);
+                if remaining.is_zero() {
+                    let _ = sender.send(Signal::Deadline);
+                    return;
+                }
+                tokio::time::sleep(interval.min(remaining)).await;
+                if SystemTime::now() >= deadline_at {
+                    let _ = sender.send(Signal::Deadline);
+                    return;
+                }
                 match repository.heartbeat(id, &worker, lease).await {
                     Ok(_) => {}
                     Err(JobStoreError::Backend(_)) => continue,
@@ -145,12 +159,27 @@ fn check(signal: &watch::Receiver<Signal>) -> Result<(), Finish> {
         Signal::Run => Ok(()),
         Signal::Cancel => Err(Finish::Cancelled),
         Signal::LeaseLost => Err(Finish::LeaseLost),
+        Signal::Deadline => Err(Finish::TimedOut),
     }
+}
+
+fn timeout_failure() -> JobFailure {
+    JobFailure::new(codes::TIMEOUT, "job deadline passed").expect("worker failure codes are valid")
 }
 
 pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
     if job.cancel_requested {
         let _ = ctx.repository.mark_cancelled(job.id).await;
+        return;
+    }
+    let deadline_at = job
+        .deadline_at
+        .unwrap_or_else(|| SystemTime::now() + ctx.default_deadline);
+    if SystemTime::now() >= deadline_at {
+        let _ = ctx
+            .repository
+            .mark_failed(job.id, &ctx.worker_id, timeout_failure())
+            .await;
         return;
     }
     let supervisor = Supervisor::start(
@@ -159,9 +188,10 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
         ctx.worker_id.clone(),
         ctx.heartbeat_interval,
         ctx.lease,
+        deadline_at,
     );
     let mut signal = supervisor.signal();
-    let outcome = pipeline(ctx, &job, &mut signal).await;
+    let outcome = pipeline(ctx, &job, deadline_at, &mut signal).await;
     drop(supervisor);
     match outcome {
         Ok(result) => {
@@ -174,6 +204,12 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
             let _ = ctx.repository.mark_cancelled(job.id).await;
         }
         Err(Finish::LeaseLost) | Err(Finish::Released) => {}
+        Err(Finish::TimedOut) => {
+            let _ = ctx
+                .repository
+                .mark_failed(job.id, &ctx.worker_id, timeout_failure())
+                .await;
+        }
         Err(Finish::Failed(failure)) => {
             if crate::retry::is_transient(failure.code()) && job.attempts < ctx.retry.max_attempts {
                 let delay = ctx.retry.delay(job.attempts);
@@ -194,6 +230,7 @@ pub async fn execute(ctx: &Arc<WorkerConfig>, job: JobRecord) {
 async fn pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
+    deadline_at: SystemTime,
     signal: &mut watch::Receiver<Signal>,
 ) -> Result<OpResult, Finish> {
     let OpSpec::Concat(spec) = &job.spec else {
@@ -202,9 +239,6 @@ async fn pipeline(
             "only concat jobs are executable",
         ));
     };
-    let deadline_at = job
-        .deadline_at
-        .unwrap_or_else(|| SystemTime::now() + ctx.default_deadline);
 
     let mut urls = Vec::with_capacity(spec.inputs().len());
     for (index, input) in spec.inputs().iter().enumerate() {
@@ -280,7 +314,7 @@ async fn pipeline(
         .duration_since(SystemTime::now())
         .unwrap_or(Duration::ZERO);
     if remaining.is_zero() {
-        return Err(failed(codes::DEADLINE_EXCEEDED, "job deadline has passed"));
+        return Err(Finish::TimedOut);
     }
     let limits = RunLimits {
         total_duration: total,
@@ -351,6 +385,10 @@ async fn merge_and_upload(
                         interrupted = Some(Finish::LeaseLost);
                         cancel.cancel();
                     }
+                    Signal::Deadline => {
+                        interrupted = Some(Finish::TimedOut);
+                        cancel.cancel();
+                    }
                 }
             }
         }
@@ -363,7 +401,7 @@ async fn merge_and_upload(
         }
         RunOutcome::DeadlineExceeded { after } => {
             return Err(failed(
-                codes::DEADLINE_EXCEEDED,
+                codes::TIMEOUT,
                 format!("merge exceeded the deadline after {after:?}"),
             ));
         }

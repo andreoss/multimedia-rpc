@@ -400,6 +400,22 @@ impl JobRepository for PgJobRepository {
         .collect()
     }
 
+    async fn fail_overdue(&self) -> Result<Vec<JobId>, JobStoreError> {
+        sqlx::query_scalar!(
+            "UPDATE jobs SET state = 'FAILED', error_code = 'timeout', \
+             error_message = 'job deadline passed', finished_at = now(), \
+             claimed_by = NULL, lease_expires_at = NULL \
+             WHERE state IN ('PENDING', 'RUNNING') AND deadline_at <= now() \
+             RETURNING id"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?
+        .into_iter()
+        .map(|id| JobId::from_uuid(id).map_err(|error| JobStoreError::Backend(error.to_string())))
+        .collect()
+    }
+
     async fn release(
         &self,
         id: JobId,

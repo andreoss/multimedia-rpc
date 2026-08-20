@@ -638,7 +638,84 @@ async fn a_passed_deadline_fails_before_any_work() {
 
     assert_eq!(record.state, JobState::Failed);
     let failure = record.failure.expect("failure recorded");
-    assert_eq!(failure.code(), codes::INPUT_UNRESOLVABLE);
+    assert_eq!(failure.code(), codes::TIMEOUT);
+    assert_eq!(record.attempts, 0, "overdue pending job was executed");
+    assert!(record.started_at.is_none());
+    db.dispose().await;
+}
+
+fn process_mentions(pid: u32, needle: &str) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
+        .unwrap_or(false)
+}
+
+fn find_process(needle: &str) -> Option<u32> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>()
+            && process_mentions(pid, needle)
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_overdue_running_job_is_killed_and_fails_with_timeout() {
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let first = fixture("long-a-120s.mp4", 120, 30, "mp4");
+    let second = fixture("long-b-120s.mp4", 120, 30, "mp4");
+    let refs = vec![
+        upload_input(&store, &first, "inputs/long-a-120s.mp4").await,
+        upload_input(&store, &second, "inputs/long-b-120s.mp4").await,
+    ];
+    let repository = db.repository();
+    let id = JobId::generate();
+    let job = repository
+        .create(NewJob::new(
+            id,
+            owner(),
+            RequestId::from_str(&format!("req-{id}")).unwrap(),
+            OpSpec::Concat(ConcatSpec::new(refs, None).unwrap()),
+            Some(std::time::SystemTime::now() + Duration::from_secs(6)),
+        ))
+        .await
+        .unwrap();
+
+    let handle = start(base_config(&db, store.clone(), "worker-reaped"));
+    await_state(
+        &repository,
+        job.id,
+        JobState::Running,
+        Duration::from_secs(15),
+    )
+    .await;
+    let needle = job.id.to_string();
+    let found = Instant::now() + Duration::from_secs(20);
+    let pid = loop {
+        if let Some(pid) = find_process(&needle) {
+            break pid;
+        }
+        assert!(Instant::now() < found, "merge process never appeared");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    let record = await_terminal(&repository, job.id, Duration::from_secs(60)).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.failure);
+    let failure = record.failure.expect("failure recorded");
+    assert_eq!(failure.code(), codes::TIMEOUT);
+    let gone = Instant::now() + Duration::from_secs(3);
+    while process_mentions(pid, &needle) {
+        assert!(Instant::now() < gone, "merge process survived the reap");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let staged = scratch_dir("staging").join(format!("{}.mp4", job.id));
+    assert!(!staged.exists(), "staging file not cleaned: {staged:?}");
     db.dispose().await;
 }
 

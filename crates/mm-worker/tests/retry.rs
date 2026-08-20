@@ -83,7 +83,7 @@ fn permanent_codes_never_retry() {
     for code in [
         codes::UNSUPPORTED_OPERATION,
         codes::VALIDATION_BLOCKED,
-        codes::DEADLINE_EXCEEDED,
+        codes::TIMEOUT,
         "anything_unknown",
     ] {
         assert!(!is_transient(code), "{code}");

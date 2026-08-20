@@ -32,10 +32,15 @@ echo "gate: contract"
 buf lint
 buf breaking --against ".git#branch=$base_ref"
 
+threads="${MM_GATE_TEST_THREADS:-4}"
 echo "gate: suite"
-cargo test --workspace --no-fail-fast
+mem_total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+mem_available=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+echo "gate: host memory at start: $((mem_total / 1024)) MB total, $((mem_available / 1024)) MB available"
+echo "gate: running each test binary at $threads threads (MM_GATE_TEST_THREADS overrides)"
+cargo test --workspace --no-fail-fast -- --test-threads="$threads"
 
 echo "gate: coverage"
-cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 85
+cargo llvm-cov --workspace --no-fail-fast --fail-under-lines 85 -- --test-threads="$threads"
 
 echo "gate: green"

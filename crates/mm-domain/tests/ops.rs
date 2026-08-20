@@ -272,21 +272,29 @@ fn executable_kinds_pass_the_support_gate() {
         OpKind::Probe,
         OpKind::Transcode,
         OpKind::Trim,
+        OpKind::Thumbnail,
     ] {
         assert!(kind.ensure_executable().is_ok());
     }
 }
 
 #[test]
-fn thumbnail_answers_a_typed_unsupported_error() {
-    let error = OpKind::Thumbnail.ensure_executable().unwrap_err();
+fn every_op_kind_is_executable_and_the_gate_still_types_its_answer() {
+    let kinds = [
+        OpKind::Concat,
+        OpKind::Probe,
+        OpKind::Transcode,
+        OpKind::Trim,
+        OpKind::Thumbnail,
+    ];
+    assert!(kinds.iter().all(|kind| kind.ensure_executable().is_ok()));
     assert_eq!(
-        error,
         UnsupportedOp {
             kind: OpKind::Thumbnail
         }
+        .to_string(),
+        "thumbnail is not supported yet"
     );
-    assert_eq!(error.to_string(), "thumbnail is not supported yet");
 }
 
 #[test]

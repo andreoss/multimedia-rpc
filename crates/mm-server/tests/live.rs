@@ -458,58 +458,31 @@ async fn an_invalid_spec_is_rejected_with_the_typed_message() {
 }
 
 #[tokio::test]
-async fn a_trim_spec_is_accepted_at_create() {
+async fn trim_and_thumbnail_specs_are_accepted_at_create() {
     let (db, handle) = healthy_server().await;
     let mut client = job_client(&handle).await;
     let input = MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref");
-    let mut request = create_request("owner-1", "req-trim-accepted");
-    request.spec = Some(v1::OpSpec::from(&OpSpec::Trim(
-        mm_domain::TrimSpec::new(input, 1.0, 2.0).expect("valid trim spec"),
-    )));
+    let specs = vec![
+        v1::OpSpec::from(&OpSpec::Trim(
+            mm_domain::TrimSpec::new(input.clone(), 1.0, 2.0).expect("valid trim spec"),
+        )),
+        v1::OpSpec::from(&OpSpec::Thumbnail(
+            mm_domain::ThumbnailSpec::new(input, vec![1.0], 320, 180)
+                .expect("valid thumbnail spec"),
+        )),
+    ];
+    for (index, spec) in specs.into_iter().enumerate() {
+        let mut request = create_request("owner-1", &format!("req-multimedia-{index}"));
+        request.spec = Some(spec);
 
-    let created = client
-        .create_job(request)
-        .await
-        .expect("trim is accepted")
-        .into_inner();
+        let created = client
+            .create_job(request)
+            .await
+            .expect("the spec is accepted")
+            .into_inner();
 
-    assert!(created.created);
-    handle.shutdown().await;
-    db.dispose().await;
-}
-
-#[tokio::test]
-async fn a_thumbnail_spec_answers_unimplemented_at_create() {
-    let (db, handle) = healthy_server().await;
-    let mut client = job_client(&handle).await;
-    let input = MediaRef::object_uri("s3://media/in/a.mp4").expect("valid ref");
-    let mut request = create_request("owner-1", "req-thumbnail-unsupported");
-    request.spec = Some(v1::OpSpec::from(&OpSpec::Thumbnail(
-        mm_domain::ThumbnailSpec::new(input, vec![1.0], 320, 180).expect("valid thumbnail spec"),
-    )));
-
-    let status = client
-        .create_job(request)
-        .await
-        .expect_err("unsupported op rejected");
-
-    assert_eq!(status.code(), tonic::Code::Unimplemented);
-    assert!(
-        status.message().contains("thumbnail"),
-        "{}",
-        status.message()
-    );
-    let listed = client
-        .list_jobs(v1::ListJobsRequest {
-            user_id: "owner-1".to_string(),
-            statuses: vec![],
-            page_size: 10,
-            page_token: String::new(),
-        })
-        .await
-        .expect("list succeeds")
-        .into_inner();
-    assert!(listed.jobs.is_empty(), "a rejected spec reached the queue");
+        assert!(created.created);
+    }
     handle.shutdown().await;
     db.dispose().await;
 }

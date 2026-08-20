@@ -66,20 +66,25 @@ fn the_manifest_declares_no_workspace_crate_dependency() {
 }
 
 #[test]
-fn process_spawning_is_confined_to_one_source_file() {
+fn process_spawning_is_confined_to_the_probe_and_the_runner() {
     let mut spawning_files = Vec::new();
     for (path, text) in rust_sources(&crate_dir().join("src")) {
         if SPAWN_TOKENS.iter().any(|token| text.contains(token)) {
             spawning_files.push(path);
         }
     }
+    spawning_files.sort();
     assert_eq!(
         spawning_files.len(),
-        1,
-        "process spawning must live in exactly one file, found {spawning_files:?}"
+        2,
+        "process spawning must live in exactly two files, found {spawning_files:?}"
     );
     assert!(
         spawning_files[0].ends_with("src/probe.rs"),
+        "spawning lives in {spawning_files:?}"
+    );
+    assert!(
+        spawning_files[1].ends_with("src/runner.rs"),
         "spawning lives in {spawning_files:?}"
     );
 }

@@ -25,6 +25,7 @@ pub mod budget {
     pub const NOTIFY: Duration = Duration::from_secs(5);
     pub const LISTENER_RECOVERY: Duration = Duration::from_secs(10);
     pub const MERGE_TERMINAL: Duration = Duration::from_secs(600);
+    pub const RPC: Duration = Duration::from_secs(30);
 }
 
 pub fn scratch_path(part: &str) -> PathBuf {

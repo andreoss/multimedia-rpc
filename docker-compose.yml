@@ -17,13 +17,23 @@ services:
 
   objectstore:
     image: chrislusf/seaweedfs:latest
-    command: ["server", "-s3", "-dir=/data"]
+    command:
+      [
+        "server",
+        "-s3",
+        "-s3.config=/etc/objectstore/s3.json",
+        "-dir=/data",
+        "-master.volumeSizeLimitMB=256",
+        "-volume.max=16",
+        "-volume.minFreeSpacePercent=0",
+      ]
     ports:
       - "127.0.0.1:8333:8333"
     volumes:
       - store-data:/data
+      - ./compose/objectstore-s3.json:/etc/objectstore/s3.json:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/status"]
       interval: 5s
       timeout: 3s
       retries: 12

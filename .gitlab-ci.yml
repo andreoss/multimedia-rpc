@@ -47,8 +47,23 @@ proto-breaking:
   rules:
     - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
 
+.objectstore-service: &objectstore-service
+  name: chrislusf/seaweedfs:latest
+  alias: objectstore
+  entrypoint: ["sh", "-c"]
+  command:
+    - >
+      mkdir -p /etc/objectstore &&
+      printf '%s' '{"identities":[{"name":"mm","credentials":[{"accessKey":"mm-test-access","secretKey":"mm-test-secret"}],"actions":["Admin","Read","Write","List","Tagging"]}]}'
+      > /etc/objectstore/s3.json &&
+      exec /entrypoint.sh server -s3 -s3.config=/etc/objectstore/s3.json -dir=/data
+
 test:
   stage: test
+  services:
+    - *objectstore-service
+  variables:
+    MM_OBJECTSTORE_ENDPOINT: http://objectstore:8333
   before_script:
     - apt-get update && apt-get install -y protobuf-compiler
   script:
@@ -56,6 +71,10 @@ test:
 
 coverage:
   stage: test
+  services:
+    - *objectstore-service
+  variables:
+    MM_OBJECTSTORE_ENDPOINT: http://objectstore:8333
   before_script:
     - apt-get update && apt-get install -y protobuf-compiler
   script:

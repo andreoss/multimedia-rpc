@@ -2500,7 +2500,9 @@ async fn supervise(
     let mut progress_open = true;
     let mut signal_open = true;
     let mut interrupted: Option<Finish> = None;
-    let mut last_persisted = Instant::now() - ctx.progress_interval;
+    let mut last_persisted = Instant::now()
+        .checked_sub(ctx.progress_interval)
+        .unwrap_or_else(Instant::now);
     let outcome = loop {
         tokio::select! {
             waited = &mut wait => {

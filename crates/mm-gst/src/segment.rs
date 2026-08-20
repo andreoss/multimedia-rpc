@@ -64,17 +64,18 @@ pub fn top_level_boxes(bytes: &[u8]) -> Result<Vec<Fragment>, SegmentError> {
             });
         }
         let size = box_size(bytes, offset)?;
-        if size < 8 || offset + size > bytes.len() {
+        let end = offset.checked_add(size).ok_or(SegmentError::TruncatedBox {
+            size,
+            available: bytes.len() - offset,
+        })?;
+        if size < 8 || end > bytes.len() {
             return Err(SegmentError::TruncatedBox {
                 size,
                 available: bytes.len() - offset,
             });
         }
-        boxes.push(Fragment {
-            start: offset,
-            end: offset + size,
-        });
-        offset += size;
+        boxes.push(Fragment { start: offset, end });
+        offset = end;
     }
     Ok(boxes)
 }

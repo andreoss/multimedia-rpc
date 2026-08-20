@@ -38,7 +38,7 @@ fn jittered(delay: Duration) -> Duration {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u64(quarter as u64);
     let shaved = u128::from(hasher.finish()) % (quarter + 1);
-    delay - Duration::from_nanos(shaved as u64)
+    delay.saturating_sub(Duration::from_nanos(shaved as u64))
 }
 
 pub fn is_transient(code: &str) -> bool {

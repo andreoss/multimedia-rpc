@@ -79,3 +79,19 @@ fn a_box_declaring_more_than_the_stream_carries_is_refused() {
         }
     );
 }
+
+#[test]
+fn a_box_declaring_a_size_that_overflows_is_refused() {
+    let mut bytes = box_of(b"free", b"");
+    bytes.extend_from_slice(&1u32.to_be_bytes());
+    bytes.extend_from_slice(b"ftyp");
+    bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+
+    assert_eq!(
+        top_level_boxes(&bytes).unwrap_err(),
+        SegmentError::TruncatedBox {
+            size: usize::MAX,
+            available: 16
+        }
+    );
+}

@@ -47,7 +47,7 @@ grpcurl -plaintext \
 - mmrpcd — daemon: server, worker, combined
 - mm-domain — ids, job state machine, op catalog, ports
 - mm-proto — v1 contract and conversions
-- mm-jobstore — migrations and the job repository
+- mm-jobstore — migrations, the job repository, shared input metadata
 - mm-worker — claim loop, op pipelines, callbacks
 - mm-ffmpeg — probe, progress, process supervision
 - mm-magick — identify and convert argv, parsing, runner

@@ -9,23 +9,25 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use mm_domain::{
-    AudioStreamInfo, BatchResult, BatchSpec, CaptionDocument, ConcatSpec, GraphResult, GraphSpec,
-    ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
-    InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
-    LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome,
-    NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
-    OutputKey, OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
-    RenditionResult, ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState,
-    SubtitleMode, SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
+    AudioStreamInfo, BatchResult, BatchSpec, CaptionDocument, ConcatSpec, GradeResult, GradeSpec,
+    GraphResult, GraphSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec,
+    InputFailure, InputMetadata, InputReport, InputSource, JobFailure, JobId, JobRecord,
+    JobRepository, JobState, JobStoreError, LadderResult, LadderSpec, LoudnessResult, LoudnessSpec,
+    MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile, PackageResult,
+    PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
+    ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, SubtitleMode,
+    SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
     TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId, collect_body,
     resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
-    ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo, RunLimits, RunOutcome, ScaleMode,
-    SourceCut, StillInfo, ThumbnailTarget, Timestamp, TranscodeTarget, TrimStrategy, TrimTarget,
-    build_concat_args, build_loudness_measure_args, build_loudness_normalize_args,
-    build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
-    build_thumbnail_args, build_transcode_args, build_trim_args, parse_loudnorm_report,
+    GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo, RunLimits,
+    RunOutcome, ScaleMode, SourceCut, StillInfo, ThumbnailTarget, Timestamp, TranscodeTarget,
+    TrimStrategy, TrimTarget, build_concat_args, build_grade_args, build_loudness_measure_args,
+    build_loudness_normalize_args, build_subtitle_burn_args, build_subtitle_mux_args,
+    build_subtitle_strip_args, build_thumbnail_args, build_transcode_args, build_trim_args,
+    parse_cube_table, parse_loudnorm_report,
 };
 use mm_gst::Written as GstWritten;
 use mm_gst::{
@@ -69,8 +71,9 @@ pub mod codes {
     pub const LOUDNESS_MEASURE_FAILED: &str = "loudness_measure_failed";
     pub const LOUDNESS_FAILED: &str = "loudness_failed";
     pub const CAPTION_INVALID: &str = "caption_invalid";
+    pub const GRADE_INVALID: &str = "grade_invalid";
 
-    pub const ALL: [&str; 17] = [
+    pub const ALL: [&str; 18] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -88,6 +91,7 @@ pub mod codes {
         LOUDNESS_MEASURE_FAILED,
         LOUDNESS_FAILED,
         CAPTION_INVALID,
+        GRADE_INVALID,
     ];
 }
 
@@ -700,6 +704,7 @@ async fn run_leaf(
         OpSpec::Subtitle(spec) => {
             subtitle_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
         }
+        OpSpec::Grade(spec) => grade_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
     };
     scope.done.fetch_add(1, Ordering::Relaxed);
     Ok(result)
@@ -798,6 +803,12 @@ fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
             }
         }
         OpResult::Subtitle(subtitle) => push(subtitle.output()),
+        OpResult::Grade(grade) => {
+            push(grade.output());
+            if let Some(scope) = grade.scope() {
+                push(scope);
+            }
+        }
         OpResult::Ladder(ladder) => {
             if let Some(master) = ladder.master_playlist() {
                 push(master);
@@ -854,6 +865,13 @@ fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
         OpResult::Ladder(ladder) => ladder.renditions().get(index).map(RenditionResult::media),
         OpResult::Loudness(loudness) => (index == 0).then(|| loudness.output()).flatten(),
         OpResult::Subtitle(subtitle) => (index == 0).then_some(subtitle.output()),
+        OpResult::Grade(grade) => {
+            if index == 0 {
+                Some(grade.output())
+            } else {
+                grade.scope()
+            }
+        }
         OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
     }
 }
@@ -2061,6 +2079,132 @@ async fn transcode_pipeline(
     outcome
 }
 
+async fn grade_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &GradeSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    check(signal)?;
+    let url = resolve_input(ctx, spec.input(), scope, deadline_at, 0).await?;
+    check(signal)?;
+    let info = probe_source(ctx, spec.input(), &url, 0).await?;
+    gate_verdicts(job.id, OpKind::Grade, &[input_report(&info)])?;
+    let lookup_path = match spec.lookup_table() {
+        Some(table) => {
+            let text = object_text(ctx, table, "lookup table", codes::GRADE_INVALID).await?;
+            parse_cube_table(&text).map_err(|error| failed(codes::GRADE_INVALID, error))?;
+            let path = ctx.staging_dir.join(format!("{}.cube", job.id));
+            tokio::fs::write(&path, text.as_bytes())
+                .await
+                .map_err(|error| failed(codes::GRADE_INVALID, error))?;
+            Some(path)
+        }
+        None => None,
+    };
+    let inputs = [spec.input().clone()];
+    let estimate = estimate_bytes(ctx, &inputs, std::slice::from_ref(&info)).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+    let adjustments = spec.adjustments();
+    let target = GradeTarget {
+        brightness: adjustments.brightness(),
+        contrast: adjustments.contrast(),
+        saturation: adjustments.saturation(),
+        gamma: adjustments.gamma(),
+    };
+    let output_path = ctx.staging_dir.join(format!("{}.mp4", job.id));
+    let args = build_grade_args(
+        &url,
+        &target,
+        lookup_path
+            .as_ref()
+            .map(|path| path.to_string_lossy())
+            .as_deref(),
+        &mm_ffmpeg::TargetProfile::default(),
+        &output_path.to_string_lossy(),
+    )
+    .map_err(|error| failed(codes::MERGE_LAUNCH_FAILED, error))?;
+    let limits = remaining_limits(ctx, info.duration + Duration::from_secs(30), deadline_at)?;
+    check(signal)?;
+    supervise(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
+    check(signal)?;
+    let scope_path = match spec.scope() {
+        Some(scope_spec) => {
+            let path = ctx.staging_dir.join(format!("{}-scope.jpg", job.id));
+            let target = ThumbnailTarget {
+                width: scope_spec.width(),
+                height: scope_spec.height(),
+                format: ImageFormat::Jpeg,
+            };
+            let args = build_thumbnail_args(
+                &output_path.to_string_lossy(),
+                Timestamp::ZERO,
+                &target,
+                &path.to_string_lossy(),
+            );
+            let limits = remaining_limits(
+                ctx,
+                Duration::from_secs(u64::from(THUMBNAIL_RUN_SECONDS)),
+                deadline_at,
+            )?;
+            check(signal)?;
+            supervise(
+                ctx,
+                job.id,
+                &args,
+                &limits,
+                signal,
+                scope.done.load(Ordering::Relaxed),
+                scope.total,
+            )
+            .await?;
+            Some((path, scope_spec))
+        }
+        None => None,
+    };
+    check(signal)?;
+    let output_object = output_object(ctx, job.id, &scope.prefix)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    upload_object(ctx, &output_object, &output_path).await?;
+    let scope_object = match scope_path.as_ref() {
+        Some((path, _)) => {
+            let object = artifact_object_named(ctx, job.id, &scope.prefix, "scope.jpg").await?;
+            upload_object(ctx, &object, path).await?;
+            Some(object)
+        }
+        None => None,
+    };
+    if let Some((path, _)) = &scope_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    if let Some(path) = lookup_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    let _ = tokio::fs::remove_file(&output_path).await;
+    if let Err(finish) = check(signal) {
+        let _ = ctx.store.delete(&output_object).await;
+        if let Some(object) = &scope_object {
+            let _ = ctx.store.delete(object).await;
+        }
+        return Err(finish);
+    }
+    Ok(OpResult::Grade(GradeResult::new(
+        MediaRef::Object(output_object),
+        scope_object.map(MediaRef::Object),
+    )))
+}
+
 async fn subtitle_pipeline(
     ctx: &Arc<WorkerConfig>,
     job: &JobRecord,
@@ -2090,7 +2234,7 @@ async fn subtitle_pipeline(
             let format = spec.format().ok_or_else(|| {
                 failed(codes::CAPTION_INVALID, "the subtitle spec names no format")
             })?;
-            let text = caption_text(ctx, captions).await?;
+            let text = object_text(ctx, captions, "captions", codes::CAPTION_INVALID).await?;
             CaptionDocument::parse(format, &text)
                 .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
             let path = ctx
@@ -2180,26 +2324,31 @@ async fn subtitle_pipeline(
     ))))
 }
 
-async fn caption_text(ctx: &WorkerConfig, captions: &InputSource) -> Result<String, Finish> {
-    let media = captions
+async fn object_text(
+    ctx: &WorkerConfig,
+    source: &InputSource,
+    what: &str,
+    code: &str,
+) -> Result<String, Finish> {
+    let media = source
         .media()
         .map(|source| source.media())
-        .ok_or_else(|| failed(codes::CAPTION_INVALID, "captions must name a media object"))?;
+        .ok_or_else(|| failed(code, format!("{what} must name a media object")))?;
     let MediaRef::Object(object) = media else {
         return Err(failed(
-            codes::CAPTION_INVALID,
-            "captions must name an object, not a URL",
+            code,
+            format!("{what} must name an object, not a URL"),
         ));
     };
     let body = ctx
         .store
         .get(object)
         .await
-        .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+        .map_err(|error| failed(code, error))?;
     let bytes = collect_body(body)
         .await
-        .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
-    String::from_utf8(bytes).map_err(|error| failed(codes::CAPTION_INVALID, error))
+        .map_err(|error| failed(code, error))?;
+    String::from_utf8(bytes).map_err(|error| failed(code, error))
 }
 
 async fn loudness_pipeline(

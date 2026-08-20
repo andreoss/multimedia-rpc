@@ -132,6 +132,7 @@ fn every_worker_failure_code_carries_the_reference_vocabulary() {
         ("loudness_measure_failed", "ERROR_LOUDNESS_MEASURE_FAILED"),
         ("loudness_failed", "ERROR_LOUDNESS_FAILED"),
         ("caption_invalid", "ERROR_SUBTITLE_INVALID"),
+        ("grade_invalid", "ERROR_GRADE_INVALID"),
     ];
     for (code, reference) in expected {
         assert_eq!(failure_code(&failure(code, Vec::new())), reference);

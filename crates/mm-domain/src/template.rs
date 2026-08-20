@@ -6,8 +6,9 @@ use crate::id::{
     ParameterName, ParameterNameError, TemplateId, TemplateName, TemplateNameError, UserId,
 };
 use crate::op::{
-    BatchSpec, ConcatSpec, GraphNode, GraphSpec, ImageSpec, LadderSpec, LoudnessSpec, OpSpec,
-    OpSpecError, PackageSpec, ProbeSpec, SubtitleSpec, ThumbnailSpec, TranscodeSpec, TrimSpec,
+    BatchSpec, ConcatSpec, GradeSpec, GraphNode, GraphSpec, ImageSpec, LadderSpec, LoudnessSpec,
+    OpSpec, OpSpecError, PackageSpec, ProbeSpec, SubtitleSpec, ThumbnailSpec, TranscodeSpec,
+    TrimSpec,
 };
 use crate::source::InputSource;
 
@@ -342,6 +343,15 @@ fn substitute_spec(
                 .collect::<Result<Vec<_>, _>>()?;
             OpSpec::Graph(GraphSpec::new(nodes)?)
         }
+        OpSpec::Grade(grade) => OpSpec::Grade(GradeSpec::new(
+            substitute_input(grade.input(), values)?,
+            grade.adjustments(),
+            grade
+                .lookup_table()
+                .map(|table| substitute_input(table, values))
+                .transpose()?,
+            grade.scope(),
+        )?),
         OpSpec::Subtitle(subtitle) => OpSpec::Subtitle(SubtitleSpec::new(
             substitute_input(subtitle.input(), values)?,
             subtitle

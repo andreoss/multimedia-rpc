@@ -1,8 +1,9 @@
 use mm_domain::{
-    ConcatSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputSource, LoudnessResult,
-    LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, OpKind, OpResultError, OpSpec,
-    OpSpecError, OutputProfile, OutputProfileError, ProbeResult, ProbeSpec, ResizeMode,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec, TrimSpec, UnsupportedOp,
+    ConcatSpec, GradeAdjustments, GradeResult, GradeScope, GradeSpec, ImageFormat, ImageOp,
+    ImageResult, ImageSpec, InputSource, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef,
+    MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError,
+    ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec,
+    TrimSpec, UnsupportedOp,
 };
 
 fn object() -> MediaRef {
@@ -520,4 +521,49 @@ fn a_loudness_result_holds_negative_measurements_and_an_optional_output() {
         LoudnessResult::new(None, f64::INFINITY, -1.5, 4.0),
         Err(OpResultError::InvalidMeasurement { .. })
     ));
+}
+
+#[test]
+fn a_grade_adjustment_is_bounded_by_name() {
+    assert!(GradeAdjustments::new(0.1, 1.2, 1.3, 1.1).is_ok());
+    assert!(matches!(
+        GradeAdjustments::new(2.0, 1.0, 1.0, 1.0),
+        Err(OpSpecError::InvalidBrightness { .. })
+    ));
+    assert!(matches!(
+        GradeAdjustments::new(0.0, -1.0, 1.0, 1.0),
+        Err(OpSpecError::InvalidContrast { .. })
+    ));
+    assert!(matches!(
+        GradeAdjustments::new(0.0, 1.0, 4.0, 1.0),
+        Err(OpSpecError::InvalidSaturation { .. })
+    ));
+    assert!(matches!(
+        GradeAdjustments::new(0.0, 1.0, 1.0, 0.0),
+        Err(OpSpecError::InvalidGamma { .. })
+    ));
+    assert!(matches!(
+        GradeScope::new(0, 180),
+        Err(OpSpecError::ZeroDimension { dimension: "width" })
+    ));
+}
+
+#[test]
+fn a_grade_spec_requires_an_adjustment_or_a_lookup_table() {
+    assert_eq!(
+        GradeSpec::new(object(), GradeAdjustments::default(), None, None),
+        Err(OpSpecError::EmptyGrade)
+    );
+    let grade = GradeSpec::new(
+        object(),
+        GradeAdjustments::new(0.1, 1.0, 1.0, 1.0).unwrap(),
+        None,
+        Some(GradeScope::new(320, 180).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(OpSpec::Grade(grade.clone()).kind(), OpKind::Grade);
+    assert_eq!(grade.adjustments().brightness(), 0.1);
+    assert_eq!(grade.scope().unwrap().width(), 320);
+    let result = GradeResult::new(object(), Some(object()));
+    assert!(result.scope().is_some());
 }

@@ -27,16 +27,16 @@ pub use jobs::{
     RungStateError,
 };
 pub use op::{
-    AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GraphNode, GraphResult, GraphSpec,
-    HttpRef, ImageFormat, ImageOp, ImageResult, ImageSpec, LadderResult, LadderSpec,
-    LoudnessResult, LoudnessSpec, LoudnessTarget, MAX_BATCH_STEPS, MAX_GRAPH_NODES,
-    MAX_LADDER_RUNGS, MAX_LOUDNESS_LUFS, MAX_NESTING_DEPTH, MAX_TREE_STEPS, MAX_TRUE_PEAK_DB,
-    MIN_LADDER_RUNGS, MIN_LOUDNESS_LUFS, MIN_TRUE_PEAK_DB, MediaRef, MediaRefError, NodeOutcome,
-    ObjectRef, OpKind, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
-    OutputProfileError, OutputRange, PackageResult, PackageSpec, ProbeResult, ProbeSpec,
-    RenditionResult, ResizeMode, StepOutcome, StepState, SubtitleMode, SubtitleResult,
-    SubtitleSpec, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec,
-    TrimSpec, UnsupportedInput, UnsupportedOp, VideoStreamInfo,
+    AudioStreamInfo, BatchResult, BatchSpec, ConcatSpec, GradeAdjustments, GradeResult, GradeScope,
+    GradeSpec, GraphNode, GraphResult, GraphSpec, HttpRef, ImageFormat, ImageOp, ImageResult,
+    ImageSpec, LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget,
+    MAX_BATCH_STEPS, MAX_GRAPH_NODES, MAX_LADDER_RUNGS, MAX_LOUDNESS_LUFS, MAX_NESTING_DEPTH,
+    MAX_TREE_STEPS, MAX_TRUE_PEAK_DB, MIN_LADDER_RUNGS, MIN_LOUDNESS_LUFS, MIN_TRUE_PEAK_DB,
+    MediaRef, MediaRefError, NodeOutcome, ObjectRef, OpKind, OpResult, OpResultError, OpSpec,
+    OpSpecError, OutputProfile, OutputProfileError, OutputRange, PackageResult, PackageSpec,
+    ProbeResult, ProbeSpec, RenditionResult, ResizeMode, StepOutcome, StepState, SubtitleMode,
+    SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult,
+    TranscodeSpec, TrimSpec, UnsupportedInput, UnsupportedOp, VideoStreamInfo,
 };
 pub use reference::{failure_code, verdict_code};
 pub use resolve::{ResolveError, resolve_media_ref};

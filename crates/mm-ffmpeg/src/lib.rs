@@ -1,4 +1,5 @@
 mod concat;
+mod grade;
 mod hls;
 mod loudness;
 mod parse;
@@ -13,6 +14,7 @@ mod transcode;
 mod trim;
 
 pub use concat::{ConcatError, build_concat_args};
+pub use grade::{GradeError, GradeTarget, build_grade_args, parse_cube_table};
 pub use hls::{HlsError, HlsTarget, build_hls_args};
 pub use loudness::{
     LoudnessError, LoudnessMeasurement, LoudnessTarget, build_loudness_measure_args,

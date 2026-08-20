@@ -266,6 +266,20 @@ fn op_spec_oneof_carries_every_arm() {
                 }),
             }],
         }),
+        v1::op_spec::Op::Grade(v1::GradeSpec {
+            input: Some(media()),
+            adjustments: Some(v1::GradeAdjustments {
+                brightness: 0.1,
+                contrast: 1.2,
+                saturation: 1.3,
+                gamma: 1.1,
+            }),
+            lookup_table: None,
+            scope: Some(v1::GradeScope {
+                width: 320,
+                height: 180,
+            }),
+        }),
         v1::op_spec::Op::Subtitle(v1::SubtitleSpec {
             input: Some(media()),
             captions: Some(media()),
@@ -301,7 +315,7 @@ fn op_spec_oneof_carries_every_arm() {
             poster_seconds: None,
         }),
     ];
-    assert_eq!(arms.len(), 12);
+    assert_eq!(arms.len(), 13);
     for arm in arms {
         assert!(OpSpec::try_from(v1::OpSpec { op: Some(arm) }).is_ok());
     }

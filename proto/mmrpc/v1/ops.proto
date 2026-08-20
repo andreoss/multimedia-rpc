@@ -110,6 +110,25 @@ message LoudnessSpec {
   optional LoudnessTarget target = 2;
 }
 
+message GradeAdjustments {
+  double brightness = 1;
+  double contrast = 2;
+  double saturation = 3;
+  double gamma = 4;
+}
+
+message GradeScope {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message GradeSpec {
+  InputSource input = 1;
+  optional GradeAdjustments adjustments = 2;
+  optional InputSource lookup_table = 3;
+  optional GradeScope scope = 4;
+}
+
 message SubtitleSpec {
   InputSource input = 1;
   optional InputSource captions = 2;
@@ -131,6 +150,7 @@ message OpSpec {
     LadderSpec ladder = 10;
     LoudnessSpec loudness = 11;
     SubtitleSpec subtitle = 12;
+    GradeSpec grade = 13;
   }
 }
 
@@ -239,6 +259,11 @@ message LoudnessResult {
   double loudness_range_lu = 4;
 }
 
+message GradeResult {
+  MediaRef output = 1;
+  optional MediaRef scope = 2;
+}
+
 message SubtitleResult {
   MediaRef output = 1;
 }
@@ -257,5 +282,6 @@ message OpResult {
     LadderResult ladder = 10;
     LoudnessResult loudness = 11;
     SubtitleResult subtitle = 12;
+    GradeResult grade = 13;
   }
 }

@@ -366,6 +366,16 @@ pub enum OpSpecError {
     SubtitleCaptionsUnexpected,
     #[error("burning or muxing a subtitle needs its text format")]
     SubtitleFormatRequired,
+    #[error("brightness {value} is outside -1 to 1")]
+    InvalidBrightness { value: f64 },
+    #[error("contrast {value} is outside 0 to 2")]
+    InvalidContrast { value: f64 },
+    #[error("saturation {value} is outside 0 to 3")]
+    InvalidSaturation { value: f64 },
+    #[error("gamma {value} is outside 0.1 to 10")]
+    InvalidGamma { value: f64 },
+    #[error("grade has no adjustment and no lookup table")]
+    EmptyGrade,
     #[error("batch has no steps")]
     EmptyBatch,
     #[error("batch has {count} steps, above the {max} allowed")]
@@ -832,6 +842,165 @@ impl PackageSpec {
 
     pub fn segment_seconds(&self) -> f64 {
         self.segment.seconds()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradeAdjustments {
+    brightness: f64,
+    contrast: f64,
+    saturation: f64,
+    gamma: f64,
+}
+
+impl Default for GradeAdjustments {
+    fn default() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            gamma: 1.0,
+        }
+    }
+}
+
+impl GradeAdjustments {
+    pub const MIN_BRIGHTNESS: f64 = -1.0;
+    pub const MAX_BRIGHTNESS: f64 = 1.0;
+    pub const MIN_CONTRAST: f64 = 0.0;
+    pub const MAX_CONTRAST: f64 = 2.0;
+    pub const MIN_SATURATION: f64 = 0.0;
+    pub const MAX_SATURATION: f64 = 3.0;
+    pub const MIN_GAMMA: f64 = 0.1;
+    pub const MAX_GAMMA: f64 = 10.0;
+
+    pub fn new(
+        brightness: f64,
+        contrast: f64,
+        saturation: f64,
+        gamma: f64,
+    ) -> Result<Self, OpSpecError> {
+        if !brightness.is_finite()
+            || !(Self::MIN_BRIGHTNESS..=Self::MAX_BRIGHTNESS).contains(&brightness)
+        {
+            return Err(OpSpecError::InvalidBrightness { value: brightness });
+        }
+        if !contrast.is_finite() || !(Self::MIN_CONTRAST..=Self::MAX_CONTRAST).contains(&contrast) {
+            return Err(OpSpecError::InvalidContrast { value: contrast });
+        }
+        if !saturation.is_finite()
+            || !(Self::MIN_SATURATION..=Self::MAX_SATURATION).contains(&saturation)
+        {
+            return Err(OpSpecError::InvalidSaturation { value: saturation });
+        }
+        if !gamma.is_finite() || !(Self::MIN_GAMMA..=Self::MAX_GAMMA).contains(&gamma) {
+            return Err(OpSpecError::InvalidGamma { value: gamma });
+        }
+        Ok(Self {
+            brightness,
+            contrast,
+            saturation,
+            gamma,
+        })
+    }
+
+    pub fn brightness(&self) -> f64 {
+        self.brightness
+    }
+
+    pub fn contrast(&self) -> f64 {
+        self.contrast
+    }
+
+    pub fn saturation(&self) -> f64 {
+        self.saturation
+    }
+
+    pub fn gamma(&self) -> f64 {
+        self.gamma
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.brightness == 0.0
+            && self.contrast == 1.0
+            && self.saturation == 1.0
+            && self.gamma == 1.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GradeScope {
+    width: u32,
+    height: u32,
+}
+
+impl GradeScope {
+    pub fn new(width: u32, height: u32) -> Result<Self, OpSpecError> {
+        if width == 0 {
+            return Err(OpSpecError::ZeroDimension { dimension: "width" });
+        }
+        if height == 0 {
+            return Err(OpSpecError::ZeroDimension {
+                dimension: "height",
+            });
+        }
+        Ok(Self { width, height })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradeSpec {
+    input: InputSource,
+    adjustments: GradeAdjustments,
+    lookup_table: Option<InputSource>,
+    scope: Option<GradeScope>,
+}
+
+impl GradeSpec {
+    pub fn new<I: Into<InputSource>>(
+        input: I,
+        adjustments: GradeAdjustments,
+        lookup_table: Option<InputSource>,
+        scope: Option<GradeScope>,
+    ) -> Result<Self, OpSpecError> {
+        let input = source(input);
+        reject_cuts("grade", std::slice::from_ref(&input))?;
+        if let Some(lookup_table) = &lookup_table {
+            reject_cuts("grade", std::slice::from_ref(lookup_table))?;
+        }
+        if adjustments.is_identity() && lookup_table.is_none() {
+            return Err(OpSpecError::EmptyGrade);
+        }
+        Ok(Self {
+            input,
+            adjustments,
+            lookup_table,
+            scope,
+        })
+    }
+
+    pub fn input(&self) -> &InputSource {
+        &self.input
+    }
+
+    pub fn adjustments(&self) -> GradeAdjustments {
+        self.adjustments
+    }
+
+    pub fn lookup_table(&self) -> Option<&InputSource> {
+        self.lookup_table.as_ref()
+    }
+
+    pub fn scope(&self) -> Option<GradeScope> {
+        self.scope
     }
 }
 
@@ -1416,6 +1585,7 @@ pub enum OpSpec {
     Ladder(LadderSpec),
     Loudness(LoudnessSpec),
     Subtitle(SubtitleSpec),
+    Grade(GradeSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1434,6 +1604,7 @@ pub enum OpKind {
     Ladder,
     Loudness,
     Subtitle,
+    Grade,
 }
 
 impl std::fmt::Display for OpKind {
@@ -1453,6 +1624,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Ladder => "ladder",
             OpKind::Loudness => "loudness",
             OpKind::Subtitle => "subtitle",
+            OpKind::Grade => "grade",
         };
         formatter.write_str(name)
     }
@@ -1486,7 +1658,8 @@ impl OpKind {
             | OpKind::Graph
             | OpKind::Ladder
             | OpKind::Loudness
-            | OpKind::Subtitle => Ok(()),
+            | OpKind::Subtitle
+            | OpKind::Grade => Ok(()),
         }
     }
 }
@@ -1506,6 +1679,7 @@ impl OpSpec {
             OpSpec::Ladder(_) => OpKind::Ladder,
             OpSpec::Loudness(_) => OpKind::Loudness,
             OpSpec::Subtitle(_) => OpKind::Subtitle,
+            OpSpec::Grade(_) => OpKind::Grade,
         }
     }
 
@@ -1530,6 +1704,13 @@ impl OpSpec {
                 let mut inputs = vec![subtitle.input()];
                 if let Some(captions) = subtitle.captions() {
                     inputs.push(captions);
+                }
+                inputs
+            }
+            OpSpec::Grade(grade) => {
+                let mut inputs = vec![grade.input()];
+                if let Some(lookup_table) = grade.lookup_table() {
+                    inputs.push(lookup_table);
                 }
                 inputs
             }
@@ -1922,6 +2103,26 @@ impl RenditionResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct GradeResult {
+    output: MediaRef,
+    scope: Option<MediaRef>,
+}
+
+impl GradeResult {
+    pub fn new(output: MediaRef, scope: Option<MediaRef>) -> Self {
+        Self { output, scope }
+    }
+
+    pub fn output(&self) -> &MediaRef {
+        &self.output
+    }
+
+    pub fn scope(&self) -> Option<&MediaRef> {
+        self.scope.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubtitleResult {
     output: MediaRef,
 }
@@ -2028,6 +2229,7 @@ pub enum OpResult {
     Ladder(LadderResult),
     Loudness(LoudnessResult),
     Subtitle(SubtitleResult),
+    Grade(GradeResult),
 }
 
 impl OpResult {
@@ -2044,6 +2246,7 @@ impl OpResult {
                 .or_else(|| result.renditions().first().map(RenditionResult::media)),
             OpResult::Loudness(result) => result.output(),
             OpResult::Subtitle(result) => Some(result.output()),
+            OpResult::Grade(result) => Some(result.output()),
             OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
         }
     }

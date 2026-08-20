@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, ConcatSpec, GraphNode, GraphSpec,
-    ImageFormat, ImageOp, ImageSpec, InputSource, JobId, JobRecord, JobRepository, JobState,
-    LadderSpec, LoudnessSpec, LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef,
-    ObjectStore, ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec,
-    QueueUrl, RequestId, ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec,
-    ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
+    BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, ConcatSpec, GradeAdjustments,
+    GradeScope, GradeSpec, GraphNode, GraphSpec, ImageFormat, ImageOp, ImageSpec, InputSource,
+    JobId, JobRecord, JobRepository, JobState, LadderSpec, LoudnessSpec, LoudnessTarget, MediaRef,
+    NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec,
+    OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, RungState, StepState,
+    SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId, WorkerId,
+    collect_body,
 };
 use mm_ffmpeg::{
     ProbeLimits, Prober, RunLimits as ToolLimits, RunOutcome as ToolOutcome, Runner as ToolRunner,
@@ -3627,4 +3628,136 @@ fn fixture_with_subtitles(name: &str, seconds: u32) -> PathBuf {
         .expect("ffmpeg must be runnable");
     assert!(status.success(), "subtitle fixture generation failed");
     output_path
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_brighter_grade_moves_the_mean_luma_and_lands_a_scope() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("grade-bright.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/grade-bright.mp4").await;
+    let repository = db.repository();
+    let adjustments = GradeAdjustments::new(0.3, 1.0, 1.0, 1.0).unwrap();
+    let spec = GradeSpec::new(
+        input,
+        adjustments,
+        None,
+        Some(GradeScope::new(160, 120).unwrap()),
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Grade(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-grade-bright"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Grade(result) = record.result.expect("result recorded") else {
+        panic!("expected a grade result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("grade").join(format!("{}-graded.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let source_frame = extract_frame(&source, "grade-source.jpg");
+    let graded_frame = extract_frame(&path, "grade-output.jpg");
+    assert!(
+        mean_luma(&graded_frame) > mean_luma(&source_frame),
+        "the grade did not brighten the frame"
+    );
+    let MediaRef::Object(scope) = result.scope().expect("a scope was requested") else {
+        panic!("expected a scope object");
+    };
+    assert_eq!(scope.key(), format!("jobs/{}/scope.jpg", job.id));
+    let scope_path = scratch_dir("grade").join(format!("{}-scope.jpg", job.id));
+    write_object(&store, scope, &scope_path).await;
+    let still = Prober::default()
+        .still(&scope_path.to_string_lossy(), &ProbeLimits::default())
+        .await
+        .expect("the scope probes");
+    assert_eq!((still.width, still.height), (160, 120));
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_valid_lookup_table_is_fetched_and_applied() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("grade-lut.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/grade-lut.mp4").await;
+    let table = caption_file(
+        "grade-lut",
+        "cube",
+        "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+    );
+    let lut = upload_input(&store, &table, "inputs/grade-lut.cube").await;
+    let repository = db.repository();
+    let spec = GradeSpec::new(input, GradeAdjustments::default(), Some(lut.into()), None).unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Grade(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-grade-lut"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Grade(result) = record.result.expect("result recorded") else {
+        panic!("expected a grade result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    assert!(store.head(output).await.expect("output exists") > 0);
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lookup_table_that_is_not_a_table_is_refused_by_name() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("grade-bad-lut.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/grade-bad-lut.mp4").await;
+    let table = caption_file("grade-bad-lut", "cube", "this is not a cube table\n");
+    let lut = upload_input(&store, &table, "inputs/grade-bad-lut.cube").await;
+    let repository = db.repository();
+    let spec = GradeSpec::new(input, GradeAdjustments::default(), Some(lut.into()), None).unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Grade(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-grade-bad-lut"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.result);
+    assert_eq!(
+        record.failure.expect("failure recorded").code(),
+        codes::GRADE_INVALID
+    );
+    let key = ObjectRef::new(BUCKET, &format!("jobs/{}/output.mp4", job.id)).unwrap();
+    assert!(
+        store.head(&key).await.is_err(),
+        "a refused table landed an output"
+    );
+    db.dispose().await;
+}
+
+fn mean_luma(path: &Path) -> f64 {
+    let output = Command::new("convert")
+        .arg(path)
+        .args(["-colorspace", "Gray", "-format", "%[fx:mean]", "info:"])
+        .output()
+        .expect("ImageMagick must be runnable");
+    assert!(output.status.success(), "mean luma failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("mean luma is a number")
 }

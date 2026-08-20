@@ -1,14 +1,15 @@
 use crate::v1;
 use mm_domain::{
-    AudioStreamInfo, BatchResult, BatchSpec, CaptionFormat, ConcatSpec, GraphNode, GraphResult,
-    GraphSpec, ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError,
-    InputOrder, InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState,
-    LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef,
-    MediaRefError, MediaSource, NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec,
-    OpSpecError, OutputProfile, OutputProfileError, OutputRange, PackageResult, PackageSpec,
-    ParameterDeclaration, ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec,
-    QueueUrl, RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome,
-    StepState, SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
+    AudioStreamInfo, BatchResult, BatchSpec, CaptionFormat, ConcatSpec, GradeAdjustments,
+    GradeResult, GradeScope, GradeSpec, GraphNode, GraphResult, GraphSpec, ImageFormat, ImageOp,
+    ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder, InputOrderError,
+    InputSource, JobFailure, JobFailureError, JobRecord, JobState, LadderResult, LadderSpec,
+    LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, MediaSource, NodeId,
+    NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
+    OutputProfileError, OutputRange, PackageResult, PackageSpec, ParameterDeclaration,
+    ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl,
+    RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome, StepState,
+    SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
     ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
     TrimSpec, VideoStreamInfo, failure_code, verdict_code,
 };
@@ -414,6 +415,52 @@ impl From<&LoudnessSpec> for v1::LoudnessSpec {
     }
 }
 
+impl TryFrom<v1::GradeSpec> for GradeSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::GradeSpec) -> Result<Self, Self::Error> {
+        let adjustments = match value.adjustments {
+            Some(adjustments) => GradeAdjustments::new(
+                adjustments.brightness,
+                adjustments.contrast,
+                adjustments.saturation,
+                adjustments.gamma,
+            )?,
+            None => GradeAdjustments::default(),
+        };
+        let lookup_table = value.lookup_table.map(InputSource::try_from).transpose()?;
+        let scope = value
+            .scope
+            .map(|scope| GradeScope::new(scope.width, scope.height))
+            .transpose()?;
+        GradeSpec::new(
+            required_source(value.input)?,
+            adjustments,
+            lookup_table,
+            scope,
+        )
+    }
+}
+
+impl From<&GradeSpec> for v1::GradeSpec {
+    fn from(value: &GradeSpec) -> Self {
+        Self {
+            input: Some(v1::InputSource::from(value.input())),
+            adjustments: Some(v1::GradeAdjustments {
+                brightness: value.adjustments().brightness(),
+                contrast: value.adjustments().contrast(),
+                saturation: value.adjustments().saturation(),
+                gamma: value.adjustments().gamma(),
+            }),
+            lookup_table: value.lookup_table().map(v1::InputSource::from),
+            scope: value.scope().map(|scope| v1::GradeScope {
+                width: scope.width(),
+                height: scope.height(),
+            }),
+        }
+    }
+}
+
 impl TryFrom<v1::SubtitleSpec> for SubtitleSpec {
     type Error = OpSpecError;
 
@@ -510,6 +557,7 @@ impl TryFrom<v1::OpSpec> for OpSpec {
             v1::op_spec::Op::Subtitle(subtitle) => {
                 Ok(OpSpec::Subtitle(SubtitleSpec::try_from(subtitle)?))
             }
+            v1::op_spec::Op::Grade(grade) => Ok(OpSpec::Grade(GradeSpec::try_from(grade)?)),
         }
     }
 }
@@ -561,6 +609,7 @@ impl From<&OpSpec> for v1::OpSpec {
             OpSpec::Subtitle(subtitle) => {
                 v1::op_spec::Op::Subtitle(v1::SubtitleSpec::from(subtitle))
             }
+            OpSpec::Grade(grade) => v1::op_spec::Op::Grade(v1::GradeSpec::from(grade)),
         };
         v1::OpSpec { op: Some(op) }
     }
@@ -586,6 +635,26 @@ impl From<&LoudnessResult> for v1::LoudnessResult {
             integrated_lufs: value.integrated_lufs(),
             true_peak_db: value.true_peak_db(),
             loudness_range_lu: value.loudness_range_lu(),
+        }
+    }
+}
+
+impl TryFrom<v1::GradeResult> for GradeResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::GradeResult) -> Result<Self, Self::Error> {
+        Ok(GradeResult::new(
+            required_ref(value.output)?,
+            optional_ref(value.scope)?,
+        ))
+    }
+}
+
+impl From<&GradeResult> for v1::GradeResult {
+    fn from(value: &GradeResult) -> Self {
+        Self {
+            output: Some(v1::MediaRef::from(value.output())),
+            scope: value.scope().map(v1::MediaRef::from),
         }
     }
 }
@@ -679,6 +748,7 @@ impl TryFrom<v1::OpResult> for OpResult {
             v1::op_result::Op::Subtitle(subtitle) => {
                 Ok(OpResult::Subtitle(SubtitleResult::try_from(subtitle)?))
             }
+            v1::op_result::Op::Grade(grade) => Ok(OpResult::Grade(GradeResult::try_from(grade)?)),
         }
     }
 }
@@ -1182,6 +1252,7 @@ impl From<&OpResult> for v1::OpResult {
             OpResult::Subtitle(subtitle) => {
                 v1::op_result::Op::Subtitle(v1::SubtitleResult::from(subtitle))
             }
+            OpResult::Grade(grade) => v1::op_result::Op::Grade(v1::GradeResult::from(grade)),
         };
         v1::OpResult { op: Some(op) }
     }

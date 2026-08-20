@@ -40,6 +40,7 @@ and no media bytes cross the API.
 |`ladder` |Ordered renditions and one master playlist.
 |`loudness` |Measure integrated loudness, true peak and range, or normalise to a target.
 |`subtitle` |Burn captions in, mux them as a track, or strip subtitle tracks.
+|`grade` |Adjust colour, apply a lookup table, and land a scope still.
 |`batch` |Steps in order, a later one reading an earlier result.
 |`graph` |Named nodes in dependency order, references inside the graph.
 |===

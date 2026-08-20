@@ -1,3 +1,4 @@
+mod audio;
 mod concat;
 mod grade;
 mod hls;
@@ -13,6 +14,7 @@ mod timestamp;
 mod transcode;
 mod trim;
 
+pub use audio::{AudioError, AudioTarget, build_audio_args};
 pub use concat::{ConcatError, build_concat_args};
 pub use grade::{GradeError, GradeTarget, build_grade_args, parse_cube_table};
 pub use hls::{HlsError, HlsTarget, build_hls_args};

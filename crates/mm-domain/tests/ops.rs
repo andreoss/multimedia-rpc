@@ -1,9 +1,9 @@
 use mm_domain::{
-    ConcatSpec, GradeAdjustments, GradeResult, GradeScope, GradeSpec, ImageFormat, ImageOp,
-    ImageResult, ImageSpec, InputSource, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef,
-    MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile, OutputProfileError,
-    ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeSpec,
-    TrimSpec, UnsupportedOp,
+    AudioSpec, ConcatSpec, GradeAdjustments, GradeResult, GradeScope, GradeSpec, ImageFormat,
+    ImageOp, ImageResult, ImageSpec, InputSource, LoudnessResult, LoudnessSpec, LoudnessTarget,
+    MediaRef, MediaRefError, OpKind, OpResultError, OpSpec, OpSpecError, OutputProfile,
+    OutputProfileError, ProbeResult, ProbeSpec, ResizeMode, ThumbnailResult, ThumbnailSpec, Ticks,
+    TimedOutput, TranscodeSpec, TrimSpec, UnsupportedOp,
 };
 
 fn object() -> MediaRef {
@@ -566,4 +566,100 @@ fn a_grade_spec_requires_an_adjustment_or_a_lookup_table() {
     assert_eq!(grade.scope().unwrap().width(), 320);
     let result = GradeResult::new(object(), Some(object()));
     assert!(result.scope().is_some());
+}
+
+#[test]
+fn an_audio_spec_refuses_each_bound_by_name() {
+    assert!(matches!(
+        AudioSpec::new(
+            Vec::<InputSource>::new(),
+            0.0,
+            Ticks::ZERO,
+            Ticks::ZERO,
+            None,
+            None,
+            None
+        ),
+        Err(OpSpecError::EmptyAudioInputs)
+    ));
+    assert!(matches!(
+        AudioSpec::new(
+            vec![object()],
+            25.0,
+            Ticks::ZERO,
+            Ticks::ZERO,
+            None,
+            None,
+            None
+        ),
+        Err(OpSpecError::InvalidGain { .. })
+    ));
+    assert!(matches!(
+        AudioSpec::new(
+            vec![object()],
+            0.0,
+            Ticks::ZERO,
+            Ticks::ZERO,
+            Some(10),
+            None,
+            None
+        ),
+        Err(OpSpecError::InvalidHighPass { .. })
+    ));
+    assert!(matches!(
+        AudioSpec::new(
+            vec![object()],
+            0.0,
+            Ticks::ZERO,
+            Ticks::ZERO,
+            None,
+            Some(30_000),
+            None
+        ),
+        Err(OpSpecError::InvalidLowPass { .. })
+    ));
+    assert!(matches!(
+        AudioSpec::new(
+            vec![object()],
+            0.0,
+            Ticks::ZERO,
+            Ticks::ZERO,
+            Some(2_000),
+            Some(1_000),
+            None
+        ),
+        Err(OpSpecError::LowPassBelowHighPass { .. })
+    ));
+    assert!(matches!(
+        AudioSpec::new(
+            vec![object()],
+            0.0,
+            Ticks::ZERO,
+            Ticks::ZERO,
+            None,
+            None,
+            Some(1.0)
+        ),
+        Err(OpSpecError::InvalidLimiter { .. })
+    ));
+}
+
+#[test]
+fn an_audio_spec_mixes_inputs_and_keeps_fades_exact() {
+    let fade_in = Ticks::from_seconds(1.5).unwrap();
+    let spec = AudioSpec::new(
+        vec![object(), object()],
+        6.0,
+        fade_in,
+        Ticks::ZERO,
+        Some(80),
+        Some(12_000),
+        Some(-1.0),
+    )
+    .unwrap();
+    assert_eq!(spec.inputs().len(), 2);
+    assert_eq!(spec.fade_in(), fade_in);
+    assert_eq!(spec.high_pass_hz(), Some(80));
+    assert_eq!(spec.limiter_true_peak_db(), Some(-1.0));
+    assert_eq!(OpSpec::Audio(spec).kind(), OpKind::Audio);
 }

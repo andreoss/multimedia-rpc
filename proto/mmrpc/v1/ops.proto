@@ -136,6 +136,16 @@ message SubtitleSpec {
   SubtitleMode mode = 4;
 }
 
+message AudioSpec {
+  repeated InputSource inputs = 1;
+  double gain_db = 2;
+  uint64 fade_in_ticks = 3;
+  uint64 fade_out_ticks = 4;
+  optional uint32 high_pass_hz = 5;
+  optional uint32 low_pass_hz = 6;
+  optional double limiter_true_peak_db = 7;
+}
+
 message OpSpec {
   oneof op {
     ConcatSpec concat = 1;
@@ -151,6 +161,7 @@ message OpSpec {
     LoudnessSpec loudness = 11;
     SubtitleSpec subtitle = 12;
     GradeSpec grade = 13;
+    AudioSpec audio = 14;
   }
 }
 
@@ -268,6 +279,11 @@ message SubtitleResult {
   MediaRef output = 1;
 }
 
+message AudioResult {
+  MediaRef output = 1;
+  double duration_seconds = 2;
+}
+
 message OpResult {
   oneof op {
     ConcatResult concat = 1;
@@ -283,5 +299,6 @@ message OpResult {
     LoudnessResult loudness = 11;
     SubtitleResult subtitle = 12;
     GradeResult grade = 13;
+    AudioResult audio = 14;
   }
 }

@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mm_domain::{
-    BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, ConcatSpec, GradeAdjustments,
-    GradeScope, GradeSpec, GraphNode, GraphSpec, ImageFormat, ImageOp, ImageSpec, InputSource,
-    JobId, JobRecord, JobRepository, JobState, LadderSpec, LoudnessSpec, LoudnessTarget, MediaRef,
-    NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpResult, OpSpec,
-    OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId, ResizeMode, RungState, StepState,
-    SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks, TranscodeSpec, TrimSpec, UserId, WorkerId,
-    collect_body,
+    AudioSpec, BatchSpec, CallbackError, CallbackPublisher, CaptionFormat, ConcatSpec,
+    GradeAdjustments, GradeScope, GradeSpec, GraphNode, GraphSpec, ImageFormat, ImageOp, ImageSpec,
+    InputSource, JobId, JobRecord, JobRepository, JobState, LadderSpec, LoudnessSpec,
+    LoudnessTarget, MediaRef, NewJob, NodeRef, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpResult, OpSpec, OutputProfile, PackageSpec, ProbeSpec, QueueUrl, RequestId,
+    ResizeMode, RungState, StepState, SubtitleMode, SubtitleSpec, ThumbnailSpec, Ticks,
+    TranscodeSpec, TrimSpec, UserId, WorkerId, collect_body,
 };
 use mm_ffmpeg::{
     ProbeLimits, Prober, RunLimits as ToolLimits, RunOutcome as ToolOutcome, Runner as ToolRunner,
@@ -3760,4 +3760,193 @@ fn mean_luma(path: &Path) -> f64 {
         .trim()
         .parse()
         .expect("mean luma is a number")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gain_moves_the_measured_loudness_by_the_gain() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("audio-gain.mp4", 6, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/audio-gain.mp4").await;
+    let repository = db.repository();
+    let spec =
+        AudioSpec::new(vec![input], 6.0, Ticks::ZERO, Ticks::ZERO, None, None, None).unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Audio(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-audio-gain"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Audio(result) = record.result.expect("result recorded") else {
+        panic!("expected an audio result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("audio").join(format!("{}-gain.wav", job.id));
+    write_object(&store, output, &path).await;
+    let before = measure_file(&source).await.integrated_lufs;
+    let after = measure_file(&path).await.integrated_lufs;
+    assert!(
+        (after - before - 6.0).abs() < 1.5,
+        "gain moved loudness from {before} to {after}"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fades_make_the_first_and_last_windows_quieter_than_the_middle() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("audio-fade.mp4", 6, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/audio-fade.mp4").await;
+    let repository = db.repository();
+    let spec = AudioSpec::new(
+        vec![input],
+        0.0,
+        Ticks::from_seconds(1.0).unwrap(),
+        Ticks::from_seconds(1.0).unwrap(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Audio(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-audio-fade"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Audio(result) = record.result.expect("result recorded") else {
+        panic!("expected an audio result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("audio").join(format!("{}-fade.wav", job.id));
+    write_object(&store, output, &path).await;
+    let first = window_mean_db(&path, 0.05, 0.4);
+    let middle = window_mean_db(&path, 2.8, 0.4);
+    let last = window_mean_db(&path, 5.55, 0.4);
+    assert!(first < middle - 10.0, "first {first} middle {middle}");
+    assert!(last < middle - 10.0, "last {last} middle {middle}");
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_inputs_mix_into_the_longer_duration() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let long = fixture("audio-mix-long.mp4", 5, 24, "mp4");
+    let short = fixture("audio-mix-short.mp4", 3, 24, "mp4");
+    let long_input = upload_input(&store, &long, "inputs/audio-mix-long.mp4").await;
+    let short_input = upload_input(&store, &short, "inputs/audio-mix-short.mp4").await;
+    let repository = db.repository();
+    let spec = AudioSpec::new(
+        vec![long_input, short_input],
+        0.0,
+        Ticks::ZERO,
+        Ticks::ZERO,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Audio(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-audio-mix"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Audio(result) = record.result.expect("result recorded") else {
+        panic!("expected an audio result");
+    };
+    assert!(
+        (result.duration_seconds() - 5.0).abs() < 0.3,
+        "mixed duration {}",
+        result.duration_seconds()
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_limiter_holds_the_true_peak_at_or_below_its_ceiling() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("audio-limit.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/audio-limit.mp4").await;
+    let repository = db.repository();
+    let spec = AudioSpec::new(
+        vec![input],
+        18.0,
+        Ticks::ZERO,
+        Ticks::ZERO,
+        None,
+        None,
+        Some(-3.0),
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Audio(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-audio-limit"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Audio(result) = record.result.expect("result recorded") else {
+        panic!("expected an audio result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("audio").join(format!("{}-limit.wav", job.id));
+    write_object(&store, output, &path).await;
+    let measured = measure_file(&path).await;
+    assert!(
+        measured.true_peak_db <= -2.9,
+        "true peak {} dBTP exceeded the ceiling",
+        measured.true_peak_db
+    );
+    db.dispose().await;
+}
+
+fn window_mean_db(path: &Path, start: f64, duration: f64) -> f64 {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-nostats",
+            "-ss",
+            &start.to_string(),
+            "-t",
+            &duration.to_string(),
+            "-i",
+        ])
+        .arg(path)
+        .args(["-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .expect("the media tool must be runnable");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("mean_volume:"))
+        .expect("volumedetect reports a mean");
+    line.split("mean_volume:")
+        .nth(1)
+        .and_then(|rest| rest.trim().trim_end_matches(" dB").parse().ok())
+        .expect("the mean is a number")
 }

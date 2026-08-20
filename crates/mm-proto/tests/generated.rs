@@ -266,6 +266,15 @@ fn op_spec_oneof_carries_every_arm() {
                 }),
             }],
         }),
+        v1::op_spec::Op::Audio(v1::AudioSpec {
+            inputs: vec![media()],
+            gain_db: 6.0,
+            fade_in_ticks: 1,
+            fade_out_ticks: 2,
+            high_pass_hz: Some(80),
+            low_pass_hz: Some(12000),
+            limiter_true_peak_db: Some(-1.0),
+        }),
         v1::op_spec::Op::Grade(v1::GradeSpec {
             input: Some(media()),
             adjustments: Some(v1::GradeAdjustments {
@@ -315,7 +324,7 @@ fn op_spec_oneof_carries_every_arm() {
             poster_seconds: None,
         }),
     ];
-    assert_eq!(arms.len(), 13);
+    assert_eq!(arms.len(), 14);
     for arm in arms {
         assert!(OpSpec::try_from(v1::OpSpec { op: Some(arm) }).is_ok());
     }

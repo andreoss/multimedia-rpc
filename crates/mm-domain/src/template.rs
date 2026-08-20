@@ -6,9 +6,9 @@ use crate::id::{
     ParameterName, ParameterNameError, TemplateId, TemplateName, TemplateNameError, UserId,
 };
 use crate::op::{
-    BatchSpec, ConcatSpec, GradeSpec, GraphNode, GraphSpec, ImageSpec, LadderSpec, LoudnessSpec,
-    OpSpec, OpSpecError, PackageSpec, ProbeSpec, SubtitleSpec, ThumbnailSpec, TranscodeSpec,
-    TrimSpec,
+    AudioSpec, BatchSpec, ConcatSpec, GradeSpec, GraphNode, GraphSpec, ImageSpec, LadderSpec,
+    LoudnessSpec, OpSpec, OpSpecError, PackageSpec, ProbeSpec, SubtitleSpec, ThumbnailSpec,
+    TranscodeSpec, TrimSpec,
 };
 use crate::source::InputSource;
 
@@ -343,6 +343,19 @@ fn substitute_spec(
                 .collect::<Result<Vec<_>, _>>()?;
             OpSpec::Graph(GraphSpec::new(nodes)?)
         }
+        OpSpec::Audio(audio) => OpSpec::Audio(AudioSpec::new(
+            audio
+                .inputs()
+                .iter()
+                .map(|input| substitute_input(input, values))
+                .collect::<Result<Vec<_>, _>>()?,
+            audio.gain_db(),
+            audio.fade_in(),
+            audio.fade_out(),
+            audio.high_pass_hz(),
+            audio.low_pass_hz(),
+            audio.limiter_true_peak_db(),
+        )?),
         OpSpec::Grade(grade) => OpSpec::Grade(GradeSpec::new(
             substitute_input(grade.input(), values)?,
             grade.adjustments(),

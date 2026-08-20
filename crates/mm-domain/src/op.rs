@@ -376,6 +376,20 @@ pub enum OpSpecError {
     InvalidGamma { value: f64 },
     #[error("grade has no adjustment and no lookup table")]
     EmptyGrade,
+    #[error("audio has no inputs")]
+    EmptyAudioInputs,
+    #[error("audio has {count} inputs, above the {max} allowed")]
+    TooManyAudioInputs { count: usize, max: usize },
+    #[error("gain {value} dB is outside -60 to 24 dB")]
+    InvalidGain { value: f64 },
+    #[error("high-pass {value} Hz is outside 20 to 20000 Hz")]
+    InvalidHighPass { value: u32 },
+    #[error("low-pass {value} Hz is outside 20 to 20000 Hz")]
+    InvalidLowPass { value: u32 },
+    #[error("low-pass {low} Hz is not above high-pass {high} Hz")]
+    LowPassBelowHighPass { high: u32, low: u32 },
+    #[error("limiter ceiling {value} dBTP is outside -20 to 0 dBTP")]
+    InvalidLimiter { value: f64 },
     #[error("batch has no steps")]
     EmptyBatch,
     #[error("batch has {count} steps, above the {max} allowed")]
@@ -842,6 +856,110 @@ impl PackageSpec {
 
     pub fn segment_seconds(&self) -> f64 {
         self.segment.seconds()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioSpec {
+    inputs: Vec<InputSource>,
+    gain_db: f64,
+    fade_in: Ticks,
+    fade_out: Ticks,
+    high_pass_hz: Option<u32>,
+    low_pass_hz: Option<u32>,
+    limiter_true_peak_db: Option<f64>,
+}
+
+impl AudioSpec {
+    pub const MIN_GAIN_DB: f64 = -60.0;
+    pub const MAX_GAIN_DB: f64 = 24.0;
+    pub const MIN_FILTER_HZ: u32 = 20;
+    pub const MAX_FILTER_HZ: u32 = 20_000;
+    pub const MIN_LIMITER_DB: f64 = -20.0;
+    pub const MAX_LIMITER_DB: f64 = 0.0;
+    pub const MAX_INPUTS: usize = 8;
+
+    pub fn new<I: Into<InputSource>>(
+        inputs: Vec<I>,
+        gain_db: f64,
+        fade_in: Ticks,
+        fade_out: Ticks,
+        high_pass_hz: Option<u32>,
+        low_pass_hz: Option<u32>,
+        limiter_true_peak_db: Option<f64>,
+    ) -> Result<Self, OpSpecError> {
+        if inputs.is_empty() {
+            return Err(OpSpecError::EmptyAudioInputs);
+        }
+        if inputs.len() > Self::MAX_INPUTS {
+            return Err(OpSpecError::TooManyAudioInputs {
+                count: inputs.len(),
+                max: Self::MAX_INPUTS,
+            });
+        }
+        if !gain_db.is_finite() || !(Self::MIN_GAIN_DB..=Self::MAX_GAIN_DB).contains(&gain_db) {
+            return Err(OpSpecError::InvalidGain { value: gain_db });
+        }
+        if let Some(hz) = high_pass_hz
+            && !(Self::MIN_FILTER_HZ..=Self::MAX_FILTER_HZ).contains(&hz)
+        {
+            return Err(OpSpecError::InvalidHighPass { value: hz });
+        }
+        if let Some(hz) = low_pass_hz
+            && !(Self::MIN_FILTER_HZ..=Self::MAX_FILTER_HZ).contains(&hz)
+        {
+            return Err(OpSpecError::InvalidLowPass { value: hz });
+        }
+        if let (Some(high), Some(low)) = (high_pass_hz, low_pass_hz)
+            && low <= high
+        {
+            return Err(OpSpecError::LowPassBelowHighPass { high, low });
+        }
+        if let Some(ceiling) = limiter_true_peak_db
+            && (!ceiling.is_finite()
+                || !(Self::MIN_LIMITER_DB..=Self::MAX_LIMITER_DB).contains(&ceiling))
+        {
+            return Err(OpSpecError::InvalidLimiter { value: ceiling });
+        }
+        let inputs = sources(inputs);
+        reject_cuts("audio", &inputs)?;
+        Ok(Self {
+            inputs,
+            gain_db,
+            fade_in,
+            fade_out,
+            high_pass_hz,
+            low_pass_hz,
+            limiter_true_peak_db,
+        })
+    }
+
+    pub fn inputs(&self) -> &[InputSource] {
+        &self.inputs
+    }
+
+    pub fn gain_db(&self) -> f64 {
+        self.gain_db
+    }
+
+    pub fn fade_in(&self) -> Ticks {
+        self.fade_in
+    }
+
+    pub fn fade_out(&self) -> Ticks {
+        self.fade_out
+    }
+
+    pub fn high_pass_hz(&self) -> Option<u32> {
+        self.high_pass_hz
+    }
+
+    pub fn low_pass_hz(&self) -> Option<u32> {
+        self.low_pass_hz
+    }
+
+    pub fn limiter_true_peak_db(&self) -> Option<f64> {
+        self.limiter_true_peak_db
     }
 }
 
@@ -1586,6 +1704,7 @@ pub enum OpSpec {
     Loudness(LoudnessSpec),
     Subtitle(SubtitleSpec),
     Grade(GradeSpec),
+    Audio(AudioSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1605,6 +1724,7 @@ pub enum OpKind {
     Loudness,
     Subtitle,
     Grade,
+    Audio,
 }
 
 impl std::fmt::Display for OpKind {
@@ -1625,6 +1745,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Loudness => "loudness",
             OpKind::Subtitle => "subtitle",
             OpKind::Grade => "grade",
+            OpKind::Audio => "audio",
         };
         formatter.write_str(name)
     }
@@ -1659,7 +1780,8 @@ impl OpKind {
             | OpKind::Ladder
             | OpKind::Loudness
             | OpKind::Subtitle
-            | OpKind::Grade => Ok(()),
+            | OpKind::Grade
+            | OpKind::Audio => Ok(()),
         }
     }
 }
@@ -1680,6 +1802,7 @@ impl OpSpec {
             OpSpec::Loudness(_) => OpKind::Loudness,
             OpSpec::Subtitle(_) => OpKind::Subtitle,
             OpSpec::Grade(_) => OpKind::Grade,
+            OpSpec::Audio(_) => OpKind::Audio,
         }
     }
 
@@ -1714,6 +1837,7 @@ impl OpSpec {
                 }
                 inputs
             }
+            OpSpec::Audio(audio) => audio.inputs().iter().collect(),
         }
     }
 
@@ -2103,6 +2227,29 @@ impl RenditionResult {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct AudioResult {
+    output: MediaRef,
+    duration_seconds: f64,
+}
+
+impl AudioResult {
+    pub fn new(output: MediaRef, duration_seconds: f64) -> Result<Self, OpResultError> {
+        Ok(Self {
+            output,
+            duration_seconds: parse_duration(duration_seconds)?,
+        })
+    }
+
+    pub fn output(&self) -> &MediaRef {
+        &self.output
+    }
+
+    pub fn duration_seconds(&self) -> f64 {
+        self.duration_seconds
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct GradeResult {
     output: MediaRef,
     scope: Option<MediaRef>,
@@ -2230,6 +2377,7 @@ pub enum OpResult {
     Loudness(LoudnessResult),
     Subtitle(SubtitleResult),
     Grade(GradeResult),
+    Audio(AudioResult),
 }
 
 impl OpResult {
@@ -2247,6 +2395,7 @@ impl OpResult {
             OpResult::Loudness(result) => result.output(),
             OpResult::Subtitle(result) => Some(result.output()),
             OpResult::Grade(result) => Some(result.output()),
+            OpResult::Audio(result) => Some(result.output()),
             OpResult::Probe(_) | OpResult::Batch(_) | OpResult::Graph(_) => None,
         }
     }

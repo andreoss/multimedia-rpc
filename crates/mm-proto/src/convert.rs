@@ -1,16 +1,16 @@
 use crate::v1;
 use mm_domain::{
-    AudioStreamInfo, BatchResult, BatchSpec, CaptionFormat, ConcatSpec, GradeAdjustments,
-    GradeResult, GradeScope, GradeSpec, GraphNode, GraphResult, GraphSpec, ImageFormat, ImageOp,
-    ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder, InputOrderError,
-    InputSource, JobFailure, JobFailureError, JobRecord, JobState, LadderResult, LadderSpec,
-    LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, MediaSource, NodeId,
-    NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
+    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CaptionFormat, ConcatSpec,
+    GradeAdjustments, GradeResult, GradeScope, GradeSpec, GraphNode, GraphResult, GraphSpec,
+    ImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputFailureError, InputOrder,
+    InputOrderError, InputSource, JobFailure, JobFailureError, JobRecord, JobState, LadderResult,
+    LadderSpec, LoudnessResult, LoudnessSpec, LoudnessTarget, MediaRef, MediaRefError, MediaSource,
+    NodeId, NodeOutcome, NodeRef, OpResult, OpResultError, OpSpec, OpSpecError, OutputProfile,
     OutputProfileError, OutputRange, PackageResult, PackageSpec, ParameterDeclaration,
     ParameterName, ParameterType, ParameterValue, ProbeResult, ProbeSpec, QueueUrl,
     RenditionResult, ResizeMode, RungProgress, RungState, SourceError, StepOutcome, StepState,
     SubtitleMode, SubtitleResult, SubtitleSpec, Template, TemplateError, TextIdError,
-    ThumbnailResult, ThumbnailSpec, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
+    ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput, TranscodeResult, TranscodeSpec, TrimRange,
     TrimSpec, VideoStreamInfo, failure_code, verdict_code,
 };
 
@@ -415,6 +415,40 @@ impl From<&LoudnessSpec> for v1::LoudnessSpec {
     }
 }
 
+impl TryFrom<v1::AudioSpec> for AudioSpec {
+    type Error = OpSpecError;
+
+    fn try_from(value: v1::AudioSpec) -> Result<Self, Self::Error> {
+        AudioSpec::new(
+            value
+                .inputs
+                .into_iter()
+                .map(InputSource::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            value.gain_db,
+            Ticks::new(value.fade_in_ticks),
+            Ticks::new(value.fade_out_ticks),
+            value.high_pass_hz,
+            value.low_pass_hz,
+            value.limiter_true_peak_db,
+        )
+    }
+}
+
+impl From<&AudioSpec> for v1::AudioSpec {
+    fn from(value: &AudioSpec) -> Self {
+        Self {
+            inputs: value.inputs().iter().map(v1::InputSource::from).collect(),
+            gain_db: value.gain_db(),
+            fade_in_ticks: value.fade_in().get(),
+            fade_out_ticks: value.fade_out().get(),
+            high_pass_hz: value.high_pass_hz(),
+            low_pass_hz: value.low_pass_hz(),
+            limiter_true_peak_db: value.limiter_true_peak_db(),
+        }
+    }
+}
+
 impl TryFrom<v1::GradeSpec> for GradeSpec {
     type Error = OpSpecError;
 
@@ -558,6 +592,7 @@ impl TryFrom<v1::OpSpec> for OpSpec {
                 Ok(OpSpec::Subtitle(SubtitleSpec::try_from(subtitle)?))
             }
             v1::op_spec::Op::Grade(grade) => Ok(OpSpec::Grade(GradeSpec::try_from(grade)?)),
+            v1::op_spec::Op::Audio(audio) => Ok(OpSpec::Audio(AudioSpec::try_from(audio)?)),
         }
     }
 }
@@ -610,6 +645,7 @@ impl From<&OpSpec> for v1::OpSpec {
                 v1::op_spec::Op::Subtitle(v1::SubtitleSpec::from(subtitle))
             }
             OpSpec::Grade(grade) => v1::op_spec::Op::Grade(v1::GradeSpec::from(grade)),
+            OpSpec::Audio(audio) => v1::op_spec::Op::Audio(v1::AudioSpec::from(audio)),
         };
         v1::OpSpec { op: Some(op) }
     }
@@ -635,6 +671,23 @@ impl From<&LoudnessResult> for v1::LoudnessResult {
             integrated_lufs: value.integrated_lufs(),
             true_peak_db: value.true_peak_db(),
             loudness_range_lu: value.loudness_range_lu(),
+        }
+    }
+}
+
+impl TryFrom<v1::AudioResult> for AudioResult {
+    type Error = OpResultError;
+
+    fn try_from(value: v1::AudioResult) -> Result<Self, Self::Error> {
+        AudioResult::new(required_ref(value.output)?, value.duration_seconds)
+    }
+}
+
+impl From<&AudioResult> for v1::AudioResult {
+    fn from(value: &AudioResult) -> Self {
+        Self {
+            output: Some(v1::MediaRef::from(value.output())),
+            duration_seconds: value.duration_seconds(),
         }
     }
 }
@@ -749,6 +802,7 @@ impl TryFrom<v1::OpResult> for OpResult {
                 Ok(OpResult::Subtitle(SubtitleResult::try_from(subtitle)?))
             }
             v1::op_result::Op::Grade(grade) => Ok(OpResult::Grade(GradeResult::try_from(grade)?)),
+            v1::op_result::Op::Audio(audio) => Ok(OpResult::Audio(AudioResult::try_from(audio)?)),
         }
     }
 }
@@ -1253,6 +1307,7 @@ impl From<&OpResult> for v1::OpResult {
                 v1::op_result::Op::Subtitle(v1::SubtitleResult::from(subtitle))
             }
             OpResult::Grade(grade) => v1::op_result::Op::Grade(v1::GradeResult::from(grade)),
+            OpResult::Audio(audio) => v1::op_result::Op::Audio(v1::AudioResult::from(audio)),
         };
         v1::OpResult { op: Some(op) }
     }

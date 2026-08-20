@@ -9,25 +9,26 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use mm_domain::{
-    AudioStreamInfo, BatchResult, BatchSpec, CaptionDocument, ConcatSpec, GradeResult, GradeSpec,
-    GraphResult, GraphSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec,
-    InputFailure, InputMetadata, InputReport, InputSource, JobFailure, JobId, JobRecord,
-    JobRepository, JobState, JobStoreError, LadderResult, LadderSpec, LoudnessResult, LoudnessSpec,
-    MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore,
-    ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile, PackageResult,
-    PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
+    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CaptionDocument, ConcatSpec,
+    GradeResult, GradeSpec, GraphResult, GraphSpec, ImageFormat as DomainImageFormat, ImageOp,
+    ImageResult, ImageSpec, InputFailure, InputMetadata, InputReport, InputSource, JobFailure,
+    JobId, JobRecord, JobRepository, JobState, JobStoreError, LadderResult, LadderSpec,
+    LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody,
+    ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile,
+    PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
     ResizeMode as DomainResizeMode, RungState, StepOutcome, StepState, SubtitleMode,
     SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks, TimedOutput,
     TranscodeResult, TranscodeSpec, TrimSpec, Verdict, VideoStreamInfo, WorkerId, collect_body,
     resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
-    GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo, RunLimits,
-    RunOutcome, ScaleMode, SourceCut, StillInfo, ThumbnailTarget, Timestamp, TranscodeTarget,
-    TrimStrategy, TrimTarget, build_concat_args, build_grade_args, build_loudness_measure_args,
-    build_loudness_normalize_args, build_subtitle_burn_args, build_subtitle_mux_args,
-    build_subtitle_strip_args, build_thumbnail_args, build_transcode_args, build_trim_args,
-    parse_cube_table, parse_loudnorm_report,
+    AudioTarget, GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo,
+    RunLimits, RunOutcome, ScaleMode, SourceCut, StillInfo, ThumbnailTarget, Timestamp,
+    TranscodeTarget, TrimStrategy, TrimTarget, build_audio_args, build_concat_args,
+    build_grade_args, build_loudness_measure_args, build_loudness_normalize_args,
+    build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
+    build_thumbnail_args, build_transcode_args, build_trim_args, parse_cube_table,
+    parse_loudnorm_report,
 };
 use mm_gst::Written as GstWritten;
 use mm_gst::{
@@ -72,8 +73,9 @@ pub mod codes {
     pub const LOUDNESS_FAILED: &str = "loudness_failed";
     pub const CAPTION_INVALID: &str = "caption_invalid";
     pub const GRADE_INVALID: &str = "grade_invalid";
+    pub const AUDIO_INVALID: &str = "audio_invalid";
 
-    pub const ALL: [&str; 18] = [
+    pub const ALL: [&str; 19] = [
         UNSUPPORTED_OPERATION,
         INPUT_UNRESOLVABLE,
         PROBE_FAILED,
@@ -92,6 +94,7 @@ pub mod codes {
         LOUDNESS_FAILED,
         CAPTION_INVALID,
         GRADE_INVALID,
+        AUDIO_INVALID,
     ];
 }
 
@@ -705,6 +708,7 @@ async fn run_leaf(
             subtitle_pipeline(ctx, job, spec, scope, deadline_at, signal).await?
         }
         OpSpec::Grade(spec) => grade_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
+        OpSpec::Audio(spec) => audio_pipeline(ctx, job, spec, scope, deadline_at, signal).await?,
     };
     scope.done.fetch_add(1, Ordering::Relaxed);
     Ok(result)
@@ -803,6 +807,7 @@ fn collect_outputs(result: &OpResult, landed: &mut Vec<ObjectRef>) {
             }
         }
         OpResult::Subtitle(subtitle) => push(subtitle.output()),
+        OpResult::Audio(audio) => push(audio.output()),
         OpResult::Grade(grade) => {
             push(grade.output());
             if let Some(scope) = grade.scope() {
@@ -865,6 +870,7 @@ fn result_output(result: &OpResult, index: usize) -> Option<&MediaRef> {
         OpResult::Ladder(ladder) => ladder.renditions().get(index).map(RenditionResult::media),
         OpResult::Loudness(loudness) => (index == 0).then(|| loudness.output()).flatten(),
         OpResult::Subtitle(subtitle) => (index == 0).then_some(subtitle.output()),
+        OpResult::Audio(audio) => (index == 0).then_some(audio.output()),
         OpResult::Grade(grade) => {
             if index == 0 {
                 Some(grade.output())
@@ -2077,6 +2083,82 @@ async fn transcode_pipeline(
     };
     let _ = tokio::fs::remove_file(&output_path).await;
     outcome
+}
+
+async fn audio_pipeline(
+    ctx: &Arc<WorkerConfig>,
+    job: &JobRecord,
+    spec: &AudioSpec,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<OpResult, Finish> {
+    let mut urls = Vec::with_capacity(spec.inputs().len());
+    let mut infos = Vec::with_capacity(spec.inputs().len());
+    let mut reports = Vec::with_capacity(spec.inputs().len());
+    for (index, input) in spec.inputs().iter().enumerate() {
+        check(signal)?;
+        let url = resolve_input(ctx, input, scope, deadline_at, index).await?;
+        check(signal)?;
+        let info = probe_source(ctx, input, &url, index).await?;
+        reports.push(input_report(&info));
+        urls.push(url);
+        infos.push(info);
+    }
+    if infos.iter().all(|info| info.audio.is_empty()) {
+        return Err(Finish::Failed(
+            JobFailure::new(codes::VALIDATION_BLOCKED, "the inputs carry no audio track")
+                .expect("worker failure codes are valid"),
+        ));
+    }
+    gate_verdicts(job.id, OpKind::Audio, &reports)?;
+    let estimate = estimate_bytes(ctx, spec.inputs(), &infos).await;
+    let _reservation = admit_or_release(ctx, job.id, estimate).await?;
+    let duration = infos
+        .iter()
+        .map(|info| info.duration)
+        .max()
+        .unwrap_or_default();
+    let duration_micros = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+    let target = AudioTarget {
+        gain_db: spec.gain_db(),
+        fade_in_micros: spec.fade_in().micros(),
+        fade_out_micros: spec.fade_out().micros(),
+        duration_micros,
+        high_pass_hz: spec.high_pass_hz(),
+        low_pass_hz: spec.low_pass_hz(),
+        limiter_true_peak_db: spec.limiter_true_peak_db(),
+    };
+    let output_path = ctx.staging_dir.join(format!("{}.wav", job.id));
+    let args = build_audio_args(&urls, &target, &output_path.to_string_lossy())
+        .map_err(|error| failed(codes::AUDIO_INVALID, error))?;
+    let limits = remaining_limits(ctx, duration + Duration::from_secs(30), deadline_at)?;
+    check(signal)?;
+    supervise(
+        ctx,
+        job.id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
+    check(signal)?;
+    let output = probe_input(ctx, &output_path.to_string_lossy(), 0).await?;
+    let output_object = output_object(ctx, job.id, &scope.prefix)
+        .map_err(|error| failed(codes::OUTPUT_INVALID, error))?;
+    upload_object(ctx, &output_object, &output_path).await?;
+    let _ = tokio::fs::remove_file(&output_path).await;
+    if let Err(finish) = check(signal) {
+        let _ = ctx.store.delete(&output_object).await;
+        return Err(finish);
+    }
+    let seconds = output.duration.as_secs_f64();
+    Ok(OpResult::Audio(
+        AudioResult::new(MediaRef::Object(output_object), seconds)
+            .map_err(|error| failed(codes::OUTPUT_INVALID, error))?,
+    ))
 }
 
 async fn grade_pipeline(

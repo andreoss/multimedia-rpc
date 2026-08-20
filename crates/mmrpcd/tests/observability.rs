@@ -361,7 +361,7 @@ async fn one_job_is_traced_across_the_server_and_the_worker_and_its_series_are_s
 }
 
 #[tokio::test]
-async fn the_queue_depth_series_counts_the_jobs_waiting_for_a_worker() {
+async fn the_scaler_inputs_are_both_nonzero_under_a_synthetic_backlog() {
     let db = fresh_db().await;
     let _store = test_store().await;
     let daemon = spawn_combined(&db.url, 1);
@@ -393,6 +393,16 @@ async fn the_queue_depth_series_counts_the_jobs_waiting_for_a_worker() {
 
     let (pending, body) = wait_for_series(metrics, "mm_jobs_pending", true).await;
     assert!(pending >= 1, "the backlog did not show as pending: {body}");
+    let (claimed, body) = wait_for_series(metrics, "mm_claim_latency_seconds_count", true).await;
+    assert!(claimed >= 1, "claim lag was never recorded: {body}");
+    assert!(
+        body.contains(r#"mm_claim_latency_seconds_bucket{le="+Inf"} "#),
+        "the claim lag histogram has no series: {body}"
+    );
+    assert!(
+        body.contains("mm_jobs_pending ") && body.contains("mm_jobs_started_total "),
+        "a documented scaler input is missing from the scrape: {body}"
+    );
 
     drop(daemon);
     db.dispose().await;

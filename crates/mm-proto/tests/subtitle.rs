@@ -74,3 +74,52 @@ fn a_subtitle_result_round_trips_its_output() {
         OpResult::try_from(v1::OpResult::from(&OpResult::Subtitle(result.clone()))).unwrap();
     assert_eq!(decoded, OpResult::Subtitle(result));
 }
+
+#[test]
+fn every_caption_format_round_trips() {
+    for (format, raw) in [
+        (CaptionFormat::Srt, v1::CaptionFormat::Srt as i32),
+        (CaptionFormat::WebVtt, v1::CaptionFormat::Webvtt as i32),
+        (CaptionFormat::Scc, v1::CaptionFormat::Scc as i32),
+        (CaptionFormat::Embedded, v1::CaptionFormat::Embedded as i32),
+    ] {
+        let spec =
+            SubtitleSpec::new(source(), Some(source()), Some(format), SubtitleMode::Mux).unwrap();
+        let wire = v1::OpSpec::from(&OpSpec::Subtitle(spec.clone()));
+        let v1::op_spec::Op::Subtitle(on_the_wire) = wire.op.clone().unwrap() else {
+            panic!("expected a subtitle spec");
+        };
+        assert_eq!(on_the_wire.format, raw);
+        let decoded = OpSpec::try_from(wire).unwrap();
+        assert_eq!(decoded, OpSpec::Subtitle(spec));
+    }
+}
+
+#[test]
+fn an_scc_document_reaches_the_wire_unchanged() {
+    let spec = SubtitleSpec::new(
+        source(),
+        Some(source()),
+        Some(CaptionFormat::Scc),
+        SubtitleMode::Burn,
+    )
+    .unwrap();
+    let decoded = OpSpec::try_from(v1::OpSpec::from(&OpSpec::Subtitle(spec.clone()))).unwrap();
+    assert_eq!(decoded, OpSpec::Subtitle(spec));
+}
+
+#[test]
+fn a_caption_format_off_the_contract_is_read_as_no_format() {
+    let spec = v1::OpSpec {
+        op: Some(v1::op_spec::Op::Subtitle(v1::SubtitleSpec {
+            input: Some(media()),
+            captions: Some(media()),
+            format: 42,
+            mode: v1::SubtitleMode::Burn as i32,
+        })),
+    };
+    assert!(matches!(
+        OpSpec::try_from(spec),
+        Err(OpSpecError::SubtitleFormatRequired)
+    ));
+}

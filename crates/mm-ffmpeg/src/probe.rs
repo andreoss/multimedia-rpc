@@ -76,6 +76,15 @@ impl Prober {
         Ok(parse_media_info(&text)?)
     }
 
+    pub async fn subtitle_streams(
+        &self,
+        input: &str,
+        limits: &ProbeLimits,
+    ) -> Result<Vec<crate::parse::SubtitleStream>, ProbeError> {
+        let text = self.capture(&stream_args(limits, input), limits).await?;
+        Ok(crate::parse::parse_subtitle_streams(&text)?)
+    }
+
     pub async fn still(&self, input: &str, limits: &ProbeLimits) -> Result<StillInfo, ProbeError> {
         let mut args = vec![
             "-v".to_string(),

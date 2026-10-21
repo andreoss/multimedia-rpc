@@ -6,17 +6,17 @@ use mm_domain::{
 const SCC: &str = "\
 Scenarist_SCC V1.0
 
-00:00:00:00\t9420 9420 9425 9425 4865 6c6c 6f20 776f 726c 6421
+00:00:00:00\t9420 9420 9425 9425 4865 6c6c 6f20 776f 726c 6421 942f 942f
 
-00:00:01:00\t9420 9420 922e 922e
+00:00:01:00\t9420 9420 942c 942c
 
-00:00:01:00\t9420 9420 9425 9425 5365 636f 6e64
+00:00:01:00\t9420 9420 9425 9425 5365 636f 6e64 942f 942f
 
-00:00:03:15\t9420 9420 922e 922e
+00:00:03:15\t9420 9420 942c 942c
 
-00:00:03:15\t9420 9420 9425 9425 4174 2073 6978 7479
+00:00:03:15\t9420 9420 9425 9425 4174 2073 6978 7479 942f 942f
 
-00:01:00:00\t9420 9420 922e 922e
+00:01:00:00\t9420 9420 942c 942c
 ";
 
 fn object() -> MediaRef {
@@ -104,7 +104,7 @@ fn an_scc_timecode_above_thirty_frames_is_refused_by_name() {
 
 #[test]
 fn an_scc_document_whose_last_cue_never_ends_is_refused_by_name() {
-    let text = "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 4865 6c6c 6f21\n";
+    let text = "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 4865 6c6c 6f21 942f 942f\n";
     assert!(matches!(
         CaptionDocument::parse(CaptionFormat::Scc, text),
         Err(CaptionError::UnterminatedCue { line: 3 })
@@ -113,7 +113,7 @@ fn an_scc_document_whose_last_cue_never_ends_is_refused_by_name() {
 
 #[test]
 fn an_scc_document_with_no_printable_text_is_refused_by_name() {
-    let text = "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 9425 922e 922e\n";
+    let text = "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 9425 942c 942c\n";
     assert!(matches!(
         CaptionDocument::parse(CaptionFormat::Scc, text),
         Err(CaptionError::EmptyDocument)
@@ -122,10 +122,22 @@ fn an_scc_document_with_no_printable_text_is_refused_by_name() {
 
 #[test]
 fn an_scc_control_code_carries_no_text() {
-    let text = "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 9420 9425 9425 4869\n\n00:00:01:00\t9420 922e 922e\n";
+    let text = "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 9420 9425 9425 4869 942f 942f\n\n00:00:01:00\t9420 942c 942c\n";
     let document = CaptionDocument::parse(CaptionFormat::Scc, text).unwrap();
     assert_eq!(document.cues().len(), 1);
     assert_eq!(document.cues()[0].text(), "Hi");
+}
+
+#[test]
+fn an_scc_document_renders_the_cues_it_read_as_webvtt() {
+    let document = CaptionDocument::parse(CaptionFormat::Scc, SCC).unwrap();
+    assert_eq!(
+        document.render_webvtt(),
+        "WEBVTT\n\n\
+         00:00:00.000 --> 00:00:01.001\nHello world!\n\n\
+         00:00:01.001 --> 00:00:03.504\nSecond\n\n\
+         00:00:03.504 --> 00:00:59.993\nAt sixty\n\n"
+    );
 }
 
 #[test]
@@ -153,6 +165,10 @@ fn every_caption_format_names_its_extension_and_parses_back() {
     );
     assert_eq!(CaptionFormat::Embedded.name(), "embedded");
     assert_eq!(CaptionFormat::Scc.name(), "scc");
+    assert_eq!(CaptionFormat::Srt.to_string(), "Srt");
+    assert_eq!(CaptionFormat::WebVtt.to_string(), "WebVtt");
+    assert_eq!(CaptionFormat::Scc.to_string(), "Scc");
+    assert_eq!(CaptionFormat::Embedded.to_string(), "Embedded");
 }
 
 #[test]

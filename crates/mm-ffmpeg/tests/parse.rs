@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use mm_ffmpeg::{
     MediaKind, ParseError, media_kind, parse_keyframe_times, parse_media_info, parse_still_info,
+    parse_subtitle_streams,
 };
 
 fn mp4_probe_json() -> String {
@@ -366,4 +367,19 @@ fn subtitle_streams_are_reported() {
     assert_eq!(info.subtitle.len(), 1);
     assert_eq!(info.subtitle[0].codec, "mov_text");
     assert_eq!(info.subtitle[0].language.as_deref(), Some("eng"));
+}
+
+#[test]
+fn a_subtitle_stream_report_needs_no_duration() {
+    let json = r#"{
+        "streams": [
+            {"codec_type": "subtitle", "codec_name": "eia_608"},
+            {"codec_type": "subtitle", "codec_name": "dvb_teletext", "tags": {"language": "swe"}}
+        ]
+    }"#;
+    let streams = parse_subtitle_streams(json).unwrap();
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams[0].codec, "eia_608");
+    assert_eq!(streams[1].codec, "dvb_teletext");
+    assert_eq!(streams[1].language.as_deref(), Some("swe"));
 }

@@ -95,3 +95,27 @@ pub fn build_subtitle_strip_args(input: &str, output: &str) -> Vec<String> {
     ]
     .to_vec()
 }
+
+pub fn build_caption_extract_args(input: &str, output: &str) -> Vec<String> {
+    [
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-txt_format",
+        "text",
+        "-txt_duration",
+        "2000",
+        "-i",
+        input,
+        "-map",
+        "0:s:0",
+        "-c:s",
+        "webvtt",
+        "-f",
+        "webvtt",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .chain(std::iter::once(output.to_string()))
+    .collect()
+}

@@ -247,6 +247,19 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, ParseError> {
     })
 }
 
+pub fn parse_subtitle_streams(json: &str) -> Result<Vec<SubtitleStream>, ParseError> {
+    let raw: RawProbe = serde_json::from_str(json)?;
+    Ok(raw
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("subtitle"))
+        .map(|stream| SubtitleStream {
+            codec: stream.codec_name.clone().unwrap_or_default(),
+            language: stream.tags.get("language").cloned(),
+        })
+        .collect())
+}
+
 pub fn parse_keyframe_times(text: &str) -> Vec<f64> {
     text.lines()
         .filter_map(|line| line.split(',').next())

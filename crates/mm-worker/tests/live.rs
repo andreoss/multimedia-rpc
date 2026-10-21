@@ -3443,6 +3443,352 @@ async fn measure_file(path: &Path) -> mm_ffmpeg::LoudnessMeasurement {
     parse_loudnorm_report(&stderr).expect("the meter reports")
 }
 
+fn embedded_captions(name: &str, seconds: u32) -> PathBuf {
+    let source = scratch_dir("subtitle").join(format!("{name}-source.mp4"));
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg(format!("testsrc2=duration={seconds}:size=320x180:rate=25"))
+        .args([
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        ])
+        .arg(&source)
+        .status()
+        .expect("ffmpeg must be runnable");
+    assert!(status.success(), "the embedded caption fixture failed");
+    let text = caption_file(
+        name,
+        "vtt",
+        "WEBVTT\n\n00:00:00.500 --> 00:00:02.500\nEMBEDDED CAPTION\n",
+    );
+    let output = scratch_dir("subtitle").join(format!("{name}-embedded.mp4"));
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-i"])
+        .arg(&source)
+        .args(["-i"])
+        .arg(&text)
+        .args([
+            "-map", "0:v", "-map", "1:s", "-c:v", "copy", "-c:s", "mov_text",
+        ])
+        .arg(&output)
+        .status()
+        .expect("ffmpeg must be runnable");
+    assert!(status.success(), "the embedded caption mux failed");
+    output
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burned_embedded_caption_changes_the_frame_at_a_cue() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-burn.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-burn.mp4").await;
+    let track = embedded_captions("subtitle-embedded-burn", 4);
+    let captions = upload_input(&store, &track, "inputs/subtitle-embedded.mp4").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::Embedded),
+        SubtitleMode::Burn,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(
+        &db,
+        store.clone(),
+        "worker-subtitle-embedded-burn",
+    ));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-embedded-burn.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let source_frame = extract_frame(&source, "subtitle-embedded-source.jpg");
+    let output_frame = extract_frame(&path, "subtitle-embedded-output.jpg");
+    assert_ne!(
+        std::fs::read(&source_frame).unwrap(),
+        std::fs::read(&output_frame).unwrap(),
+        "the embedded cue left the frame unchanged"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_muxed_embedded_caption_is_reported_by_the_probe() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-mux.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-mux.mp4").await;
+    let track = embedded_captions("subtitle-embedded-mux", 3);
+    let captions = upload_input(&store, &track, "inputs/subtitle-embedded-mux.mp4").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::Embedded),
+        SubtitleMode::Mux,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(
+        &db,
+        store.clone(),
+        "worker-subtitle-embedded-mux",
+    ));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-embedded-mux.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let info = Prober::default()
+        .probe(&path.to_string_lossy(), &ProbeLimits::default())
+        .await
+        .expect("the muxed output probes");
+    assert!(
+        !info.subtitle.is_empty(),
+        "the muxed output carries no subtitle stream"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_embedded_caption_input_carrying_no_track_is_refused_by_name() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-empty.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-empty.mp4").await;
+    let track = upload_input(&store, &source, "inputs/subtitle-no-track.mp4").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(track.into()),
+        Some(CaptionFormat::Embedded),
+        SubtitleMode::Mux,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-no-track"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.result);
+    let failure = record.failure.expect("a failure is recorded");
+    assert_eq!(failure.code(), codes::CAPTION_INVALID);
+    assert!(
+        failure.message().contains("subtitle-no-track.mp4"),
+        "the refusal does not name the input: {}",
+        failure.message()
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burned_scc_document_changes_the_frame_at_a_cue() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-scc.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-scc.mp4").await;
+    let document = caption_file(
+        "subtitle-scc",
+        "scc",
+        "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 9420 9425 9425 5343 4320 4341 5054 5552 4554 942f 942f\n\n00:00:02:00\t9420 942c 942c\n",
+    );
+    let captions = upload_input(&store, &document, "inputs/subtitle-scc.scc").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::Scc),
+        SubtitleMode::Burn,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-scc"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-scc.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let source_frame = extract_frame(&source, "subtitle-scc-source.jpg");
+    let output_frame = extract_frame(&path, "subtitle-scc-output.jpg");
+    assert_ne!(
+        std::fs::read(&source_frame).unwrap(),
+        std::fs::read(&output_frame).unwrap(),
+        "the scc cue left the frame unchanged"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_muxed_scc_document_is_reported_by_the_probe() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-scc-mux.mp4", 3, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-scc-mux.mp4").await;
+    let document = caption_file(
+        "subtitle-scc-mux",
+        "scc",
+        "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 9420 9425 9425 5343 4320 4341 5054 5552 4554 942f 942f\n\n00:00:02:00\t9420 942c 942c\n",
+    );
+    let captions = upload_input(&store, &document, "inputs/subtitle-scc-mux.scc").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::Scc),
+        SubtitleMode::Mux,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-scc-mux"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-scc-mux.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let info = Prober::default()
+        .probe(&path.to_string_lossy(), &ProbeLimits::default())
+        .await
+        .expect("the muxed output probes");
+    assert!(
+        !info.subtitle.is_empty(),
+        "the muxed output carries no subtitle stream"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burned_cea_608_source_changes_the_frame_at_a_cue() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-cea608.mp4", 4, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-cea608.mp4").await;
+    let document = caption_file(
+        "subtitle-cea608",
+        "scc",
+        "Scenarist_SCC V1.0\n\n00:00:00:00\t9420 9420 c8e5 ecec ef20 f7ef f2ec 64a1 942f 942f\n\n00:00:02:00\t942c 942c\n",
+    );
+    let captions = upload_input(&store, &document, "inputs/subtitle-cea608.scc").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::Embedded),
+        SubtitleMode::Burn,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-cea608"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Succeeded, "{:?}", record.failure);
+    let OpResult::Subtitle(result) = record.result.expect("result recorded") else {
+        panic!("expected a subtitle result");
+    };
+    let MediaRef::Object(output) = result.output() else {
+        panic!("expected an object output");
+    };
+    let path = scratch_dir("subtitle").join(format!("{}-cea608.mp4", job.id));
+    write_object(&store, output, &path).await;
+    let source_frame = extract_frame(&source, "subtitle-cea608-source.jpg");
+    let output_frame = extract_frame(&path, "subtitle-cea608-output.jpg");
+    assert_ne!(
+        std::fs::read(&source_frame).unwrap(),
+        std::fs::read(&output_frame).unwrap(),
+        "the cea-608 cue left the frame unchanged"
+    );
+    db.dispose().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_scc_document_that_is_not_one_is_refused_by_name() {
+    let _slot = mm_testkit::stack_slot();
+    let db = fresh_db().await;
+    let store = test_store().await;
+    let source = fixture("subtitle-bad-scc.mp4", 2, 24, "mp4");
+    let input = upload_input(&store, &source, "inputs/subtitle-bad-scc.mp4").await;
+    let document = caption_file("subtitle-bad-scc", "scc", "this is not an scc document\n");
+    let captions = upload_input(&store, &document, "inputs/subtitle-bad-scc.scc").await;
+    let repository = db.repository();
+    let spec = SubtitleSpec::new(
+        input,
+        Some(captions.into()),
+        Some(CaptionFormat::Scc),
+        SubtitleMode::Burn,
+    )
+    .unwrap();
+    let job = repository
+        .create(single_input_job(OpSpec::Subtitle(spec)))
+        .await
+        .unwrap();
+    let handle = start(base_config(&db, store.clone(), "worker-subtitle-bad-scc"));
+    let record = await_terminal(&repository, job.id, mm_testkit::budget::MERGE_TERMINAL).await;
+    handle.shutdown().await;
+
+    assert_eq!(record.state, JobState::Failed, "{:?}", record.result);
+    let failure = record.failure.expect("a failure is recorded");
+    assert_eq!(failure.code(), codes::CAPTION_INVALID);
+    assert!(
+        failure.message().contains("Scenarist_SCC"),
+        "the refusal does not name what it wanted: {}",
+        failure.message()
+    );
+    db.dispose().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_burned_subtitle_changes_the_frame_at_a_cue() {
     let _slot = mm_testkit::stack_slot();

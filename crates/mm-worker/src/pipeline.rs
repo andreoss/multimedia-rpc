@@ -10,24 +10,25 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use mm_domain::{
-    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, CachedTranscode,
-    CaptionDocument, ConcatSpec, Frame, GradeResult, GradeScope, GradeSpec, GraphResult, GraphSpec,
-    ImageFormat as DomainImageFormat, ImageOp, ImageResult, ImageSpec, InputFailure, InputMetadata,
-    InputReport, InputSource, JobFailure, JobId, JobRecord, JobRepository, JobState, JobStoreError,
-    LadderResult, LadderSpec, LoudnessResult, LoudnessSpec, MediaRef, MediaSource, NodeOutcome,
-    NodeRef, ObjectBody, ObjectRef, ObjectStore, ObjectStoreError, OpKind, OpResult, OpSpec,
-    OutputKey, OutputProfile, PackageResult, PackageSpec, ProbeResult, ProbeSpec, ProgressPercent,
-    RenditionResult, ResizeMode as DomainResizeMode, RungState, ScopeData, ScopeMode, ScopeOutput,
-    StepOutcome, StepState, SubtitleMode, SubtitleResult, SubtitleSpec, ThumbnailResult,
-    ThumbnailSpec, Ticks, TimedOutput, TitleResult, TitleSpec, TranscodeResult, TranscodeSpec,
-    TrimSpec, Verdict, VideoEncoder, VideoStreamInfo, WorkerId, collect_body, measure,
-    resolve_media_ref, validate_inputs, validate_ladder_rungs, verdict_code,
+    AudioResult, AudioSpec, AudioStreamInfo, BatchResult, BatchSpec, BroadcastCodec,
+    CachedTranscode, CaptionDocument, CaptionFormat, ConcatSpec, Frame, GradeResult, GradeScope,
+    GradeSpec, GraphResult, GraphSpec, ImageFormat as DomainImageFormat, ImageOp, ImageResult,
+    ImageSpec, InputFailure, InputMetadata, InputReport, InputSource, JobFailure, JobId, JobRecord,
+    JobRepository, JobState, JobStoreError, LadderResult, LadderSpec, LoudnessResult, LoudnessSpec,
+    MediaRef, MediaSource, NodeOutcome, NodeRef, ObjectBody, ObjectRef, ObjectStore,
+    ObjectStoreError, OpKind, OpResult, OpSpec, OutputKey, OutputProfile, PackageResult,
+    PackageSpec, ProbeResult, ProbeSpec, ProgressPercent, RenditionResult,
+    ResizeMode as DomainResizeMode, RungState, ScopeData, ScopeMode, ScopeOutput, StepOutcome,
+    StepState, SubtitleMode, SubtitleResult, SubtitleSpec, ThumbnailResult, ThumbnailSpec, Ticks,
+    TimedOutput, TitleResult, TitleSpec, TranscodeResult, TranscodeSpec, TrimSpec, Verdict,
+    VideoEncoder, VideoStreamInfo, WorkerId, collect_body, measure, resolve_media_ref,
+    validate_inputs, validate_ladder_rungs, verdict_code,
 };
 use mm_ffmpeg::{
     AudioTarget, GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo,
     RunLimits, RunOutcome, ScaleMode, ScopeKind, SourceCut, StillInfo, ThumbnailTarget, Timestamp,
-    TranscodeTarget, TrimStrategy, TrimTarget, build_audio_args, build_concat_args,
-    build_frame_sample_args, build_grade_args, build_loudness_measure_args,
+    TranscodeTarget, TrimStrategy, TrimTarget, build_audio_args, build_caption_extract_args,
+    build_concat_args, build_frame_sample_args, build_grade_args, build_loudness_measure_args,
     build_loudness_normalize_args, build_scope_args, build_subtitle_burn_args,
     build_subtitle_mux_args, build_subtitle_strip_args, build_thumbnail_args, build_transcode_args,
     build_trim_args, parse_cube_table, parse_loudnorm_report,
@@ -2626,13 +2627,16 @@ async fn subtitle_pipeline(
             let format = spec.format().ok_or_else(|| {
                 failed(codes::CAPTION_INVALID, "the subtitle spec names no format")
             })?;
-            let text = object_text(ctx, captions, "captions", codes::CAPTION_INVALID).await?;
-            CaptionDocument::parse(format, &text)
+            let text = match format {
+                CaptionFormat::Embedded => {
+                    extract_captions(ctx, job.id, captions, scope, deadline_at, signal).await?
+                }
+                _ => object_text(ctx, captions, "captions", codes::CAPTION_INVALID).await?,
+            };
+            let document = CaptionDocument::parse(format, &text)
                 .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
-            let path = ctx
-                .staging_dir
-                .join(format!("{}.{}", job.id, format.extension()));
-            tokio::fs::write(&path, text.as_bytes())
+            let path = ctx.staging_dir.join(format!("{}.vtt", job.id));
+            tokio::fs::write(&path, document.render_webvtt().as_bytes())
                 .await
                 .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
             Some(path)
@@ -2714,6 +2718,70 @@ async fn subtitle_pipeline(
     Ok(OpResult::Subtitle(SubtitleResult::new(MediaRef::Object(
         object,
     ))))
+}
+
+async fn extract_captions(
+    ctx: &Arc<WorkerConfig>,
+    id: JobId,
+    source: &InputSource,
+    scope: &Scope,
+    deadline_at: SystemTime,
+    signal: &mut watch::Receiver<Signal>,
+) -> Result<String, Finish> {
+    let media = source.media().map(|source| source.media()).ok_or_else(|| {
+        failed(
+            codes::CAPTION_INVALID,
+            "an embedded caption track must name a media object",
+        )
+    })?;
+    let MediaRef::Object(object) = media else {
+        return Err(failed(
+            codes::CAPTION_INVALID,
+            "an embedded caption track must name an object, not a URL",
+        ));
+    };
+    let url = resolve_input(ctx, source, scope, deadline_at, 0).await?;
+    let streams = ctx
+        .prober
+        .subtitle_streams(&url, &ctx.probe_limits)
+        .await
+        .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+    let stream = streams.first().ok_or_else(|| {
+        failed(
+            codes::CAPTION_INVALID,
+            format!("captions input {} carries no caption track", object.key()),
+        )
+    })?;
+    if BroadcastCodec::parse(&stream.codec).is_none() {
+        return Err(failed(
+            codes::CAPTION_INVALID,
+            format!(
+                "captions input {} carries {codec}, which has no text behind it",
+                object.key(),
+                codec = stream.codec
+            ),
+        ));
+    }
+    let path = ctx.staging_dir.join(format!("{}-embedded.vtt", id));
+    let args = build_caption_extract_args(&url, &path.to_string_lossy());
+    let limits = remaining_limits(ctx, Duration::from_secs(120), deadline_at)?;
+    check(signal)?;
+    supervise(
+        ctx,
+        id,
+        &args,
+        &limits,
+        signal,
+        scope.done.load(Ordering::Relaxed),
+        scope.total,
+    )
+    .await?;
+    check(signal)?;
+    let text = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+    let _ = tokio::fs::remove_file(&path).await;
+    Ok(text)
 }
 
 async fn object_text(

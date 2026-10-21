@@ -47,6 +47,7 @@
           pkgs.buf
           pkgs.cargo-llvm-cov
           pkgs.sqlx-cli
+          pkgs.ccextractor
         ];
       };
     };

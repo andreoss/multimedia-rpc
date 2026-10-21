@@ -47,6 +47,7 @@ pub struct AudioStream {
 pub struct SubtitleStream {
     pub codec: String,
     pub language: Option<String>,
+    pub codec_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +234,7 @@ pub fn parse_media_info(json: &str) -> Result<MediaInfo, ParseError> {
         .map(|stream| SubtitleStream {
             codec: stream.codec_name.clone().unwrap_or_default(),
             language: stream.tags.get("language").cloned(),
+            codec_tag: stream.codec_tag_string.clone(),
         })
         .collect();
     Ok(MediaInfo {
@@ -256,6 +258,7 @@ pub fn parse_subtitle_streams(json: &str) -> Result<Vec<SubtitleStream>, ParseEr
         .map(|stream| SubtitleStream {
             codec: stream.codec_name.clone().unwrap_or_default(),
             language: stream.tags.get("language").cloned(),
+            codec_tag: stream.codec_tag_string.clone(),
         })
         .collect())
 }

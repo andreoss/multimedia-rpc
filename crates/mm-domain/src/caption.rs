@@ -61,6 +61,7 @@ pub enum BroadcastCodec {
     SubRip,
     Ass,
     WebVtt,
+    Cea708,
 }
 
 impl BroadcastCodec {
@@ -74,6 +75,7 @@ impl BroadcastCodec {
             Self::SubRip => "subrip",
             Self::Ass => "ass",
             Self::WebVtt => "webvtt",
+            Self::Cea708 => "cea_708",
         }
     }
 
@@ -87,6 +89,7 @@ impl BroadcastCodec {
             "subrip" => Some(Self::SubRip),
             "ass" => Some(Self::Ass),
             "webvtt" => Some(Self::WebVtt),
+            "c708" | "cea_708" | "cea-708" => Some(Self::Cea708),
             _ => None,
         }
     }

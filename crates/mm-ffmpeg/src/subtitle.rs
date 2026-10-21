@@ -119,3 +119,10 @@ pub fn build_caption_extract_args(input: &str, output: &str) -> Vec<String> {
     .chain(std::iter::once(output.to_string()))
     .collect()
 }
+
+pub fn build_ccextractor_extract_args(input: &str, output: &str, service: u32) -> Vec<String> {
+    ["-svc", &service.to_string(), "-o", output, input]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}

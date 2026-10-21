@@ -28,10 +28,11 @@ use mm_ffmpeg::{
     AudioTarget, GradeTarget, ImageFormat, LoudnessTarget as ToolLoudnessTarget, MediaInfo,
     RunLimits, RunOutcome, ScaleMode, ScopeKind, SourceCut, StillInfo, ThumbnailTarget, Timestamp,
     TranscodeTarget, TrimStrategy, TrimTarget, build_audio_args, build_caption_extract_args,
-    build_concat_args, build_frame_sample_args, build_grade_args, build_loudness_measure_args,
-    build_loudness_normalize_args, build_scope_args, build_subtitle_burn_args,
-    build_subtitle_mux_args, build_subtitle_strip_args, build_thumbnail_args, build_transcode_args,
-    build_trim_args, parse_cube_table, parse_loudnorm_report,
+    build_ccextractor_extract_args, build_concat_args, build_frame_sample_args, build_grade_args,
+    build_loudness_measure_args, build_loudness_normalize_args, build_scope_args,
+    build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
+    build_thumbnail_args, build_transcode_args, build_trim_args, parse_cube_table,
+    parse_loudnorm_report,
 };
 use mm_gst::Written as GstWritten;
 use mm_gst::{
@@ -2752,36 +2753,60 @@ async fn extract_captions(
             format!("captions input {} carries no caption track", object.key()),
         )
     })?;
-    if BroadcastCodec::parse(&stream.codec).is_none() {
-        return Err(failed(
-            codes::CAPTION_INVALID,
-            format!(
-                "captions input {} carries {codec}, which has no text behind it",
-                object.key(),
-                codec = stream.codec
-            ),
-        ));
+    let is_cea708 = stream.codec_tag.as_deref() == Some("c708");
+    if is_cea708 {
+        let path = ctx.staging_dir.join(format!("{}-embedded.srt", id));
+        let args = build_ccextractor_extract_args(&url, &path.to_string_lossy(), 1);
+        let limits = remaining_limits(ctx, Duration::from_secs(120), deadline_at)?;
+        check(signal)?;
+        supervise(
+            ctx,
+            id,
+            &args,
+            &limits,
+            signal,
+            scope.done.load(Ordering::Relaxed),
+            scope.total,
+        )
+        .await?;
+        check(signal)?;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+        let _ = tokio::fs::remove_file(&path).await;
+        Ok(text)
+    } else {
+        if BroadcastCodec::parse(&stream.codec).is_none() {
+            return Err(failed(
+                codes::CAPTION_INVALID,
+                format!(
+                    "captions input {} carries {codec}, which has no text behind it",
+                    object.key(),
+                    codec = stream.codec
+                ),
+            ));
+        }
+        let path = ctx.staging_dir.join(format!("{}-embedded.vtt", id));
+        let args = build_caption_extract_args(&url, &path.to_string_lossy());
+        let limits = remaining_limits(ctx, Duration::from_secs(120), deadline_at)?;
+        check(signal)?;
+        supervise(
+            ctx,
+            id,
+            &args,
+            &limits,
+            signal,
+            scope.done.load(Ordering::Relaxed),
+            scope.total,
+        )
+        .await?;
+        check(signal)?;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
+        let _ = tokio::fs::remove_file(&path).await;
+        Ok(text)
     }
-    let path = ctx.staging_dir.join(format!("{}-embedded.vtt", id));
-    let args = build_caption_extract_args(&url, &path.to_string_lossy());
-    let limits = remaining_limits(ctx, Duration::from_secs(120), deadline_at)?;
-    check(signal)?;
-    supervise(
-        ctx,
-        id,
-        &args,
-        &limits,
-        signal,
-        scope.done.load(Ordering::Relaxed),
-        scope.total,
-    )
-    .await?;
-    check(signal)?;
-    let text = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|error| failed(codes::CAPTION_INVALID, error))?;
-    let _ = tokio::fs::remove_file(&path).await;
-    Ok(text)
 }
 
 async fn object_text(

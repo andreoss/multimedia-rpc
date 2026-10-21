@@ -33,8 +33,8 @@ pub use progress::{ProgressParser, ProgressUpdate};
 pub use runner::{CancelHandle, MergeRun, RunError, RunLimits, RunOutcome, Runner, parse_encoders};
 pub use scope::{ScopeKind, build_frame_sample_args, build_scope_args};
 pub use subtitle::{
-    SubtitleError, build_caption_extract_args, build_subtitle_burn_args, build_subtitle_mux_args,
-    build_subtitle_strip_args,
+    SubtitleError, build_caption_extract_args, build_ccextractor_extract_args,
+    build_subtitle_burn_args, build_subtitle_mux_args, build_subtitle_strip_args,
 };
 pub use thumbnail::{IMAGE_QUALITY, ImageFormat, ThumbnailTarget, build_thumbnail_args};
 pub use timestamp::Timestamp;
